@@ -2,7 +2,7 @@
 
 use egui::{Color32, Id, Sense, Stroke, Ui, pos2, vec2};
 
-use crate::overlays::providers::{AccountAction, AccountsView, accounts_section};
+use crate::overlays::providers::{AccountAction, AccountsView, accounts_section, fal_key_section};
 use crate::shell::{WEB_APP_URL, group_thousands};
 use crate::theme;
 use crate::ui::icons::Icon;
@@ -141,6 +141,12 @@ pub fn settings_dialog(ctx: &egui::Context, enter_to_generate: &mut bool, userna
     ui.add_space(18.0);
     if let Some(lines) = local {
       local_section(ui, lines, data_root);
+      ui.add_space(18.0);
+      widgets::hud(ui, "Lip sync \u{b7} fal", theme::FAINT);
+      ui.add_space(6.0);
+      if let Some(account) = fal_key_section(ui, accounts, fal_key) {
+        action = Some(SettingsAction::Account(account));
+      }
     } else {
       widgets::hud(ui, "Account", theme::FAINT);
       ui.add_space(6.0);

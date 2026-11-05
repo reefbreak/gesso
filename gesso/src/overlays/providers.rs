@@ -103,6 +103,13 @@ pub fn accounts_section(ui: &mut Ui, view: &AccountsView, fal_key: &mut String) 
     action = Some(if view.midjourney.is_some() { AccountAction::DisconnectMidjourney } else { AccountAction::ConnectMidjourney });
   }
   ui.add_space(10.0);
+  fal_key_section(ui, view, fal_key).or(action)
+}
+
+/// The fal API key on its own: all local mode needs of the provider accounts (lip sync runs on
+/// fal).
+pub fn fal_key_section(ui: &mut Ui, view: &AccountsView, fal_key: &mut String) -> Option<AccountAction> {
+  let mut action = None;
   match &view.fal_key_hint {
     Some(hint) => {
       if account_row(ui, "FAL API key", hint, |ui| widgets::button(ui, None, "Remove", widgets::Kind::Danger, 0.0, theme::CONTROL_H).clicked()) {
