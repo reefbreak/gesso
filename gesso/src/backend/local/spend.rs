@@ -88,6 +88,19 @@ pub struct SpendSummary {
   pub last: Option<(String, f64)>,
 }
 
+/// What one model (or `jev`) has cost on one account.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemSpend {
+  pub account: Account,
+  /// The upstream model id.
+  pub item: String,
+  /// Billed calls, all time.
+  pub calls: u32,
+  pub today: f64,
+  pub month: f64,
+  pub all_time: f64,
+}
+
 #[derive(Clone)]
 pub struct SpendLedger {
   path: Arc<PathBuf>,
@@ -119,6 +132,12 @@ impl SpendLedger {
   pub fn summary(&self) -> SpendSummary {
     let entries = self.entries.lock().map(|e| e.clone()).unwrap_or_default();
     summarize(&entries, Local::now())
+  }
+
+  /// Spend per model on each account, the costliest first (System Health).
+  pub fn breakdown(&self) -> Vec<ItemSpend> {
+    let entries = self.entries.lock().map(|e| e.clone()).unwrap_or_default();
+    break_down(&entries, Local::now())
   }
 
   pub fn path(&self) -> &Path {
@@ -155,6 +174,29 @@ fn summarize(entries: &[SpendEntry], now: DateTime<Local>) -> SpendSummary {
   summary
 }
 
+/// Charges grouped by account and model, in the user's local day and month.
+fn break_down(entries: &[SpendEntry], now: DateTime<Local>) -> Vec<ItemSpend> {
+  let mut items: Vec<ItemSpend> = Vec::new();
+  for entry in entries {
+    let position = items.iter().position(|i| i.account == entry.account && i.item == entry.item).unwrap_or_else(|| {
+      items.push(ItemSpend { account: entry.account, item: entry.item.clone(), calls: 0, today: 0.0, month: 0.0, all_time: 0.0 });
+      items.len() - 1
+    });
+    let item = &mut items[position];
+    let local = entry.at.with_timezone(&Local);
+    item.calls += 1;
+    item.all_time += entry.usd;
+    if local.year() == now.year() && local.month() == now.month() {
+      item.month += entry.usd;
+      if local.day() == now.day() {
+        item.today += entry.usd;
+      }
+    }
+  }
+  items.sort_by(|a, b| b.all_time.total_cmp(&a.all_time));
+  items
+}
+
 fn save(path: &Path, entries: &[SpendEntry]) -> anyhow::Result<()> {
   let dir = path.parent().ok_or_else(|| anyhow::anyhow!("no library directory"))?;
   std::fs::create_dir_all(dir)?;
@@ -181,6 +223,17 @@ mod tests {
     assert!((s.all_time.total() - 6.27402).abs() < 1e-9);
     assert_eq!(s.generations_today, 2);
     assert_eq!(s.last.as_ref().map(|(item, _)| item.as_str()), Some("stability"));
+  }
+
+  #[test]
+  fn spend_is_broken_down_by_model_costliest_first() {
+    let now = Local.with_ymd_and_hms(2026, 10, 12, 15, 0, 0).unwrap();
+    let at = |m: u32, d: u32| Local.with_ymd_and_hms(2026, m, d, 9, 0, 0).unwrap().with_timezone(&Utc);
+    let charge = |when, account, usd, item: &str| SpendEntry { at: when, account, usd, item: item.to_owned(), maybe_batch_token: None };
+    let entries = vec![charge(at(9, 30), Account::Vertex, 2.0, "veo"), charge(at(10, 1), Account::Vertex, 1.0, "veo"), charge(at(10, 12), Account::Vertex, 0.5, "veo"), charge(at(10, 12), Account::Vertex, 0.07, "nano"), charge(at(10, 12), Account::Bedrock, 0.14, "nano")];
+    let items = break_down(&entries, now);
+    assert_eq!(items.iter().map(|i| (i.account, i.item.as_str(), i.calls)).collect::<Vec<_>>(), [(Account::Vertex, "veo", 3), (Account::Bedrock, "nano", 1), (Account::Vertex, "nano", 1)]);
+    assert_eq!((items[0].today, items[0].month, items[0].all_time), (0.5, 1.5, 3.5));
   }
 
   #[test]

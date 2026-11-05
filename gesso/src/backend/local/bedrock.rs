@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use aws_sdk_bedrock::Client as ControlClient;
+use aws_sdk_bedrock::types::{AuthorizationStatus, EntitlementAvailability, RegionAvailability};
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, InferenceConfiguration, Message, SystemContentBlock};
@@ -43,15 +45,25 @@ pub struct ConverseReply {
   pub output_tokens: u64,
 }
 
+/// Whether the account can use a model in the configured region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelAccess {
+  Granted,
+  /// Why not, in words.
+  Blocked(String),
+}
+
 #[derive(Clone)]
 pub struct BedrockClient {
   config: LocalConfig,
   client: Arc<OnceCell<Client>>,
+  /// The control plane, for [`BedrockClient::model_access`].
+  control: Arc<OnceCell<ControlClient>>,
 }
 
 impl BedrockClient {
   pub fn new(config: LocalConfig) -> Self {
-    Self { config, client: Arc::new(OnceCell::new()) }
+    Self { config, client: Arc::new(OnceCell::new()), control: Arc::new(OnceCell::new()) }
   }
 
   pub async fn generate_image(&self, request: StabilityRequest<'_>) -> anyhow::Result<GeneratedFile> {
@@ -85,18 +97,42 @@ impl BedrockClient {
     Ok(ConverseReply { text, input_tokens, output_tokens })
   }
 
-  async fn client(&self) -> &Client {
-    self
-      .client
-      .get_or_init(|| async {
-        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(aws_config::Region::new(self.config.aws_region.clone()));
-        if let Some(profile) = &self.config.aws_profile {
-          loader = loader.profile_name(profile);
-        }
-        Client::new(&loader.load().await)
-      })
-      .await
+  /// Whether the account has been granted `model` here (`GetFoundationModelAvailability`, a read
+  /// that isn't billed). Inference profiles (`us.…`, `global.…`) are checked by their base model.
+  pub async fn model_access(&self, model: &str) -> anyhow::Result<ModelAccess> {
+    let control = self.control.get_or_init(|| async { ControlClient::new(&self.sdk_config().await) }).await;
+    let output = control.get_foundation_model_availability().model_id(base_model_id(model)).send().await.map_err(|err| anyhow::anyhow!("Bedrock error: {}", aws_sdk_bedrock::error::DisplayErrorContext(err)))?;
+    let mut blocks: Vec<&str> = Vec::new();
+    if *output.region_availability() != RegionAvailability::Available {
+      blocks.push("not offered in this region");
+    }
+    if *output.entitlement_availability() != EntitlementAvailability::Available {
+      blocks.push("not available to this account");
+    }
+    if *output.authorization_status() != AuthorizationStatus::Authorized {
+      blocks.push("access hasn't been granted (request it under Model access in the Bedrock console)");
+    }
+    Ok(if blocks.is_empty() { ModelAccess::Granted } else { ModelAccess::Blocked(blocks.join("; ")) })
   }
+
+  async fn client(&self) -> &Client {
+    self.client.get_or_init(|| async { Client::new(&self.sdk_config().await) }).await
+  }
+
+  /// The SDK's settings: the configured region and profile over its usual credential chain.
+  async fn sdk_config(&self) -> aws_config::SdkConfig {
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest()).region(aws_config::Region::new(self.config.aws_region.clone()));
+    if let Some(profile) = &self.config.aws_profile {
+      loader = loader.profile_name(profile);
+    }
+    loader.load().await
+  }
+}
+
+/// A model id without its cross-region inference prefix (`global.anthropic.claude…` →
+/// `anthropic.claude…`).
+fn base_model_id(model: &str) -> &str {
+  ["global.", "us.", "eu.", "jp.", "apac."].iter().find_map(|prefix| model.strip_prefix(prefix)).unwrap_or(model)
 }
 
 fn stability_body(request: &StabilityRequest<'_>) -> Value {
@@ -132,6 +168,13 @@ fn first_image(response: &Value) -> anyhow::Result<GeneratedFile> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn inference_profiles_are_checked_by_their_base_model() {
+    assert_eq!(base_model_id("global.anthropic.claude-sonnet-4-6"), "anthropic.claude-sonnet-4-6");
+    assert_eq!(base_model_id("us.stability.stable-image-inpaint-v1:0"), "stability.stable-image-inpaint-v1:0");
+    assert_eq!(base_model_id("stability.sd3-5-large-v1:0"), "stability.sd3-5-large-v1:0");
+  }
 
   #[test]
   fn text_to_image_sends_the_ratio() {

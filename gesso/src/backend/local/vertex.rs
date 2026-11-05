@@ -26,6 +26,8 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
 const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Veo jobs not done by then are given up on.
 const VIDEO_GIVE_UP: Duration = Duration::from_secs(20 * 60);
+/// Health checks answer quickly or not at all.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// A song made without polling comes back on the request itself.
 const SONG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Omni Flash's id on Vertex (the preview the Vertex samples use), then the Gemini API's GA id.
@@ -190,6 +192,37 @@ impl VertexClient {
       }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Lyria model configured")))
+  }
+
+  /// Whether Google Cloud credentials can be found and exchanged for a token (no charge).
+  pub async fn check_sign_in(&self) -> anyhow::Result<()> {
+    self.token().await.map(|_| ())
+  }
+
+  /// Whether the project can call a Gemini model: `countTokens`, which Google doesn't bill.
+  pub async fn check_gemini(&self, model: &str) -> anyhow::Result<()> {
+    let body = json!({ "contents": [{ "role": "user", "parts": [{ "text": "hello" }] }] });
+    match (&self.config.gcp_project, &self.config.gcp_api_key) {
+      (Some(project), _) => {
+        let url = format!("{}v1/projects/{project}/locations/{}/publishers/google/models/{model}:countTokens", self.host(&self.config.gcp_location), self.config.gcp_location);
+        self.post_with_token(&url, &body, PROBE_TIMEOUT).await.map(|_| ())
+      },
+      (None, Some(key)) => {
+        let url = format!("{}v1beta1/publishers/google/models/{model}:countTokens", self.host("global"));
+        read_json(self.http.post(url).header("x-goog-api-key", key).json(&body).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+      },
+      (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
+    }
+  }
+
+  /// Whether Vertex lists a model in its catalogue at `location` (a read, no charge). Veo and
+  /// Lyria have no free call that proves the project may use them, so this is the most that can
+  /// be checked without generating something.
+  pub async fn check_listed(&self, model: &str, location: &str) -> anyhow::Result<()> {
+    let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Needs a Google Cloud project in local_providers.json"))?;
+    let url = format!("{}v1/publishers/google/models/{model}", self.host(location));
+    let token = self.token().await?;
+    read_json(self.http.get(url).bearer_auth(token).header("x-goog-user-project", project).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
   }
 
   /// One `generateContent` call, with the project's credentials or an express-mode key.

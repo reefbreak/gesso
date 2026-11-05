@@ -113,6 +113,8 @@ pub enum Event {
     run_id: u64,
     update: local::song::SongUpdate,
   },
+  /// Local mode: a System Health check finished.
+  Health(local::health::HealthReport),
   /// Local mode: files another Craft app sent arrived in the library.
   InboxImported {
     count: usize,
@@ -290,6 +292,22 @@ impl Backend {
   /// What a Music Video stage would cost at list prices (local mode).
   pub fn estimate_song(&self, estimate: &local::song::SongEstimate) -> Option<f64> {
     self.local.as_ref().map(|l| l.estimate_song(estimate))
+  }
+
+  /// Checks every model connection in the background (free: nothing is generated); the report
+  /// comes back as [`Event::Health`].
+  pub fn check_health(&self) {
+    let Some(local) = self.local.clone() else {
+      return;
+    };
+    self.spawn(move |tx| async move {
+      let _ = tx.send(Event::Health(local.check_health().await));
+    });
+  }
+
+  /// In local mode, spend per model on each account and the totals.
+  pub fn spend_report(&self) -> Option<(local::spend::SpendSummary, Vec<local::spend::ItemSpend>)> {
+    self.local.as_ref().map(|l| (l.spend_summary(), l.spend_breakdown()))
   }
 
   /// In local mode, the library's folder (Music Video projects are kept under it).

@@ -2,6 +2,7 @@ pub mod common;
 pub mod create_audio;
 pub mod create_image;
 pub mod create_video;
+pub mod health;
 pub mod other;
 pub mod toolbar;
 pub mod tools;

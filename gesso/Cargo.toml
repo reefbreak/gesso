@@ -48,6 +48,8 @@ uuid = { workspace = true, features = ["v4"] }
 # Local mode: the user's own Google Cloud (Vertex AI) and AWS (Bedrock) accounts.
 aws-config = { version = "1.12", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1.148", features = ["behavior-version-latest"] }
+# The control plane: whether the account has access to each model (System Health).
+aws-sdk-bedrock = { version = "1", features = ["behavior-version-latest"] }
 gcp_auth = "0.12.7"
 # Local background removal (ISNet) without native libraries.
 tract-onnx = "0.23"

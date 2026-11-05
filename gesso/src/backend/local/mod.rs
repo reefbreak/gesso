@@ -10,6 +10,7 @@ pub mod bgremove;
 pub mod catalog;
 pub mod config;
 pub mod estimate;
+pub mod health;
 pub mod jev;
 pub mod library;
 pub mod pricing;
@@ -143,6 +144,11 @@ impl LocalEngine {
   /// What the page's request would cost, before it's sent (`fields` as for generating).
   pub fn estimate(&self, modality: Modality, fields: &Map<String, Value>) -> Option<CostEstimate> {
     estimate::estimate(&self.config, &self.prices, modality, &Request::from_fields(modality, fields))
+  }
+
+  /// Spend per model on each account (System Health).
+  pub fn spend_breakdown(&self) -> Vec<spend::ItemSpend> {
+    self.spend.breakdown()
   }
 
   /// Where the spend ledger is saved.

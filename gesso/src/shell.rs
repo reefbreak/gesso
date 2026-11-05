@@ -39,6 +39,7 @@ pub enum Page {
   FrameExtractor,
   MusicVideo,
   Library,
+  SystemHealth,
 }
 
 impl Page {
@@ -57,6 +58,7 @@ impl Page {
       Page::FrameExtractor => "Frame Extract",
       Page::MusicVideo => "Music Video",
       Page::Library => "Library",
+      Page::SystemHealth => "System Health",
     }
   }
 
@@ -73,6 +75,7 @@ impl Page {
       Page::RemoveBackground => Icon::Wand,
       Page::MusicVideo => Icon::Drum,
       Page::Library => Icon::Library,
+      Page::SystemHealth => Icon::Info,
     }
   }
 
@@ -82,6 +85,7 @@ impl Page {
       Page::Home => ("Gesso", "Home"),
       Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Object3d | Page::World3d => ("Create", self.label()),
       Page::Library => ("Assets", "Library"),
+      Page::SystemHealth => ("System", "Health"),
       _ => ("Studio", self.label()),
     }
   }
@@ -100,6 +104,7 @@ impl Page {
       "frame-extractor" | "frames" => Page::FrameExtractor,
       "3d-stage" | "stage" => Page::Stage3d,
       "music-video" | "song-video" => Page::MusicVideo,
+      "system-health" | "health" => Page::SystemHealth,
       _ => return None,
     })
   }
@@ -107,7 +112,7 @@ impl Page {
   /// Pages the native app has; the rest open a "coming soon" page.
   pub fn is_ready(self) -> bool {
     // The tool pages run on the local engine (this fork's default mode).
-    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor | Page::Stage3d | Page::MusicVideo)
+    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor | Page::Stage3d | Page::MusicVideo | Page::SystemHealth)
   }
 
   /// The same tool in the web app.
@@ -128,7 +133,7 @@ impl Page {
   }
 }
 
-const SECTIONS: [(&str, &[Page]); 3] = [("Create", &[Page::CreateImage, Page::CreateVideo, Page::CreateAudio, Page::Object3d, Page::World3d]), ("Studio", &[Page::EditImage, Page::Stage3d, Page::VideoEditor, Page::RemoveBackground, Page::FrameExtractor, Page::MusicVideo]), ("Assets", &[Page::Library])];
+const SECTIONS: [(&str, &[Page]); 4] = [("Create", &[Page::CreateImage, Page::CreateVideo, Page::CreateAudio, Page::Object3d, Page::World3d]), ("Studio", &[Page::EditImage, Page::Stage3d, Page::VideoEditor, Page::RemoveBackground, Page::FrameExtractor, Page::MusicVideo]), ("Assets", &[Page::Library]), ("System", &[Page::SystemHealth])];
 
 /// Who's signed in, for the sidebar and top bar.
 pub struct Account<'a> {

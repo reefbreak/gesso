@@ -160,6 +160,32 @@ Optional settings in `local_providers.json`: `song_text_model` (default: `gemini
 `song_claude_model` (default: `global.anthropic.claude-sonnet-4-6`). Lyria 3 and the listening
 call run on the global endpoint.
 
+## System Health
+
+**System Health** (System) shows whether each model can be reached with your accounts, and what
+each account has cost. It checks when you open it and again on **Check again**. A check generates
+nothing, so it's free.
+
+| Models                          | How they're checked                               | Best result |
+|---------------------------------|---------------------------------------------------|-------------|
+| Gemini (writer and Nano Banana) | `countTokens` on your project                     | Ready       |
+| Veo, Lyria, Gemini Omni Flash   | Vertex's model catalogue                          | Listed      |
+| Stability and Claude (Bedrock)  | `GetFoundationModelAvailability` for your account | Ready       |
+| FFmpeg, background removal      | Looked for on your Mac                            | Ready       |
+
+**Ready** is proven with a free call on your account. **Listed** means the provider has the model,
+but no free call shows whether your project may use it, so access is confirmed the first time it
+runs. Problems are **No access** (the provider refused: an API not enabled, a role missing, or
+model access not granted in Bedrock), **Not found** (the model id isn't offered there: renamed,
+retired, or the wrong region) and **Check failed** (offline, or credentials expired). Each row
+says what to do. The Bedrock check needs the `bedrock:GetFoundationModelAvailability` permission.
+Jev isn't tested, because a routing call is billed.
+
+**Costs** come from Gesso's own ledger (`~/Artcraft/local/spend.json`): totals for today, this
+month and all time for Google Cloud, AWS Bedrock and Jev, then each account's spend model by
+model with the number of billed calls. They're list prices times what each call used; your cloud
+bills are the final word.
+
 FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract, Edit Video and Music
 Video. 3D Object
 and 3D World still say "coming soon": they need a 3D generation provider.
@@ -279,7 +305,8 @@ Feed and lightbox:
 ## Diagnostics
 
 Set `ARTCRAFT_SCREENSHOT=<file.png>` to save a screenshot once the window has settled.
-`ARTCRAFT_PAGE` (`home`, `create-image`, `create-video`, `create-audio`, `music-video` or `library`)
+`ARTCRAFT_PAGE` (`home`, `create-image`, `create-video`, `create-audio`, `music-video`, `health` or
+`library`)
 picks the page, `ARTCRAFT_MUSIC_VIDEO=<project id>` opens that saved Music Video project,
 `ARTCRAFT_OPEN` (`settings` or `midjourney-login`) opens a dialog, and `ARTCRAFT_SCREENSHOT_EXIT=1`
 closes the app afterwards. The screenshot shows egui only, not the sign-in webview.

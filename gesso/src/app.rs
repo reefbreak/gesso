@@ -21,6 +21,7 @@ use crate::overlays::account::{LoginAction, LoginDialog, SettingsAction, setting
 use crate::overlays::characters::{CharactersAction, CharactersModal};
 use crate::overlays::library_picker::{LibraryPicker, PickerAction};
 use crate::backend::local::spend::SpendSummary;
+use crate::pages::health::HealthPage;
 use crate::pages::tools::bg_remove::BgRemovePage;
 use crate::pages::tools::edit_image::EditImagePage;
 use crate::pages::tools::edit_video::EditVideoPage;
@@ -94,6 +95,7 @@ pub struct ArtcraftApp {
   edit_video: EditVideoPage,
   stage: StagePage,
   music_video: MusicVideoPage,
+  health: HealthPage,
   page: Page,
   enter_to_generate: bool,
   view_mode: ViewMode,
@@ -162,6 +164,7 @@ impl ArtcraftApp {
       edit_video: EditVideoPage::default(),
       stage: StagePage::default(),
       music_video: MusicVideoPage::from_env(),
+      health: HealthPage::default(),
       page: saved.page,
       enter_to_generate: saved.enter_to_generate,
       view_mode: saved.view_mode,
@@ -258,6 +261,7 @@ impl ArtcraftApp {
         });
         self.library.reset();
       },
+      Event::Health(report) => self.health.on_report(report),
       Event::Song { run_id, update } => {
         if let Some(notice) = self.music_video.on_update(&self.backend, run_id, update) {
           if notice.error {
@@ -749,6 +753,7 @@ impl ArtcraftApp {
             Page::VideoEditor if env.backend.is_local() => self.edit_video.ui(ui, &mut env),
             Page::Stage3d if env.backend.is_local() => self.stage.ui(ui, &mut env),
             Page::MusicVideo if env.backend.is_local() => self.music_video.ui(ui, &mut env),
+            Page::SystemHealth if env.backend.is_local() => self.health.ui(ui, &mut env),
             page => other::coming_soon(ui, page),
           }
         });
