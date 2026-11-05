@@ -152,7 +152,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   colour has the colour taken out before it is saved. Clips are asked for the same; the Mono grade
   on the final cut covers any that slip.
 - **Storyboard handling.** Double-click a still or reference image to see it full size. Cmd-click
-  or Shift-click stills to select several, then redraw them together from the panel.
+  or Shift-click stills to select several, then redraw them together from the panel. In the draft
+  pass, "The better model (Nano Banana Pro)" redraws the picked stills with the final pass's
+  model, which holds a likeness better, while they stay draft stills at draft size.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

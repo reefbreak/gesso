@@ -561,11 +561,14 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let targets = if only_missing { missing } else { all };
   let (pro, large) = (page.pro(), quality == Quality::Final);
   let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro, large });
-  let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro, large });
   // The scenes picked together in the grid, less any that can't be drawn in this pass.
   page.picked.retain(|i| *i < page.project.shots.len());
   let chosen: Vec<usize> = page.picked.iter().copied().filter(|i| drawable(&&page.project.shots[*i])).collect();
-  let chosen_cost = env.backend.estimate_song(&SongEstimate::Stills { count: chosen.len(), pro, large });
+  // In the draft pass, picked stills can be redrawn with the better model the final pass uses.
+  let can_better = quality == Quality::Draft;
+  let better = can_better && page.better_redraw;
+  let chosen_cost = env.backend.estimate_song(&SongEstimate::Stills { count: chosen.len(), pro: pro || better, large });
+  let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro: pro || better, large });
   let mut clear_picked = false;
   let line = page.progress_line().filter(|_| page.running_here());
   let planned = !page.project.shots.is_empty();
@@ -598,17 +601,21 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         (Quality::Final, false) => format!("Redraw all {} again", targets.len()),
       };
       if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
-        actions.push(Action::Stills(targets.clone()));
+        actions.push(Action::Stills(targets.clone(), false));
       }
       if quality == Quality::Final && targets.is_empty() {
         ui.label(small("The final pass redraws draft stills. Draw them in the Draft pass first."));
       }
       stop_button(ui, page.running_here(), actions);
     }
+    if can_better && (!page.picked.is_empty() || page.selected.is_some()) {
+      field(ui, "Redraw with");
+      ui.checkbox(&mut page.better_redraw, "The better model (Nano Banana Pro)").on_hover_text("Holds the performer's likeness better than the draft's faster model, at about twice the price per still. Applies to the redraw buttons below, not to drawing the whole storyboard.");
+    }
     if !page.picked.is_empty() {
       field(ui, &format!("{} scene{} selected", page.picked.len(), plural(page.picked.len())));
       if run_button(ui, Icon::RotateCw, &format!("Redraw {} selected", chosen.len()), chosen_cost.map(estimate), !busy && !chosen.is_empty(), None) {
-        actions.push(Action::Stills(chosen.clone()));
+        actions.push(Action::Stills(chosen.clone(), better));
       }
       if chosen.len() < page.picked.len() {
         ui.label(small("Some of the selected scenes have no draft still or no description yet, so they are left out."));
@@ -640,7 +647,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       }
       let can_draw = !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
       if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
-        actions.push(Action::Stills(vec![index]));
+        actions.push(Action::Stills(vec![index], better));
       }
     }
     next_button(ui, Stage::Shots, drawn, actions);

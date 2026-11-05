@@ -96,8 +96,8 @@ pub(super) enum Action {
   WorkshopApply,
   WorkshopClose,
   Plan,
-  /// Scenes whose stills to draw, by index.
-  Stills(Vec<usize>),
+  /// Scenes whose stills to draw, by index; `true` to use the better model in the draft pass.
+  Stills(Vec<usize>, bool),
   /// Scenes whose clips to make, by index.
   Clips(Vec<usize>),
   /// Scenes whose clips to lip-sync, by index.
@@ -141,6 +141,8 @@ pub struct MusicVideoPage {
   resolution: [usize; 2],
   /// The scene picked in the Scenes and Shots grids.
   selected: Option<usize>,
+  /// Redraw picked draft stills with Nano Banana Pro instead of the draft's faster model.
+  better_redraw: bool,
   /// The scenes selected together on the storyboard, to redraw in one go.
   picked: BTreeSet<usize>,
   player: Option<VideoPlayer>,
@@ -158,7 +160,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -560,7 +562,7 @@ impl MusicVideoPage {
         self.pending_slots = slots.clone();
         self.start(backend, 0, &format!("Writing {} scenes\u{2026}", slots.len()), SongRequest::Plan { brief, style, slots, lip_sync: self.project.lip_sync, writer: self.writer });
       },
-      Action::Stills(indices) => {
+      Action::Stills(indices, better) => {
         let quality = self.quality();
         let mut shots = Vec::new();
         for index in indices {
@@ -574,7 +576,7 @@ impl MusicVideoPage {
         }
         if !shots.is_empty() {
           let note = if quality == Quality::Final { "Redrawing stills in final quality\u{2026}" } else { "Drawing stills\u{2026}" };
-          self.start(backend, shots.len(), note, SongRequest::Stills { dir, design: self.project.design(), references: self.project.reference_images(), aspect: self.project.aspect, quality, shots });
+          self.start(backend, shots.len(), note, SongRequest::Stills { dir, design: self.project.design(), references: self.project.reference_images(), aspect: self.project.aspect, quality, better, shots });
         }
       },
       Action::Clips(indices) => {

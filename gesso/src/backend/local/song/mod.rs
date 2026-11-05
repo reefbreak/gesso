@@ -226,6 +226,8 @@ pub enum SongRequest {
     references: Vec<(ReferenceKind, PathBuf)>,
     aspect: Aspect,
     quality: Quality,
+    /// Draw with Nano Banana Pro whatever the pass: for draft stills the faster model got wrong.
+    better: bool,
     shots: Vec<StillJob>,
   },
   Clips {
@@ -463,7 +465,7 @@ impl SongRun<'_> {
         let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).collect();
         self.send(SongUpdate::Planned(scenes));
       },
-      SongRequest::Stills { dir, design, references, aspect, quality, shots } => {
+      SongRequest::Stills { dir, design, references, aspect, quality, better, shots } => {
         let references: Vec<(ReferenceKind, RefImage)> = references.iter().take(REFERENCES_PER_STILL).map(|(kind, path)| Ok((*kind, self.engine.load_path(path)?))).collect::<anyhow::Result<_>>()?;
         let (dir, design, references) = (&dir.join("shots"), &design, &references);
         let jobs = shots.into_iter().map(|job| async move {
@@ -471,7 +473,7 @@ impl SongRun<'_> {
             return;
           }
           let index = job.index;
-          match self.still(dir, design, references, aspect, quality, job).await {
+          match self.still(dir, design, references, aspect, quality, better, job).await {
             Ok(path) => self.send(SongUpdate::Still { index, path }),
             Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
           }
@@ -616,9 +618,10 @@ impl SongRun<'_> {
     Ok(path)
   }
 
-  async fn still(&self, dir: &Path, design: &Design, references: &[(ReferenceKind, RefImage)], aspect: Aspect, quality: Quality, job: StillJob) -> anyhow::Result<PathBuf> {
+  #[allow(clippy::too_many_arguments)]
+  async fn still(&self, dir: &Path, design: &Design, references: &[(ReferenceKind, RefImage)], aspect: Aspect, quality: Quality, better: bool, job: StillJob) -> anyhow::Result<PathBuf> {
     let (model, size) = match quality {
-      Quality::Draft => (still_model(false), STILL_SIZE),
+      Quality::Draft => (still_model(better), STILL_SIZE),
       Quality::Final => (still_model(true), FINAL_STILL_SIZE),
     };
     // The final pass recreates the approved draft frame: it goes first, ahead of the references.
@@ -1072,7 +1075,7 @@ mod tests {
       let portrait = save(&project, "portrait_v1.png", &tiny_png()).unwrap();
       let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None }];
       let (tx, rx) = std::sync::mpsc::channel();
-      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![(ReferenceKind::Look, portrait)], aspect: Aspect::Tall, quality: Quality::Draft, shots }, tx, egui::Context::default());
+      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![(ReferenceKind::Look, portrait)], aspect: Aspect::Tall, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
 
       let updates = finished(&rx, 3).await;
       let made: Vec<&PathBuf> = updates.iter().filter_map(|u| if let SongUpdate::Still { path, .. } = u { Some(path) } else { None }).collect();
@@ -1104,6 +1107,22 @@ mod tests {
       let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A draft still can be redrawn with the better model: Pro, still at the draft's size and name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_draft_still_can_be_redrawn_with_the_better_model() {
+      let (base_url, requests) = fake_vertex(vec![image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let (tx, rx) = std::sync::mpsc::channel();
+      let shots = vec![StillJob { index: 4, version: 2, image: "A wide shot".into(), guide: None }];
+      engine.start_song(12, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: true, shots }, tx, egui::Context::default());
+      let updates = finished(&rx, 12).await;
+      assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 4, path }) if path.ends_with("shots/shot_005_draft_v2.png")), "{updates:?}");
+      let requests = requests.lock().unwrap();
+      assert!(requests[0].0.contains("gemini-3-pro-image:generateContent"), "{}", requests[0].0);
+      assert_eq!(serde_json::from_str::<Value>(&requests[0].1).unwrap()["generationConfig"]["imageConfig"]["imageSize"], "1K");
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// When Vertex is out of capacity for a picture and a Gemini API key is set, the picture is
     /// made through the Gemini API without waiting.
     #[tokio::test(flavor = "multi_thread")]
@@ -1116,7 +1135,7 @@ mod tests {
       let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
       let (tx, rx) = std::sync::mpsc::channel();
       let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None }];
-      engine.start_song(11, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, shots }, tx, egui::Context::default());
+      engine.start_song(11, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 11).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, .. })), "{updates:?}");
       assert_eq!(vertex_requests.lock().unwrap().len(), 1);
@@ -1174,7 +1193,7 @@ mod tests {
       let (engine, dir) = engine(base_url);
       let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO) };
       let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None }];
-      run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, shots }).await.unwrap();
+      run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());
       let _ = std::fs::remove_dir_all(dir);
     }
