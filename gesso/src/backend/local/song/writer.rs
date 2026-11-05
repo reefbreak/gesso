@@ -95,6 +95,21 @@ pub struct Brief {
   pub props: Vec<Subject>,
 }
 
+/// One message in a conversation about a section of the brief or the style.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turn {
+  pub from_user: bool,
+  pub text: String,
+}
+
+/// The writer's answer in that conversation: what it says, and the section's fields after its
+/// change (unchanged ones as they were).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Revision {
+  pub reply: String,
+  pub fields: Vec<(String, String)>,
+}
+
 /// What the image and video prompts carry from the style and the brief.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Design {
@@ -128,7 +143,35 @@ pub const DIRECTOR: &str = "You are a music video director. You invent original 
 no real people, no existing characters, no brand names. You write for image and video models, so you describe what the camera sees, \
 concretely, in plain words. Reply with JSON only.";
 
+pub const EDITOR: &str = "You are a script editor working with a music video director on one section of their creative brief or visual style. \
+You change only what you are asked to change and keep the rest of the wording as it is. You invent original performers and settings: \
+no real people, no existing characters, no brand names. The text is read by image and video models, so it describes what the camera sees, \
+concretely, in plain words. Reply with JSON only.";
+
 pub const LISTENER: &str = "You mark up songs for a music video editor. You listen to the whole track and report its mood, where each section starts and ends, and when each line is sung, in seconds. Reply with JSON only.";
+
+/// Asks for the next reply in a conversation about one section: `turns` ends with what the director
+/// just said, and `fields` is the section as it stands (after any earlier changes).
+pub fn workshop_prompt(context: &str, section: &str, fields: &[(String, String)], turns: &[Turn]) -> String {
+  let current: serde_json::Map<String, Value> = fields.iter().map(|(key, text)| (key.clone(), Value::String(text.clone()))).collect();
+  let (latest, earlier) = turns.split_last().map_or(("", turns), |(last, rest)| (last.text.trim(), rest));
+  let mut prompt = format!("The film, for context only (don't rewrite it):\n{}\n\nThe section being worked on: {section}\nAs it stands, by field:\n{}\n\n", context.trim(), Value::Object(current));
+  if !earlier.is_empty() {
+    prompt.push_str("The conversation so far:\n");
+    for turn in earlier {
+      prompt.push_str(&format!("{}: {}\n", if turn.from_user { "Director" } else { "You" }, turn.text.trim()));
+    }
+    prompt.push('\n');
+  }
+  prompt.push_str(&format!(
+    "The director now says:\n{latest}\n\n\
+     Reply with JSON: {{\"reply\": one or two sentences to the director saying what you changed or answering their question, \
+     \"fields\": the same field names, each with its full text after your change}}. \
+     Make the smallest change that does what was asked, and return every field you didn't change exactly as given. \
+     If the director only asked a question or wants options, answer in \"reply\" and return the fields unchanged.",
+  ));
+  prompt
+}
 
 /// Asks for a song from an idea, or a rewrite of `current` following `notes`.
 pub fn song_prompt(idea: &str, notes: &str, current: Option<&Draft>) -> String {
@@ -321,6 +364,16 @@ pub fn fallback_scene(slot: &Slot) -> PlannedShot {
   PlannedShot { index: slot.index, image: format!("{framing}."), motion: motion.to_owned(), beat: beat.to_owned(), sing: false }
 }
 
+/// The writer's reply about a section. A field it left out, emptied or sent as something other
+/// than text stays as it was, and a reply that isn't JSON is taken as conversation.
+pub fn parse_workshop(reply: &str, fields: &[(String, String)]) -> Revision {
+  let Some(json) = find_json(reply) else {
+    return Revision { reply: reply.trim().to_owned(), fields: fields.to_vec() };
+  };
+  let revised = fields.iter().map(|(key, was)| (key.clone(), json.pointer(&format!("/fields/{key}")).map(lines_text).filter(|text| !text.is_empty()).unwrap_or_else(|| was.clone()))).collect();
+  Revision { reply: text(&json["reply"]), fields: revised }
+}
+
 /// The JSON value in a reply: the whole reply, a fenced block, or the outermost braces or brackets.
 pub fn find_json(reply: &str) -> Option<Value> {
   let trimmed = reply.trim();
@@ -394,6 +447,35 @@ fn seconds(value: &Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod workshop {
+    use super::*;
+
+    #[test]
+    fn the_prompt_carries_the_section_the_talk_so_far_and_the_new_request() {
+      let fields = vec![("name".to_owned(), "The Sump Vault".to_owned()), ("description".to_owned(), "A flooded \"bunker\".".to_owned())];
+      let turns = vec![Turn { from_user: true, text: "Make it colder".into() }, Turn { from_user: false, text: "Done: frost on the beams.".into() }, Turn { from_user: true, text: " Lose the strobe ".into() }];
+      let prompt = workshop_prompt("The film is \"Adrift\".", "Venue", &fields, &turns);
+      assert!(prompt.contains("The section being worked on: Venue"));
+      assert!(prompt.contains(r#""description":"A flooded \"bunker\".""#) && prompt.contains(r#""name":"The Sump Vault""#), "{prompt}");
+      assert!(prompt.contains("Director: Make it colder\nYou: Done: frost on the beams.\n"));
+      assert!(prompt.contains("The director now says:\nLose the strobe\n"));
+      assert!(!workshop_prompt("c", "Venue", &fields, &turns[..1]).contains("The conversation so far"));
+    }
+
+    #[test]
+    fn a_reply_changes_only_the_fields_it_sends() {
+      let fields = vec![("name".to_owned(), "The Sump Vault".to_owned()), ("role".to_owned(), "oppressive".to_owned()), ("description".to_owned(), "A flooded bunker.".to_owned())];
+      let reply = r#"```json
+{"reply":"Swapped the strobe for a dying lamp.","fields":{"name":"The Sump Vault","description":" A flooded bunker lit by one dying lamp. ","role":"","extra":"ignored"}}
+```"#;
+      let revision = parse_workshop(reply, &fields);
+      assert_eq!(revision.reply, "Swapped the strobe for a dying lamp.");
+      assert_eq!(revision.fields, [("name".to_owned(), "The Sump Vault".to_owned()), ("role".to_owned(), "oppressive".to_owned()), ("description".to_owned(), "A flooded bunker lit by one dying lamp.".to_owned())]);
+      let chat = parse_workshop("Do you want it wetter or drier?", &fields);
+      assert_eq!((chat.reply.as_str(), &chat.fields), ("Do you want it wetter or drier?", &fields));
+    }
+  }
 
   mod replies {
     use super::*;

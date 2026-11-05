@@ -7,6 +7,7 @@
 //! video can be picked up later from the list on the first stage.
 
 mod stages;
+mod workshop;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,12 +18,14 @@ use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
 use crate::backend::local::song::project::{Quality, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
+use crate::backend::local::song::writer::Turn;
 use crate::backend::local::tools::VeoTier;
 use crate::backend::video::VideoPlayer;
 use crate::pages::common::Env;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets;
+use workshop::{Target, Workshop};
 
 const RAIL_WIDTH: f32 = 212.0;
 const GAP: f32 = 16.0;
@@ -79,6 +82,13 @@ pub(super) enum Action {
   UploadReference(usize, PathBuf),
   /// A written change to a reference's picture.
   ChangeReference(usize, String),
+  /// Opens a conversation with the writer about one section.
+  Workshop(Target),
+  /// Sends what was typed in that conversation.
+  WorkshopSend,
+  /// Puts the conversation's version of the section back into its box.
+  WorkshopApply,
+  WorkshopClose,
   Plan,
   /// Scenes whose stills to draw, by index.
   Stills(Vec<usize>),
@@ -126,6 +136,8 @@ pub struct MusicVideoPage {
   /// The scene picked in the Scenes and Shots grids.
   selected: Option<usize>,
   player: Option<VideoPlayer>,
+  /// The section being worked on with the writer, if any.
+  workshop: Option<Workshop>,
   /// What to change in each reference's picture, as typed under it.
   reference_changes: Vec<String>,
   /// The slots a plan in flight was asked for.
@@ -138,7 +150,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -163,6 +175,7 @@ impl MusicVideoPage {
     let mut actions = Vec::new();
     self.rail(ui, rail, &mut actions);
     stages::show(self, ui, env, stage, panel, &mut actions);
+    workshop::show(self, ui, &mut actions);
     for action in actions {
       self.apply(env, action);
     }
@@ -208,6 +221,12 @@ impl MusicVideoPage {
       },
       SongUpdate::Styled(style) => self.project.visual = Some(style),
       SongUpdate::Briefed(brief) => self.project.set_brief(brief),
+      SongUpdate::Workshopped(revision) => {
+        if let Some(workshop) = &mut self.workshop {
+          workshop.fields = revision.fields;
+          workshop.turns.push(Turn { from_user: false, text: revision.reply });
+        }
+      },
       SongUpdate::Reference { index, path } => {
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.image = Some(path);
@@ -280,6 +299,10 @@ impl MusicVideoPage {
       },
       SongUpdate::Done(result) => {
         let finished = self.run.take();
+        if let Some(workshop) = self.workshop.as_mut().filter(|w| w.waiting) {
+          workshop.waiting = false;
+          workshop.error = result.as_ref().err().cloned();
+        }
         match result {
           Ok(()) => {
             if finished.is_some_and(|run| run.then_analyse) && self.project.track.is_some() {
@@ -473,6 +496,28 @@ impl MusicVideoPage {
           self.start(backend, items.len(), "Drawing reference images\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items });
         }
       },
+      Action::Workshop(target) => self.workshop = Workshop::open(&self.project, target),
+      Action::WorkshopSend => {
+        let busy = self.busy();
+        let request = self.workshop.as_mut().filter(|w| !busy && !w.input.trim().is_empty()).map(|w| {
+          w.turns.push(Turn { from_user: true, text: std::mem::take(&mut w.input).trim().to_owned() });
+          w.waiting = true;
+          w.error = None;
+          SongRequest::Workshop { context: workshop::context(&self.project), section: w.target.title().to_owned(), fields: w.fields.clone(), turns: w.turns.clone(), writer: self.writer }
+        });
+        if let Some(request) = request {
+          self.start(backend, 0, "Working on the section\u{2026}", request);
+        }
+      },
+      Action::WorkshopApply => {
+        if let Some(workshop) = self.workshop.take() {
+          workshop.target.write(&mut self.project, &workshop.fields);
+          // The reference images take a renamed or reworded performer, venue or prop.
+          self.project.follow_edited_brief();
+          self.touch_now();
+        }
+      },
+      Action::WorkshopClose => self.workshop = None,
       Action::UploadReference(index, file) => {
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.version += 1;

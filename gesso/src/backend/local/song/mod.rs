@@ -49,7 +49,7 @@ use beats::BeatGrid;
 use cut::{Aspect, CutShot, Grade};
 use plan::{Section, Slot};
 use project::{Quality, ReferenceKind};
-use writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
+use writer::{Brief, Design, Draft, PlannedShot, Read, Revision, Style, TimedLine, Turn};
 
 /// Stills made at once (each is one Gemini call).
 const STILLS_AT_ONCE: usize = 4;
@@ -229,6 +229,14 @@ pub enum SongRequest {
     quality: Quality,
     shots: Vec<ClipJob>,
   },
+  /// The next reply in a conversation about one section of the brief or the style.
+  Workshop {
+    context: String,
+    section: String,
+    fields: Vec<(String, String)>,
+    turns: Vec<Turn>,
+    writer: Writer,
+  },
   /// The user's own picture for a reference, copied into the project.
   ImportReference {
     dir: PathBuf,
@@ -280,6 +288,8 @@ pub enum SongUpdate {
   },
   Styled(Style),
   Briefed(Brief),
+  /// The writer's reply about one section.
+  Workshopped(Revision),
   Reference {
     index: usize,
     path: PathBuf,
@@ -414,6 +424,10 @@ impl SongRun<'_> {
       SongRequest::Brief { idea, draft, read, style, writer } => {
         let reply = self.write(writer, writer::DIRECTOR, &writer::brief_prompt(&idea, &draft, &read, &style)).await?;
         self.send(SongUpdate::Briefed(writer::parse_brief(&reply)?));
+      },
+      SongRequest::Workshop { context, section, fields, turns, writer } => {
+        let reply = self.write(writer, writer::EDITOR, &writer::workshop_prompt(&context, &section, &fields, &turns)).await?;
+        self.send(SongUpdate::Workshopped(writer::parse_workshop(&reply, &fields)));
       },
       SongRequest::References { dir, look, aspect, pro, items } => {
         let (dir, look) = (&dir.join("references"), look.as_str());
@@ -958,6 +972,27 @@ mod tests {
       let updates = finished(&rx, 5).await;
       assert!(matches!(updates.last(), Some(SongUpdate::Done(Err(message))) if message.contains("fal API key in Settings")), "{updates:?}");
       assert_eq!(engine.spend_summary().today.fal, 0.0);
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Working on a section asks the writer once and returns its version of that section alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn working_on_a_section_returns_the_writers_version_of_it() {
+      let reply = json!({ "reply": "Lost the strobe.", "fields": { "name": "The Sump Vault", "description": "A flooded bunker under one lamp." } });
+      let (base_url, requests) = fake_vertex(vec![text_reply(&reply.to_string(), 300, 60)]);
+      let (engine, dir) = engine(base_url);
+      let (tx, rx) = std::sync::mpsc::channel();
+      let fields = vec![("name".to_owned(), "The Sump Vault".to_owned()), ("description".to_owned(), "A flooded bunker with a strobe.".to_owned())];
+      let turns = vec![Turn { from_user: true, text: "Lose the strobe".into() }];
+      engine.start_song(8, SongRequest::Workshop { context: "The film is \"Adrift\".".into(), section: "Venue".into(), fields, turns, writer: Writer::Gemini }, tx, egui::Context::default());
+      let updates = finished(&rx, 8).await;
+      let Some(SongUpdate::Workshopped(revision)) = updates.first() else { panic!("{updates:?}") };
+      assert_eq!((revision.reply.as_str(), revision.fields[1].1.as_str()), ("Lost the strobe.", "A flooded bunker under one lamp."));
+      let requests = requests.lock().unwrap();
+      assert_eq!(requests.len(), 1);
+      let body: Value = serde_json::from_str(&requests[0].1).unwrap();
+      assert!(body["systemInstruction"]["parts"][0]["text"].as_str().unwrap().starts_with("You are a script editor"));
+      assert!(body["contents"][0]["parts"][0]["text"].as_str().unwrap().contains("The director now says:\nLose the strobe"));
       let _ = std::fs::remove_dir_all(dir);
     }
 

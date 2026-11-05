@@ -140,6 +140,11 @@ runs, and leaves everything it made editable before the next stage uses it.
   description, replaced with a picture of your own, or changed by a written instruction that keeps
   the rest of the picture. Edits apply to what is made after them: scenes already written keep
   their wording until they are planned again.
+- **One section at a time, with the writer.** Each section of the Visual Style and the Creative
+  Brief has a "Work on this with AI" link. It opens a conversation about that section alone: say
+  what to change, read the writer's version (and edit it yourself), ask again, and put it back in
+  the box when it is right. The writer sees the rest of the film for context but returns only that
+  section, and nothing in the video changes until you put it back.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

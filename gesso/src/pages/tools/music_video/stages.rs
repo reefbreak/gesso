@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 
+use super::workshop::Target;
 use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{Aspect, Grade};
@@ -282,6 +283,9 @@ fn style(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
       ui.disable();
     }
     changed |= edit_heading(ui, "mv-style-statement", &mut visual.statement, "The look in one sentence", 20.0);
+    if ui.add(egui::Button::new(egui::RichText::new("Work on this with AI").size(12.0).color(theme::MUTED)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+      actions.push(Action::Workshop(Target::Statement));
+    }
     ui.add_space(10.0);
     card(ui, "Colour palette".to_owned(), |ui| {
       let mut removed = None;
@@ -305,11 +309,14 @@ fn style(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
         changed = true;
       }
     });
-    changed |= edit_card(ui, "Lighting", &mut visual.lighting, 2);
-    changed |= edit_card(ui, "Texture", &mut visual.texture, 2);
-    card(ui, "Common style block \u{b7} added to every image and clip".to_owned(), |ui| {
+    changed |= edit_card(ui, "Lighting", &mut visual.lighting, 2, Target::Lighting, actions);
+    changed |= edit_card(ui, "Texture", &mut visual.texture, 2, Target::Texture, actions);
+    let asked = workable_card(ui, "Common style block \u{b7} added to every image and clip".to_owned(), |ui| {
       changed |= ui.add(egui::TextEdit::multiline(&mut visual.block).desired_rows(3).desired_width(f32::INFINITY).frame(egui::Frame::NONE)).changed();
     });
+    if asked {
+      actions.push(Action::Workshop(Target::StyleBlock));
+    }
   });
   let line = page.progress_line().filter(|_| page.running_here());
   let styled = page.project.visual.is_some();
@@ -353,22 +360,25 @@ fn brief(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
     }
     changed |= edit_heading(ui, "mv-brief-title", &mut brief.title, "The film's title", 22.0);
     ui.add_space(10.0);
-    changed |= edit_card(ui, "Logline", &mut brief.logline, 2);
-    changed |= edit_card(ui, "Core drive", &mut brief.drive, 2);
-    changed |= edit_card(ui, "Director's vision", &mut brief.vision, 3);
-    changed |= edit_card(ui, "Editing strategy", &mut brief.editing, 2);
-    card(ui, "Visual motifs \u{b7} one per line".to_owned(), |ui| {
+    changed |= edit_card(ui, "Logline", &mut brief.logline, 2, Target::Logline, actions);
+    changed |= edit_card(ui, "Core drive", &mut brief.drive, 2, Target::Drive, actions);
+    changed |= edit_card(ui, "Director's vision", &mut brief.vision, 3, Target::Vision, actions);
+    changed |= edit_card(ui, "Editing strategy", &mut brief.editing, 2, Target::Editing, actions);
+    let asked = workable_card(ui, "Visual motifs \u{b7} one per line".to_owned(), |ui| {
       let mut motifs = brief.motifs.join("\n");
       if edit_text(ui, "mv-brief-motifs", &mut motifs, 3) {
         brief.motifs = motifs.split('\n').map(str::to_owned).collect();
         changed = true;
       }
     });
-    changed |= subject_card(ui, "Character", "character", &mut brief.character, true);
-    changed |= subject_card(ui, "Venue", "venue", &mut brief.venue, true);
+    if asked {
+      actions.push(Action::Workshop(Target::Motifs));
+    }
+    changed |= subject_card(ui, "Character", "character", &mut brief.character, true, Target::Character, actions);
+    changed |= subject_card(ui, "Venue", "venue", &mut brief.venue, true, Target::Venue, actions);
     let mut removed = None;
     for (i, prop) in brief.props.iter_mut().enumerate() {
-      changed |= subject_card(ui, "Prop", &format!("prop-{i}"), prop, false);
+      changed |= subject_card(ui, "Prop", &format!("prop-{i}"), prop, false, Target::Prop(i), actions);
       if prop.name.trim().is_empty() && prop.description.trim().is_empty() && secondary(ui, Icon::Plus, "Remove this empty prop", true) {
         removed = Some(i);
       }
@@ -400,9 +410,9 @@ fn brief(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
 }
 
 /// The performer, the venue or a prop, edited in place; returns whether anything changed.
-fn subject_card(ui: &mut Ui, title: &str, id: &str, subject: &mut Subject, has_role: bool) -> bool {
+fn subject_card(ui: &mut Ui, title: &str, id: &str, subject: &mut Subject, has_role: bool, target: Target, actions: &mut Vec<Action>) -> bool {
   let mut changed = false;
-  card(ui, title.to_owned(), |ui| {
+  let asked = workable_card(ui, title.to_owned(), |ui| {
     changed |= edit_line(ui, &format!("mv-brief-{id}-name"), &mut subject.name, "Name", FontId::new(14.0, theme::semibold()), f32::INFINITY);
     if has_role {
       changed |= edit_line(ui, &format!("mv-brief-{id}-role"), &mut subject.role, if title == "Venue" { "Its mood" } else { "Their role" }, FontId::new(12.5, egui::FontFamily::Proportional), f32::INFINITY);
@@ -410,6 +420,9 @@ fn subject_card(ui: &mut Ui, title: &str, id: &str, subject: &mut Subject, has_r
     ui.add_space(2.0);
     changed |= edit_text(ui, &format!("mv-brief-{id}-description"), &mut subject.description, 3);
   });
+  if asked {
+    actions.push(Action::Workshop(target));
+  }
   changed
 }
 
@@ -937,6 +950,25 @@ fn heading(ui: &mut Ui, stage: Stage, title: &str, blurb: &str) {
 }
 
 /// A bordered block with a small label over its content.
+/// A card with a link in its header to work on its contents with the writer; returns whether the
+/// link was clicked.
+fn workable_card(ui: &mut Ui, title: String, content: impl FnOnce(&mut Ui)) -> bool {
+  let mut asked = false;
+  egui::Frame::new().fill(theme::WASH).stroke(theme::hairline()).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
+    ui.set_width(ui.available_width());
+    ui.horizontal(|ui| {
+      widgets::hud(ui, &title, theme::FAINT);
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        asked = ui.add(egui::Button::new(egui::RichText::new("Work on this with AI").size(12.0).color(theme::MUTED)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Talk this section through with the writer, then put the result back here").clicked();
+      });
+    });
+    ui.add_space(6.0);
+    content(ui);
+  });
+  ui.add_space(CARD_GAP);
+  asked
+}
+
 fn card(ui: &mut Ui, title: String, content: impl FnOnce(&mut Ui)) {
   egui::Frame::new().fill(theme::WASH).stroke(theme::hairline()).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
     ui.set_width(ui.available_width());
@@ -947,10 +979,12 @@ fn card(ui: &mut Ui, title: String, content: impl FnOnce(&mut Ui)) {
   ui.add_space(CARD_GAP);
 }
 
-/// A card whose text is edited in place; returns whether it changed.
-fn edit_card(ui: &mut Ui, title: &str, text: &mut String, rows: usize) -> bool {
+/// A card whose text is edited in place or worked on with the writer; returns whether it changed.
+fn edit_card(ui: &mut Ui, title: &str, text: &mut String, rows: usize, target: Target, actions: &mut Vec<Action>) -> bool {
   let mut changed = false;
-  card(ui, title.to_owned(), |ui| changed = edit_text(ui, title, text, rows));
+  if workable_card(ui, title.to_owned(), |ui| changed = edit_text(ui, title, text, rows)) {
+    actions.push(Action::Workshop(target));
+  }
   changed
 }
 
@@ -1066,15 +1100,15 @@ fn chip(ui: &mut Ui, text: &str) {
   ui.painter().galley(rect.center() - galley.size() / 2.0, galley, theme::MUTED);
 }
 
-fn label(text: &str) -> egui::RichText {
+pub(super) fn label(text: &str) -> egui::RichText {
   egui::RichText::new(text).size(12.0).family(theme::medium()).color(theme::MUTED)
 }
 
-fn body(text: &str) -> egui::RichText {
+pub(super) fn body(text: &str) -> egui::RichText {
   egui::RichText::new(text).size(13.5).color(theme::INK)
 }
 
-fn small(text: &str) -> egui::RichText {
+pub(super) fn small(text: &str) -> egui::RichText {
   egui::RichText::new(text).size(12.0).color(theme::FAINT)
 }
 
