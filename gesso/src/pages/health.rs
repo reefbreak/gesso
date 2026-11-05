@@ -154,7 +154,7 @@ fn connections(ui: &mut Ui, report: &HealthReport) {
     });
     ui.add_space(22.0);
   }
-  ui.label(egui::RichText::new("Ready: proven with a free call on your account. Listed: the provider has the model, but only a real generation shows whether your account may use it.").size(12.0).color(theme::FAINT));
+  ui.label(egui::RichText::new("Ready: your account reached the model with a free call. Listed: the provider has the model, but the free check couldn't settle whether your account reaches it.").size(12.0).color(theme::FAINT));
 }
 
 /// What each account has cost: today, this month and all time.

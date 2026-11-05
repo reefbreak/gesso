@@ -53,7 +53,7 @@ pub struct LocalConfig {
   /// The Gemini text model that writes lyrics and shot lists; unset tries the newest ids in turn.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub song_text_model: Option<String>,
-  /// The Lyria model that makes full songs; unset tries `lyria-3.5`, then `lyria-3-pro-preview`.
+  /// The Lyria model that makes full songs; unset tries `lyria-3-pro-preview`, then `lyria-3.5`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub song_music_model: Option<String>,
   /// The Claude model or inference profile on Bedrock, when Claude is picked as the writer.

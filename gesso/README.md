@@ -156,7 +156,7 @@ runs, and leaves everything it made editable before the next stage uses it.
   also go into the library; the dozens of stills and clips don't.
 
 Optional settings in `local_providers.json`: `song_text_model` (default: `gemini-3.8-flash`, then
-`gemini-3.5-flash`), `song_music_model` (default: `lyria-3.5`, then `lyria-3-pro-preview`) and
+`gemini-3.5-flash`), `song_music_model` (default: `lyria-3-pro-preview`, then `lyria-3.5`) and
 `song_claude_model` (default: `global.anthropic.claude-sonnet-4-6`). Lyria 3 and the listening
 call run on the global endpoint.
 
@@ -169,13 +169,15 @@ nothing, so it's free.
 | Models                          | How they're checked                               | Best result |
 |---------------------------------|---------------------------------------------------|-------------|
 | Gemini (writer and Nano Banana) | `countTokens` on your project                     | Ready       |
-| Veo, Lyria, Gemini Omni Flash   | Vertex's model catalogue                          | Listed      |
+| Veo, Lyria, Gemini Omni Flash   | Catalogue, then an empty request                  | Ready       |
 | Stability and Claude (Bedrock)  | `GetFoundationModelAvailability` for your account | Ready       |
 | FFmpeg, background removal      | Looked for on your Mac                            | Ready       |
 
-**Ready** is proven with a free call on your account. **Listed** means the provider has the model,
-but no free call shows whether your project may use it, so access is confirmed the first time it
-runs. Problems are **No access** (the provider refused: an API not enabled, a role missing, or
+**Ready** means your account reached the model with a free call. For Veo, Lyria and Omni Flash,
+which have no free call of their own, Gesso sends an empty request to the endpoint it generates
+with: the model turns it down unbilled, which shows your project got through. Quota limits still
+only show on a real generation. **Listed** means the provider has the model but that test didn't
+get a clear answer. Problems are **No access** (the provider refused: an API not enabled, a role missing, or
 model access not granted in Bedrock), **Not found** (the model id isn't offered there: renamed,
 retired, or the wrong region) and **Check failed** (offline, or credentials expired). Each row
 says what to do. The Bedrock check needs the `bedrock:GetFoundationModelAvailability` permission.

@@ -5,17 +5,20 @@
 //! |--------------------------------|------------------------------------------------------------|
 //! | Gemini (text and Nano Banana)  | `countTokens` on the project: proves the project may call  |
 //! |                                | the model                                                  |
-//! | Veo, Lyria, Omni Flash         | Vertex's model catalogue: proves the model exists there,   |
-//! |                                | but not that the project may use it (no free call does)    |
+//! | Veo, Lyria, Omni Flash         | Vertex's model catalogue, then an empty request to the     |
+//! |                                | model: it's rejected unbilled, which shows the project     |
+//! |                                | reached it. Quota only shows on a real generation          |
 //! | Stability and Claude (Bedrock) | `GetFoundationModelAvailability`: the account's access     |
 //! | FFmpeg, ISNet                  | Looked for on this machine                                 |
+
+use std::future::Future;
 
 use chrono::{DateTime, Local};
 use futures::future::join_all;
 
 use super::LocalEngine;
 use super::bedrock::{DEFAULT_CLAUDE_MODEL, ModelAccess};
-use super::vertex::{OMNI_MODELS, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS};
+use super::vertex::{OMNI_MODELS, ProbeCall, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS};
 use crate::backend::video;
 
 /// Lyria 3 and Omni Flash are served from the global endpoint.
@@ -50,7 +53,7 @@ impl Provider {
 pub enum State {
   /// Proven to work with the user's account.
   Ready,
-  /// In the provider's catalogue; whether the account may use it shows on first use.
+  /// In the provider's catalogue, but it couldn't be shown that the account reaches it.
   Listed,
   /// The account or key it needs isn't configured.
   NotSetUp,
@@ -113,11 +116,28 @@ impl HealthReport {
   }
 }
 
+/// How far a check of a model with no free call got.
+enum Reach {
+  /// Listed, and the model answered the project's empty request.
+  Answered,
+  /// Listed, but the request didn't settle it: why.
+  ListedOnly(String),
+}
+
 /// A model to check: its name on screen, what uses it, and its id.
 struct Model {
   name: &'static str,
   used_for: &'static str,
   upstream: String,
+  /// Other ids the app falls back to when the provider doesn't know `upstream`.
+  alternates: Vec<String>,
+}
+
+impl Model {
+  /// Every id the app would try, in order.
+  fn ids(&self) -> impl Iterator<Item = &str> {
+    std::iter::once(self.upstream.as_str()).chain(self.alternates.iter().map(String::as_str))
+  }
 }
 
 impl LocalEngine {
@@ -138,9 +158,9 @@ impl LocalEngine {
     let check = |model: &Model, state, detail: String| Check { provider: Provider::GoogleCloud, name: model.name.to_owned(), used_for: model.used_for.to_owned(), upstream: model.upstream.clone(), state, detail };
     if !config.vertex_enabled() {
       let why = "Add gcp_project to local_providers.json, then run `gcloud auth application-default login`.";
-      return gemini.iter().chain(listed.iter().map(|(model, _)| model)).map(|model| check(model, State::NotSetUp, why.to_owned())).collect();
+      return gemini.iter().chain(listed.iter().map(|(model, _, _)| model)).map(|model| check(model, State::NotSetUp, why.to_owned())).collect();
     }
-    let sign_in = Model { name: "Google Cloud sign-in", used_for: "Everything on Vertex AI", upstream: "Application Default Credentials".to_owned() };
+    let sign_in = Model { name: "Google Cloud sign-in", used_for: "Everything on Vertex AI", upstream: "Application Default Credentials".to_owned(), alternates: Vec::new() };
     let mut out = Vec::new();
     // An express-mode key needs no sign-in, and covers Gemini only.
     if config.gcp_project.is_some() {
@@ -150,32 +170,49 @@ impl LocalEngine {
           // Without a token every other check would fail the same way: say so once.
           let message = format!("{err:#}");
           out.push(check(&sign_in, State::Failed, message));
-          out.extend(gemini.iter().chain(listed.iter().map(|(model, _)| model)).map(|model| check(model, State::Failed, "Not checked: sign in to Google Cloud first.".to_owned())));
+          out.extend(gemini.iter().chain(listed.iter().map(|(model, _, _)| model)).map(|model| check(model, State::Failed, "Not checked: sign in to Google Cloud first.".to_owned())));
           return out;
         },
       }
     }
-    let gemini_results = join_all(gemini.iter().map(|model| self.vertex.check_gemini(&model.upstream))).await;
-    for (model, result) in gemini.iter().zip(gemini_results) {
+    let gemini_results = join_all(gemini.iter().map(|model| first_known(model, |id| self.vertex.check_gemini(id)))).await;
+    for (model, (id, result)) in gemini.iter().zip(gemini_results) {
       let (state, detail) = match result {
-        Ok(()) => (State::Ready, "Your project can call it.".to_owned()),
+        Ok(()) => (State::Ready, format!("Your project can call it.{}", fallback_note(model, &id))),
         Err(err) => classify(&format!("{err:#}")),
       };
-      out.push(check(model, state, detail));
+      out.push(Check { upstream: id, ..check(model, state, detail) });
     }
     if config.gcp_project.is_none() {
-      out.extend(listed.iter().map(|(model, _)| check(model, State::NotSetUp, "Needs a Google Cloud project: an express-mode key covers Gemini only.".to_owned())));
+      out.extend(listed.iter().map(|(model, _, _)| check(model, State::NotSetUp, "Needs a Google Cloud project: an express-mode key covers Gemini only.".to_owned())));
       return out;
     }
-    let listed_results = join_all(listed.iter().map(|(model, location)| self.vertex.check_listed(&model.upstream, location))).await;
-    for ((model, _), result) in listed.iter().zip(listed_results) {
+    let listed_results = join_all(listed.iter().map(|(model, location, call)| first_known(model, move |id| self.reach(id, location, *call)))).await;
+    for ((model, _, _), (id, result)) in listed.iter().zip(listed_results) {
       let (state, detail) = match result {
-        Ok(()) => (State::Listed, "In Vertex's catalogue. There's no free call that proves your project may use it, so access is confirmed the first time it runs.".to_owned()),
+        Ok(Reach::Answered) => (State::Ready, format!("Your project reached it: an empty test request was turned down unbilled, as it should be. Quota limits only show on a real generation.{}", fallback_note(model, &id))),
+        Ok(Reach::ListedOnly(why)) => (State::Listed, format!("In Vertex's catalogue, but the test request didn't get a clear answer, so access is confirmed the first time it runs. ({why}){}", fallback_note(model, &id))),
         Err(err) => classify(&format!("{err:#}")),
       };
-      out.push(check(model, state, detail));
+      out.push(Check { upstream: id, ..check(model, state, detail) });
     }
     out
+  }
+
+  /// Whether a model with no free call is in Vertex's catalogue and answers the project.
+  async fn reach(&self, id: &str, location: &str, call: ProbeCall) -> anyhow::Result<Reach> {
+    self.vertex.check_listed(id, location).await?;
+    match self.vertex.check_answers(id, location, call).await {
+      Ok(()) => Ok(Reach::Answered),
+      Err(err) => {
+        let text = format!("{err:#}");
+        // A refusal or an unknown model is the answer; anything else leaves it at "listed".
+        match classify(&text).0 {
+          State::NoAccess | State::NotFound => Err(err),
+          _ => Ok(Reach::ListedOnly(text.chars().take(160).collect())),
+        }
+      },
+    }
   }
 
   async fn check_aws(&self) -> Vec<Check> {
@@ -225,20 +262,57 @@ impl LocalEngine {
 
 /// The Gemini models, checked with `countTokens`.
 fn gemini_models(text_override: Option<&str>) -> Vec<Model> {
-  let model = |name, used_for, upstream: &str| Model { name, used_for, upstream: upstream.to_owned() };
-  vec![model("Gemini (writer)", "Music Video: lyrics, style, brief, scenes, listening", text_override.unwrap_or(TEXT_MODELS[0])), model("Nano Banana 2", "Image, Edit Image, 3D Stage, Music Video pictures", "gemini-3.1-flash-image"), model("Nano Banana Pro", "Image, Edit Image, Music Video pictures", "gemini-3-pro-image"), model("Nano Banana 2 Lite", "Image", "gemini-3.1-flash-lite-image")]
+  let model = |name, used_for, upstream: &str| Model { name, used_for, upstream: upstream.to_owned(), alternates: Vec::new() };
+  vec![with_fallbacks("Gemini (writer)", "Music Video: lyrics, style, brief, scenes, listening", text_override, &TEXT_MODELS), model("Nano Banana 2", "Image, Edit Image, 3D Stage, Music Video pictures", "gemini-3.1-flash-image"), model("Nano Banana Pro", "Image, Edit Image, Music Video pictures", "gemini-3-pro-image"), model("Nano Banana 2 Lite", "Image", "gemini-3.1-flash-lite-image")]
 }
 
-/// The models with no free call, looked up in Vertex's catalogue at the location they run in.
-fn listed_models(song_override: Option<&str>, omni_override: Option<&str>, video_location: &str) -> Vec<(Model, String)> {
-  let model = |name, used_for, upstream: &str, location: &str| (Model { name, used_for, upstream: upstream.to_owned() }, location.to_owned());
-  vec![model("Veo 3.1 Fast", "Video, Edit Video (extend), Music Video shots", "veo-3.1-fast-generate-001", video_location), model("Veo 3.1", "Video, Edit Video (extend), Music Video shots", "veo-3.1-generate-001", video_location), model("Veo 3.1 Lite", "Video, Edit Video (extend), Music Video shots", "veo-3.1-lite-generate-001", video_location), model("Lyria 3 (songs)", "Music Video song", song_override.unwrap_or(SONG_MODELS[0]), GLOBAL), model("Lyria 3 Clip", "Music Video 30-second clip", SONG_CLIP_MODEL, GLOBAL), model("Lyria 2", "Audio", "lyria-002", video_location), model("Gemini Omni Flash", "Edit Video (describe)", omni_override.unwrap_or(OMNI_MODELS[0]), GLOBAL)]
+/// The models with no free call: where each runs, and the endpoint the app generates with.
+fn listed_models(song_override: Option<&str>, omni_override: Option<&str>, video_location: &str) -> Vec<(Model, String, ProbeCall)> {
+  let model = |name, used_for, upstream: &str| Model { name, used_for, upstream: upstream.to_owned(), alternates: Vec::new() };
+  let veo = "Video, Edit Video (extend), Music Video shots";
+  vec![(model("Veo 3.1 Fast", veo, "veo-3.1-fast-generate-001"), video_location.to_owned(), ProbeCall::PredictLongRunning), (model("Veo 3.1", veo, "veo-3.1-generate-001"), video_location.to_owned(), ProbeCall::PredictLongRunning), (model("Veo 3.1 Lite", veo, "veo-3.1-lite-generate-001"), video_location.to_owned(), ProbeCall::PredictLongRunning), (with_fallbacks("Lyria 3 (songs)", "Music Video song", song_override, &SONG_MODELS), GLOBAL.to_owned(), ProbeCall::Interaction), (model("Lyria 3 Clip", "Music Video 30-second clip", SONG_CLIP_MODEL), GLOBAL.to_owned(), ProbeCall::Interaction), (model("Lyria 2", "Audio", "lyria-002"), video_location.to_owned(), ProbeCall::Predict), (with_fallbacks("Gemini Omni Flash", "Edit Video (describe)", omni_override, &OMNI_MODELS), GLOBAL.to_owned(), ProbeCall::Interaction)]
 }
 
 /// The Bedrock models, checked with `GetFoundationModelAvailability`.
 fn bedrock_models(claude_override: Option<&str>) -> Vec<Model> {
-  let model = |name, used_for, upstream: &str| Model { name, used_for, upstream: upstream.to_owned() };
+  let model = |name, used_for, upstream: &str| Model { name, used_for, upstream: upstream.to_owned(), alternates: Vec::new() };
   vec![model("Stable Image Ultra", "Image", "stability.stable-image-ultra-v1:1"), model("SD 3.5 Large", "Image", "stability.sd3-5-large-v1:0"), model("Stable Image Core", "Image", "stability.stable-image-core-v1:1"), model("Stability Inpaint", "Edit Image", "stability.stable-image-inpaint-v1:0"), model("Stability Erase Object", "Edit Image", "stability.stable-image-erase-object-v1:0"), model("Stability Search and Replace", "Edit Image", "stability.stable-image-search-replace-v1:0"), model("Stability Outpaint", "Edit Image", "stability.stable-outpaint-v1:0"), model("Stability Remove Background", "BG Remove", "stability.stable-image-remove-background-v1:0"), model("Claude (writer)", "Music Video, when Claude is the writer", claude_override.unwrap_or(DEFAULT_CLAUDE_MODEL))]
+}
+
+/// A model the app tries several ids for: the user's override alone, or the defaults in order.
+fn with_fallbacks(name: &'static str, used_for: &'static str, chosen: Option<&str>, defaults: &[&str]) -> Model {
+  match chosen {
+    Some(id) => Model { name, used_for, upstream: id.to_owned(), alternates: Vec::new() },
+    None => Model { name, used_for, upstream: defaults[0].to_owned(), alternates: defaults[1..].iter().map(|id| (*id).to_owned()).collect() },
+  }
+}
+
+/// Checks a model's ids in the order the app would try them, stopping at the first the provider
+/// knows. Returns that id (or the first, when none is known) with its result.
+async fn first_known<'a, T, F, Fut>(model: &'a Model, check: F) -> (String, anyhow::Result<T>)
+where
+  F: Fn(&'a str) -> Fut,
+  Fut: Future<Output = anyhow::Result<T>>,
+{
+  let mut first_failure = None;
+  for id in model.ids() {
+    match check(id).await {
+      Err(err) if classify(&format!("{err:#}")).0 == State::NotFound => {
+        first_failure.get_or_insert(err);
+      },
+      result => return (id.to_owned(), result),
+    }
+  }
+  (model.upstream.clone(), Err(first_failure.unwrap_or_else(|| anyhow::anyhow!("No model id to check"))))
+}
+
+/// Says when the id that answered isn't the app's first choice.
+fn fallback_note(model: &Model, id: &str) -> String {
+  if id == model.upstream {
+    String::new()
+  } else {
+    format!(" {} isn't offered here, so this one is used.", model.upstream)
+  }
 }
 
 /// What a provider's error means for the user, and what to do about it.
@@ -330,6 +404,36 @@ mod tests {
     }
   }
 
+  /// The app falls back through a model's ids, so the check does too: the first id the provider
+  /// knows is the one reported, with a note that the first choice isn't offered.
+  #[tokio::test]
+  async fn the_first_id_the_provider_knows_is_reported() {
+    let model = with_fallbacks("Lyria 3 (songs)", "Music Video song", None, &["lyria-new", "lyria-old"]);
+    let answer = |known: &'static str| {
+      move |id: &str| {
+        let found = id == known;
+        async move {
+          if found {
+            Ok(())
+          } else {
+            Err(anyhow::anyhow!("Vertex AI error 404 Not Found: Publisher Model is not found."))
+          }
+        }
+      }
+    };
+    let (id, result) = first_known(&model, answer("lyria-old")).await;
+    assert_eq!((id.as_str(), result.is_ok()), ("lyria-old", true));
+    assert_eq!(fallback_note(&model, &id), " lyria-new isn't offered here, so this one is used.");
+    let (id, result) = first_known(&model, answer("lyria-new")).await;
+    assert_eq!((id.as_str(), result.is_ok(), fallback_note(&model, &id).as_str()), ("lyria-new", true, ""));
+    let (id, result) = first_known(&model, answer("neither")).await;
+    assert_eq!(id, "lyria-new");
+    assert_eq!(classify(&format!("{:#}", result.unwrap_err())).0, State::NotFound);
+    // A refusal isn't a reason to try the next id: it's the answer.
+    let (id, result) = first_known(&model, |_| async { Err::<(), _>(anyhow::anyhow!("Vertex AI error 403 Forbidden: PERMISSION_DENIED")) }).await;
+    assert_eq!((id.as_str(), result.is_err()), ("lyria-new", true));
+  }
+
   #[test]
   fn overrides_replace_the_default_ids() {
     assert_eq!(gemini_models(Some("gemini-4-argon"))[0].upstream, "gemini-4-argon");
@@ -337,6 +441,9 @@ mod tests {
     let listed = listed_models(Some("lyria-3-pro-preview"), None, "us-central1");
     assert_eq!((listed[3].0.upstream.as_str(), listed[3].1.as_str()), ("lyria-3-pro-preview", "global"));
     assert_eq!((listed[0].1.as_str(), listed[6].0.upstream.as_str()), ("us-central1", OMNI_MODELS[0]));
+    assert_eq!((listed[0].2, listed[3].2, listed[5].2), (ProbeCall::PredictLongRunning, ProbeCall::Interaction, ProbeCall::Predict));
+    assert!(listed[3].0.alternates.is_empty(), "an override is the only id tried");
+    assert_eq!(listed_models(None, None, "us-central1")[3].0.ids().collect::<Vec<_>>(), SONG_MODELS);
     assert_eq!(bedrock_models(Some("us.anthropic.claude-haiku-4-5-20251001-v1:0")).last().unwrap().upstream, "us.anthropic.claude-haiku-4-5-20251001-v1:0");
     assert_eq!(capitalise("not offered in this region"), "Not offered in this region.");
   }

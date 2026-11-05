@@ -36,8 +36,9 @@ pub const OMNI_MODELS: [&str; 2] = ["gemini-omni-1.1-flash-preview", "gemini-omn
 const OMNI_LOCATION: &str = "global";
 /// Gemini's text models, newest first; the next is tried while Vertex says one isn't found.
 pub const TEXT_MODELS: [&str; 2] = ["gemini-3.8-flash", "gemini-3.5-flash"];
-/// Lyria's full-song models (songs with vocals, a couple of minutes long), newest first.
-pub const SONG_MODELS: [&str; 2] = ["lyria-3.5", "lyria-3-pro-preview"];
+/// Lyria's full-song models (songs with vocals, a couple of minutes long). Lyria 3 Pro is the one
+/// Vertex lists; Lyria 3.5 is on the Gemini API only so far, and is tried in case it arrives.
+pub const SONG_MODELS: [&str; 2] = ["lyria-3-pro-preview", "lyria-3.5"];
 /// Lyria's 30-second model.
 pub const SONG_CLIP_MODEL: &str = "lyria-3-clip-preview";
 /// A long reply (a shot list for a whole song) fits in this many tokens.
@@ -84,6 +85,17 @@ pub struct Song {
   pub file: GeneratedFile,
   pub text: String,
   pub model: String,
+}
+
+/// Which endpoint a health check sends its empty request to: the one the app generates with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeCall {
+  /// `:predict` (Lyria 2).
+  Predict,
+  /// `:predictLongRunning` (Veo).
+  PredictLongRunning,
+  /// The Interactions API (Lyria 3, Omni Flash).
+  Interaction,
 }
 
 /// One Omni Flash edit of a clip (at most 10 s).
@@ -223,6 +235,31 @@ impl VertexClient {
     let url = format!("{}v1/publishers/google/models/{model}", self.host(location));
     let token = self.token().await?;
     read_json(self.http.get(url).bearer_auth(token).header("x-goog-user-project", project).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+  }
+
+  /// Whether a model with no free call answers the project: an empty request is sent to the
+  /// endpoint the app generates with, which the model rejects as invalid without running (so
+  /// nothing is billed). A rejection for the request's shape means the project reached the model;
+  /// a refusal or "not found" comes back as the error it is.
+  pub async fn check_answers(&self, model: &str, location: &str, call: ProbeCall) -> anyhow::Result<()> {
+    let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Needs a Google Cloud project in local_providers.json"))?;
+    let (url, body) = match call {
+      ProbeCall::Predict | ProbeCall::PredictLongRunning => {
+        let method = if call == ProbeCall::Predict { "predict" } else { "predictLongRunning" };
+        (format!("{}v1/projects/{project}/locations/{location}/publishers/google/models/{model}:{method}", self.host(location)), json!({ "instances": [], "parameters": {} }))
+      },
+      // No input at all, so there's nothing it could generate from.
+      ProbeCall::Interaction => (format!("{}v1beta1/projects/{project}/locations/{location}/interactions", self.host(location)), json!({ "model": model })),
+    };
+    let token = self.token().await?;
+    let response = self.http.post(url).bearer_auth(token).json(&body).timeout(PROBE_TIMEOUT).send().await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| text.chars().take(300).collect());
+    if status.is_success() || (status == reqwest::StatusCode::BAD_REQUEST && !rejects_the_model(&message)) {
+      return Ok(());
+    }
+    anyhow::bail!("Vertex AI error {status}: {message}")
   }
 
   /// One `generateContent` call, with the project's credentials or an express-mode key.
@@ -502,6 +539,13 @@ fn song_body(model: &str, prompt: &str, background: bool) -> Value {
   body
 }
 
+/// Whether a "bad request" is about the model itself (unknown or not offered), not the empty
+/// request's shape.
+fn rejects_the_model(message: &str) -> bool {
+  let lower = message.to_ascii_lowercase();
+  ["not found", "not supported", "unsupported model", "unknown model", "invalid model", "does not exist", "not available", "not allowed", "permission"].iter().any(|phrase| lower.contains(phrase))
+}
+
 /// Whether Vertex refused the request for asking to run in the background.
 fn refuses_background(err: &anyhow::Error) -> bool {
   let text = err.to_string().to_ascii_lowercase();
@@ -704,6 +748,14 @@ mod tests {
       assert_eq!(reply_text(&reply).unwrap(), "{\"a\":1}");
       let blocked = reply_text(&json!({ "candidates": [{ "finishReason": "SAFETY" }] }));
       assert!(blocked.unwrap_err().to_string().contains("SAFETY"));
+    }
+
+    #[test]
+    fn a_bad_request_about_the_model_isnt_an_answer() {
+      assert!(rejects_the_model("Model lyria-3.5 is not supported for interactions."));
+      assert!(rejects_the_model("Publisher Model `publishers/google/models/x` is not found."));
+      assert!(!rejects_the_model("Invalid JSON payload: `instances` must not be empty."));
+      assert!(!rejects_the_model("Required field `input` is missing."));
     }
 
     #[test]
