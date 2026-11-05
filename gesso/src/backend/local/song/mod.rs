@@ -43,7 +43,7 @@ use super::library::{LocalLibrary, MediaClass, NewFile, Origin};
 use super::spend::Account;
 use super::tools::VeoTier;
 use super::vertex::{GeminiImageRequest, SONG_CLIP_MODEL, TEXT_MODELS, TextRequest, VeoRequest};
-use super::{LocalEngine, RefImage};
+use super::{GeneratedFile, LocalEngine, RefImage};
 use crate::backend::Event;
 use beats::BeatGrid;
 use cut::{Aspect, CutShot, Grade};
@@ -610,6 +610,7 @@ impl SongRun<'_> {
     };
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
+    let file = in_keeping(file, look);
     let path = save_picture(dir, &format!("{}_{:02}_v{}.{}", job.kind.label(), job.index + 1, job.version, file.extension), &file.bytes)?;
     self.add_to_library(&file.bytes, file.extension, MediaClass::Image);
     Ok(path)
@@ -627,6 +628,7 @@ impl SongRun<'_> {
     let images: Vec<RefImage> = guide.into_iter().chain(references.iter().map(|(_, image)| image.clone())).collect();
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
+    let file = in_keeping(file, &design.look);
     save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)
   }
 
@@ -742,7 +744,39 @@ fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &s
     ReferenceKind::Location => format!("An establishing shot of a music video's location with nobody in it. The place, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Prop => format!("A reference photograph of a single prop from a music video, alone on a plain white background. The prop, {}: {}", name.trim(), sentence(description)),
   };
-  format!("{subject} The video's look, which this picture must match: {} No text, captions or logos.", sentence(look))
+  format!("{subject} The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look))
+}
+
+/// Whether the video's look is black and white.
+fn is_monochrome(look: &str) -> bool {
+  let look = look.to_lowercase();
+  ["black and white", "black-and-white", "black & white", "b&w", "monochrome", "greyscale", "grayscale"].iter().any(|word| look.contains(word))
+}
+
+/// The line a black-and-white look adds to a prompt: image models slip colour in otherwise.
+fn no_colour(look: &str) -> &'static str {
+  if is_monochrome(look) { " Strictly black and white: no colour anywhere in the frame." } else { "" }
+}
+
+/// A picture as the video's look needs it: a black-and-white look is not left to the model, so
+/// one that comes back with colour in it has the colour taken out.
+fn in_keeping(file: GeneratedFile, look: &str) -> GeneratedFile {
+  if !is_monochrome(look) {
+    return file;
+  }
+  let grey = tokio::task::block_in_place(|| -> anyhow::Result<Vec<u8>> {
+    let image = image::load_from_memory(&file.bytes)?;
+    let mut out = Vec::new();
+    image.grayscale().write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
+  });
+  match grey {
+    Ok(bytes) => GeneratedFile { bytes, extension: "png", usage: file.usage },
+    Err(err) => {
+      warn!("Couldn't take the colour out of a picture: {err:#}");
+      file
+    },
+  }
 }
 
 /// A written change to a reference picture the user already has.
@@ -781,14 +815,14 @@ fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: b
   if !design.venue.trim().is_empty() {
     parts.push(format!("The venue: {}", sentence(&design.venue)));
   }
-  parts.push(format!("The video's look, which this frame must match: {} No text, captions, subtitles, borders or logos.", sentence(&design.look)));
+  parts.push(format!("The video's look, which this frame must match: {}{} No text, captions, subtitles, borders or logos.", sentence(&design.look), no_colour(&design.look)));
   parts.join(" ")
 }
 
 fn clip_prompt(look: &str, motion: &str, sing: bool) -> String {
   // A sung scene's mouth is redrawn afterwards; that works when the face stays in view and the mouth is already moving.
   let singing = if sing { " The performer sings to the camera throughout, mouth moving and clearly visible, face towards the lens and never covered, head fairly steady." } else { "" };
-  format!("{}{singing} Keep the look of the opening frame: {} No text or captions appear.", sentence(motion), sentence(look))
+  format!("{}{singing} Keep the look of the opening frame: {}{} No text or captions appear.", sentence(motion), sentence(look), no_colour(look))
 }
 
 /// `text` trimmed, ending in a full stop.
@@ -1179,8 +1213,31 @@ mod tests {
       let all = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location, ReferenceKind::Prop], false);
       assert!(all.contains("The attached pictures, in order: 1, the performer's reference sheet; 2, the location; 3, a prop.") && all.contains("Keep the location and the props as their pictures show them."));
       let alone = still_prompt(&design, "A tunnel", &[], false);
-      assert_eq!(alone, "A single frame from a music video. A tunnel. The performer: a dancer in a lanyard. The video's look, which this frame must match: grainy black and white. No text, captions, subtitles, borders or logos.");
+      assert_eq!(alone, "A single frame from a music video. A tunnel. The performer: a dancer in a lanyard. The video's look, which this frame must match: grainy black and white. Strictly black and white: no colour anywhere in the frame. No text, captions, subtitles, borders or logos.");
       assert_eq!(clip_prompt("grainy", "She runs", false), "She runs. Keep the look of the opening frame: grainy. No text or captions appear.");
+    }
+
+    #[test]
+    fn a_black_and_white_look_is_said_outright_and_enforced() {
+      let design = Design { look: "Raw 16mm Black-and-White film".into(), character: "a dancer".into(), venue: String::new() };
+      assert!(still_prompt(&design, "A tunnel", &[], false).contains("film. Strictly black and white: no colour anywhere in the frame. No text"));
+      assert!(clip_prompt(&design.look, "She runs", false).contains("Strictly black and white"));
+      assert!(reference_prompt(ReferenceKind::Prop, "Lanyard", "A badge", "monochrome, grainy").contains("Strictly black and white"));
+      assert!(!is_monochrome("neon colour, wet streets"));
+      let mut red = Vec::new();
+      image::RgbImage::from_pixel(4, 4, image::Rgb([220, 20, 20])).write_to(&mut std::io::Cursor::new(&mut red), image::ImageFormat::Png).unwrap();
+      let kept = in_keeping(GeneratedFile { bytes: red.clone(), extension: "png", usage: None }, "neon colour");
+      assert_eq!(kept.bytes, red, "a colour look is left alone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_colour_picture_for_a_black_and_white_film_loses_its_colour() {
+      let mut red = Vec::new();
+      image::RgbImage::from_pixel(4, 4, image::Rgb([220, 20, 20])).write_to(&mut std::io::Cursor::new(&mut red), image::ImageFormat::Jpeg).unwrap();
+      let grey = in_keeping(GeneratedFile { bytes: red, extension: "jpg", usage: None }, "grainy black and white");
+      assert_eq!(grey.extension, "png");
+      let pixel = image::load_from_memory(&grey.bytes).unwrap().to_rgb8().get_pixel(1, 1).0;
+      assert!(pixel[0] == pixel[1] && pixel[1] == pixel[2], "{pixel:?}");
     }
 
     /// With the sheet missing, the location's picture must not be taken for the performer.

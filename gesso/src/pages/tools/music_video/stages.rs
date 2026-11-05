@@ -16,7 +16,7 @@ use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
 use crate::backend::media_cache::{Lookup, MediaCache};
 use crate::backend::video::VideoPlayer;
 use crate::overlays::lightbox::fit_inside;
-use crate::pages::common::{Env, pick_files};
+use crate::pages::common::{AppRequest, Env, pick_files};
 use crate::pages::tools::{field, panel, prompt_field, segmented};
 use crate::prompt_box::refs::RefKind;
 use crate::shell::usd;
@@ -451,14 +451,19 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
           let change = &mut page.reference_changes[index];
           ui.vertical(|ui| {
             ui.set_width(width);
-            let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            let (rect, picture) = ui.allocate_exact_size(vec2(width, height), Sense::click());
             thumbnail(ui, rect, env.cache, reference.image.as_deref(), Icon::Image);
+            if let Some(image) = reference.image.as_ref().filter(|_| picture.on_hover_text("Double-click to see it full size").double_clicked()) {
+              env.requests.push(AppRequest::Preview(file_url(image)));
+            }
             if let Some(error) = &reference.error {
               failed_badge(ui, rect, error);
             }
             ui.add_space(6.0);
+            // The name has a line to itself, cut short if need be: beside the buttons a long one ran under them.
+            ui.add(egui::Label::new(egui::RichText::new(&reference.name).size(14.0).family(theme::semibold()).color(theme::INK)).truncate()).on_hover_text(&reference.name);
             ui.horizontal(|ui| {
-              ui.label(egui::RichText::new(&reference.name).size(14.0).family(theme::semibold()).color(theme::INK));
+              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
               ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                   if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again from its description", false).clicked() {
@@ -473,15 +478,9 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
                 });
               });
             });
-            // The kind sits on its own line: three buttons leave no room for it beside a long name.
-            ui.horizontal(|ui| {
-              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
-              ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!busy, egui::Button::new(egui::RichText::new("Work on this with AI").size(12.0).color(theme::MUTED)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Talk this description through with the writer, then put the result back here").clicked() {
-                  actions.push(Action::Workshop(Target::Reference(index)));
-                }
-              });
-            });
+            if ui.add_enabled(!busy, egui::Button::new(egui::RichText::new("Work on this with AI").size(12.0).color(theme::MUTED)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Talk this description through with the writer, then put the result back here").clicked() {
+              actions.push(Action::Workshop(Target::Reference(index)));
+            }
             changed |= ui.add(egui::TextEdit::multiline(&mut reference.description).id_salt(("mv-reference", index)).desired_rows(3).desired_width(width).font(FontId::new(12.5, egui::FontFamily::Proportional))).changed();
             // Changing the picture itself, rather than drawing a new one from the description.
             if reference.image.is_some() {
@@ -546,12 +545,12 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let busy = page.busy();
   let quality = page.quality();
   column_wide(ui, stage, "scenes", |ui| {
-    heading(ui, Stage::Scenes, "Scene planning", "The film cut into scenes on the beat, each with its opening frame. Pick one to edit it.");
+    heading(ui, Stage::Scenes, "Scene planning", "The film cut into scenes on the beat, each with its opening frame. Click one to edit it, double-click to see it full size, and Cmd-click or Shift-click to select several and redraw them together.");
     if page.project.shots.is_empty() {
       empty(ui, Icon::Film, "No scenes yet", "Planning cuts the song into scenes on its beats and has the writer describe each one.");
       return;
     }
-    scene_grid(page, ui, env.cache, false);
+    scene_grid(page, ui, env.cache, env.requests, false);
   });
   let slots = page.project.grid.as_ref().map_or(0, |grid| plan::slots(grid, &page.project.sections, page.project.pace).len());
   // The final pass redraws the stills the draft settled on; the draft draws whatever is missing.
@@ -563,6 +562,11 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let (pro, large) = (page.pro(), quality == Quality::Final);
   let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro, large });
   let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro, large });
+  // The scenes picked together in the grid, less any that can't be drawn in this pass.
+  page.picked.retain(|i| *i < page.project.shots.len());
+  let chosen: Vec<usize> = page.picked.iter().copied().filter(|i| drawable(&&page.project.shots[*i])).collect();
+  let chosen_cost = env.backend.estimate_song(&SongEstimate::Stills { count: chosen.len(), pro, large });
+  let mut clear_picked = false;
   let line = page.progress_line().filter(|_| page.running_here());
   let planned = !page.project.shots.is_empty();
   let drawn = page.project.shots.iter().any(|s| s.has_still());
@@ -601,6 +605,18 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       }
       stop_button(ui, page.running_here(), actions);
     }
+    if !page.picked.is_empty() {
+      field(ui, &format!("{} scene{} selected", page.picked.len(), plural(page.picked.len())));
+      if run_button(ui, Icon::RotateCw, &format!("Redraw {} selected", chosen.len()), chosen_cost.map(estimate), !busy && !chosen.is_empty(), None) {
+        actions.push(Action::Stills(chosen.clone()));
+      }
+      if chosen.len() < page.picked.len() {
+        ui.label(small("Some of the selected scenes have no draft still or no description yet, so they are left out."));
+      }
+      if secondary(ui, Icon::X, "Clear the selection", true) {
+        clear_picked = true;
+      }
+    }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
       let lip_sync = page.project.lip_sync;
       let shot = &mut page.project.shots[index];
@@ -629,6 +645,9 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     }
     next_button(ui, Stage::Shots, drawn, actions);
   });
+  if clear_picked {
+    page.picked.clear();
+  }
   if changed {
     page.touch(ui);
   }
@@ -660,7 +679,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
   }
   column_wide(ui, grid_area, "shots", |ui| {
     heading(ui, Stage::Shots, "Video clips", "Veo animates each scene from its still, silent, a little longer than its slot; the final cut trims it to the beat.");
-    scene_grid(page, ui, env.cache, true);
+    scene_grid(page, ui, env.cache, env.requests, true);
   });
   let whole = page.whole_clips_of();
   let with_still = page.project.shots.iter().filter(|s| s.take(quality).still.is_some()).count();
@@ -824,7 +843,7 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
 /// section, and its beat. With `clips`, badges say whether the clip has been made and, for sung
 /// scenes, whether it's been lip-synced. In the final pass, a scene still on its draft still is
 /// tagged so.
-fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, clips: bool) {
+fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, requests: &mut Vec<AppRequest>, clips: bool) {
   let quality = page.quality();
   let (columns, width) = grid_columns(ui.available_width(), CARD_MIN_WIDTH);
   let picture = match page.project.aspect {
@@ -844,7 +863,7 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, cl
         }
         let image = Rect::from_min_size(rect.min, picture);
         thumbnail(ui, image, cache, shot.still_for(quality).map(PathBuf::as_path), Icon::Image);
-        let selected = page.selected == Some(index);
+        let selected = page.selected == Some(index) || (!clips && page.picked.contains(&index));
         if selected || resp.hovered() {
           ui.painter().rect_stroke(image, theme::RADIUS, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { theme::ACCENT } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
         }
@@ -855,6 +874,9 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, cl
           failed_badge(ui, image, error);
         } else if clips && take.clip.is_some() {
           badge(ui, image, 0, Icon::Play, theme::ACCENT);
+        }
+        if !clips && page.picked.contains(&index) {
+          badge(ui, image, 2, Icon::Check, theme::ACCENT);
         }
         if shot.sing {
           // Filled once the clip is lip-synced.
@@ -867,19 +889,41 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, cl
         let line = if shot.beat.is_empty() { &shot.image } else { &shot.beat };
         let galley = ui.painter().layout(line.clone(), FontId::new(12.5, egui::FontFamily::Proportional), theme::INK, text.width());
         ui.painter().with_clip_rect(text).galley(text.left_top() + vec2(0.0, 16.0), galley, theme::INK);
-        if resp.on_hover_text(&shot.image).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        let resp = resp.on_hover_text(&shot.image).on_hover_cursor(egui::CursorIcon::PointingHand);
+        // A double click shows the still at full size.
+        if let Some(still) = shot.still_for(quality).filter(|_| resp.double_clicked()) {
+          requests.push(AppRequest::Preview(file_url(still)));
+        }
+        if resp.clicked() {
           picked = Some(index);
         }
       }
     });
     ui.add_space(CARD_GAP);
   }
-  if let Some(index) = picked {
-    if page.selected != Some(index) {
-      page.player = None;
+  let Some(index) = picked else {
+    return;
+  };
+  // On the storyboard, Cmd- or Ctrl-click adds or removes a scene from the selection and
+  // Shift-click takes every scene from the last one clicked; a plain click starts over.
+  let modifiers = ui.input(|i| i.modifiers);
+  if !clips && (modifiers.command || modifiers.ctrl || modifiers.shift) {
+    if let Some(first) = page.selected.filter(|_| page.picked.is_empty()) {
+      page.picked.insert(first);
     }
-    page.selected = Some(index);
+    if modifiers.shift {
+      let from = page.selected.unwrap_or(index);
+      page.picked.extend(from.min(index)..=from.max(index));
+    } else if !page.picked.remove(&index) {
+      page.picked.insert(index);
+    }
+  } else {
+    page.picked.clear();
   }
+  if page.selected != Some(index) {
+    page.player = None;
+  }
+  page.selected = Some(index);
 }
 
 /// Plays the file at `path` in `rect`, keeping one player for the page.

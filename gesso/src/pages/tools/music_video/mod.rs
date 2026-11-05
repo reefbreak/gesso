@@ -9,6 +9,7 @@
 mod stages;
 mod workshop;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -140,6 +141,8 @@ pub struct MusicVideoPage {
   resolution: [usize; 2],
   /// The scene picked in the Scenes and Shots grids.
   selected: Option<usize>,
+  /// The scenes selected together on the storyboard, to redraw in one go.
+  picked: BTreeSet<usize>,
   player: Option<VideoPlayer>,
   /// The section being worked on with the writer, if any.
   workshop: Option<Workshop>,
@@ -155,7 +158,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -250,6 +253,7 @@ impl MusicVideoPage {
         let slots = std::mem::take(&mut self.pending_slots);
         self.project.set_plan(&slots, &scenes);
         self.selected = None;
+        self.picked.clear();
       },
       SongUpdate::Still { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {

@@ -147,6 +147,12 @@ runs, and leaves everything it made editable before the next stage uses it.
   section, and nothing in the video changes until you put it back. Each reference image's
   description has the same link, and each card has a save button beside its upload button, so a
   picture can be saved, edited in another app and uploaded back to the same card.
+- **Black and white means black and white.** When the look says so (black and white, monochrome,
+  greyscale), every prompt says it outright and any reference image or still that comes back with
+  colour has the colour taken out before it is saved. Clips are asked for the same; the Mono grade
+  on the final cut covers any that slip.
+- **Storyboard handling.** Double-click a still or reference image to see it full size. Cmd-click
+  or Shift-click stills to select several, then redraw them together from the panel.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The
