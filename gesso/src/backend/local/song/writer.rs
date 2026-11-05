@@ -271,7 +271,7 @@ pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot], lip_sync: boo
      The video is cut into {} scenes, listed below with the section each falls in, how long it runs and what is sung over it:\n{list}\n\
      Write every scene. Reply with a JSON object with one key, \"scenes\": an array with one item per scene, in order. Each item has:\n\
      - \"index\": the scene's number from the list.\n\
-     - \"image\": the opening frame in one or two sentences: who or what is in it, the framing (wide, medium, close-up, detail), where in the venue, and the light. Don't restate the overall look; it is added to every scene.\n\
+     - \"image\": the opening frame in one or two sentences: who or what is in it, the framing (wide, medium, close-up, detail), where in the venue, and the light. Don't restate the overall look; it is added to every scene. Call the performer \"the performer\" and say what they are doing and where; never describe their face, hair, build or clothes, which come from their reference picture.\n\
      - \"motion\": what happens over the scene in one sentence: the performer's movement and the camera's.\n\
      - \"beat\": the scene's feeling in two to four words.{}\n\n\
      Follow the arc from the first scene to the last. Vary the framing from scene to scene, keep the performer in most of them, and bring the motifs and props back. \

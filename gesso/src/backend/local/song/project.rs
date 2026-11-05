@@ -413,15 +413,16 @@ impl SongProject {
     }
   }
 
-  /// The reference pictures that exist, the performer first: what every still is drawn from.
-  pub fn reference_images(&self) -> Vec<PathBuf> {
+  /// The reference pictures that exist, the performer first, each with what it shows: what every
+  /// still is drawn from.
+  pub fn reference_images(&self) -> Vec<(ReferenceKind, PathBuf)> {
     let mut made: Vec<&Reference> = self.references.iter().filter(|r| r.image.is_some()).collect();
     made.sort_by_key(|r| match r.kind {
       ReferenceKind::Look => 0,
       ReferenceKind::Location => 1,
       ReferenceKind::Prop => 2,
     });
-    made.into_iter().filter_map(|r| r.image.clone()).collect()
+    made.into_iter().filter_map(|r| r.image.clone().map(|image| (r.kind, image))).collect()
   }
 
   /// Replaces the storyboard with the writer's scenes for `slots`. Stills and clips made for the
@@ -532,7 +533,7 @@ mod tests {
     }
     // Props first on disk order doesn't matter: the performer leads.
     project.references.reverse();
-    assert_eq!(project.reference_images(), [PathBuf::from("0.png"), PathBuf::from("1.png"), PathBuf::from("2.png")]);
+    assert_eq!(project.reference_images(), [(ReferenceKind::Look, PathBuf::from("0.png")), (ReferenceKind::Location, PathBuf::from("1.png")), (ReferenceKind::Prop, PathBuf::from("2.png"))]);
 
     let mut revised = brief();
     revised.venue.description = "A flooded car park.".to_owned();

@@ -73,7 +73,7 @@ const FINAL_STILL_SIZE: &str = "2K";
 /// Scenes lip-synced at once (each is one fal job).
 const SYNCS_AT_ONCE: usize = 3;
 /// A still is drawn from at most this many reference images (the performer first).
-const REFERENCES_PER_STILL: usize = 5;
+const REFERENCES_PER_STILL: usize = 4;
 /// The performer's sheet shows them three times side by side; props are shot square.
 const LOOK_RATIO: &str = "16:9";
 const PROP_RATIO: &str = "1:1";
@@ -223,7 +223,7 @@ pub enum SongRequest {
   Stills {
     dir: PathBuf,
     design: Design,
-    references: Vec<PathBuf>,
+    references: Vec<(ReferenceKind, PathBuf)>,
     aspect: Aspect,
     quality: Quality,
     shots: Vec<StillJob>,
@@ -464,7 +464,7 @@ impl SongRun<'_> {
         self.send(SongUpdate::Planned(scenes));
       },
       SongRequest::Stills { dir, design, references, aspect, quality, shots } => {
-        let references: Vec<RefImage> = references.iter().take(REFERENCES_PER_STILL).map(|path| self.engine.load_path(path)).collect::<anyhow::Result<_>>()?;
+        let references: Vec<(ReferenceKind, RefImage)> = references.iter().take(REFERENCES_PER_STILL).map(|(kind, path)| Ok((*kind, self.engine.load_path(path)?))).collect::<anyhow::Result<_>>()?;
         let (dir, design, references) = (&dir.join("shots"), &design, &references);
         let jobs = shots.into_iter().map(|job| async move {
           if self.stopped() {
@@ -615,15 +615,16 @@ impl SongRun<'_> {
     Ok(path)
   }
 
-  async fn still(&self, dir: &Path, design: &Design, references: &[RefImage], aspect: Aspect, quality: Quality, job: StillJob) -> anyhow::Result<PathBuf> {
+  async fn still(&self, dir: &Path, design: &Design, references: &[(ReferenceKind, RefImage)], aspect: Aspect, quality: Quality, job: StillJob) -> anyhow::Result<PathBuf> {
     let (model, size) = match quality {
       Quality::Draft => (still_model(false), STILL_SIZE),
       Quality::Final => (still_model(true), FINAL_STILL_SIZE),
     };
     // The final pass recreates the approved draft frame: it goes first, ahead of the references.
     let guide = job.guide.as_deref().map(|path| self.engine.load_path(path)).transpose()?;
-    let prompt = still_prompt(design, &job.image, references.len(), guide.is_some());
-    let images: Vec<RefImage> = guide.into_iter().chain(references.iter().cloned()).collect();
+    let kinds: Vec<ReferenceKind> = references.iter().map(|(kind, _)| *kind).collect();
+    let prompt = still_prompt(design, &job.image, &kinds, guide.is_some());
+    let images: Vec<RefImage> = guide.into_iter().chain(references.iter().map(|(_, image)| image.clone())).collect();
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
     save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)
@@ -737,7 +738,7 @@ fn music_prompt(draft: &Draft, clip: bool, instrumental: bool) -> String {
 
 fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &str) -> String {
   let subject = match kind {
-    ReferenceKind::Look => format!("A character reference sheet for a music video: the same performer shown full-length three times side by side, from the front, the side and the back, standing on a plain white background, the whole figure in frame from head to shoes each time. The performer, {}: {}", name.trim(), sentence(description)),
+    ReferenceKind::Look => format!("A character reference sheet for a music video, on a plain white background. On the left, a large head-and-shoulders portrait of the performer facing the camera, the face evenly lit and sharp. On the right, the same performer shown full-length three times side by side, from the front, the side and the back, the whole figure in frame from head to shoes each time. It is one person throughout, with the same face, hair and clothes in every view. The performer, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Location => format!("An establishing shot of a music video's location with nobody in it. The place, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Prop => format!("A reference photograph of a single prop from a music video, alone on a plain white background. The prop, {}: {}", name.trim(), sentence(description)),
   };
@@ -749,16 +750,39 @@ fn change_prompt(change: &str) -> String {
   format!("Change the attached reference picture as follows: {} Keep everything else exactly as it is: the same subject, pose, framing, background and style. No text, captions or logos.", sentence(change))
 }
 
-fn still_prompt(design: &Design, image: &str, references: usize, guided: bool) -> String {
-  let performer = match references {
-    0 => format!("The performer: {}", sentence(&design.character)),
-    1 => format!("The {} picture is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. For the record, they are: {}", if guided { "second" } else { "attached" }, sentence(&design.character)),
-    _ => format!("The {} pictures are references. The first of them is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. The others are the location and the props: keep them as shown. For the record, the performer is: {}", if guided { "other" } else { "attached" }, sentence(&design.character)),
-  };
-  let venue = if design.venue.trim().is_empty() { String::new() } else { format!(" The venue: {}", sentence(&design.venue)) };
+/// A still's prompt. The attached pictures are named one by one, in the order they are sent
+/// (`kinds`, after the draft frame when `guided`), because which of them exist varies: calling the
+/// location "the performer's reference sheet" when the sheet is missing draws the wrong person.
+fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: bool) -> String {
+  let mut parts = vec![format!("A single frame from a music video. {}", sentence(image))];
+  let pictures: Vec<&str> = guided.then_some("the approved draft of this exact frame").into_iter().chain(kinds.iter().map(|kind| match kind {
+    ReferenceKind::Look => "the performer's reference sheet",
+    ReferenceKind::Location => "the location",
+    ReferenceKind::Prop => "a prop",
+  })).collect();
+  match pictures.as_slice() {
+    [] => {},
+    [only] => parts.push(format!("The attached picture is {only}.")),
+    many => parts.push(format!("The attached pictures, in order: {}.", many.iter().enumerate().map(|(i, what)| format!("{}, {what}", i + 1)).collect::<Vec<_>>().join("; "))),
+  }
   // The final pass: the director has approved this frame, so it's recreated, not reimagined.
-  let guide = if guided { " The first attached picture is the approved draft of this exact frame. Recreate it faithfully: the same composition, framing, pose, expression and lighting, with finer detail and cleaner rendering. Change nothing about what is in the frame or where." } else { "" };
-  format!("A single frame from a music video. {}{guide} {performer}{venue} The video's look, which this frame must match: {} No text, captions, subtitles, borders or logos.", sentence(image), sentence(&design.look))
+  if guided {
+    parts.push("Recreate the approved draft faithfully: the same composition, framing, pose, expression and lighting, with finer detail and cleaner rendering. Change nothing about what is in the frame or where.".to_owned());
+  }
+  if kinds.contains(&ReferenceKind::Look) {
+    // The scene's own words about the performer, and a draft drawn by a weaker model, both drift.
+    parts.push(format!("Wherever the performer appears, they are the person on the reference sheet: the same face, hair, build and clothes, whatever this scene's wording{} suggests. Show them once, as part of the scene; don't copy the sheet's layout or its plain background. For the record, they are: {}", if guided { " or the draft" } else { "" }, sentence(&design.character)));
+  } else {
+    parts.push(format!("The performer: {}", sentence(&design.character)));
+  }
+  if kinds.iter().any(|kind| *kind != ReferenceKind::Look) {
+    parts.push("Keep the location and the props as their pictures show them.".to_owned());
+  }
+  if !design.venue.trim().is_empty() {
+    parts.push(format!("The venue: {}", sentence(&design.venue)));
+  }
+  parts.push(format!("The video's look, which this frame must match: {} No text, captions, subtitles, borders or logos.", sentence(&design.look)));
+  parts.join(" ")
 }
 
 fn clip_prompt(look: &str, motion: &str, sing: bool) -> String {
@@ -1014,7 +1038,7 @@ mod tests {
       let portrait = save(&project, "portrait_v1.png", &tiny_png()).unwrap();
       let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None }];
       let (tx, rx) = std::sync::mpsc::channel();
-      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![portrait], aspect: Aspect::Tall, quality: Quality::Draft, shots }, tx, egui::Context::default());
+      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![(ReferenceKind::Look, portrait)], aspect: Aspect::Tall, quality: Quality::Draft, shots }, tx, egui::Context::default());
 
       let updates = finished(&rx, 3).await;
       let made: Vec<&PathBuf> = updates.iter().filter_map(|u| if let SongUpdate::Still { path, .. } = u { Some(path) } else { None }).collect();
@@ -1028,7 +1052,7 @@ mod tests {
       assert!(body["contents"][0]["parts"][0]["inlineData"]["data"].is_string(), "the portrait goes first");
       assert_eq!(body["generationConfig"]["imageConfig"], json!({ "aspectRatio": "9:16", "imageSize": "1K" }));
       let prompt = body["contents"][0]["parts"][1]["text"].as_str().unwrap();
-      assert!(prompt.contains("keep their face") && prompt.contains("The venue: a tunnel."));
+      assert!(prompt.contains("they are the person on the reference sheet") && prompt.contains("The venue: a tunnel."));
       assert!(engine.library().list("image", false, 0, 40).0.is_empty(), "stills stay out of the library");
       let _ = std::fs::remove_dir_all(dir);
     }
@@ -1149,21 +1173,33 @@ mod tests {
     #[test]
     fn stills_say_what_the_attached_pictures_are() {
       let design = Design { look: "grainy black and white".into(), character: "a dancer in a lanyard".into(), venue: String::new() };
-      assert!(still_prompt(&design, "A tunnel", 1, false).contains("The attached picture is the performer's reference sheet"));
-      assert!(still_prompt(&design, "A tunnel", 3, false).contains("The others are the location and the props"));
-      let alone = still_prompt(&design, "A tunnel", 0, false);
-      assert!(alone.contains("A tunnel. The performer: a dancer in a lanyard. The video's look"));
+      let sheet_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Look], false);
+      assert!(sheet_only.contains("The attached picture is the performer's reference sheet.") && sheet_only.contains("they are the person on the reference sheet"));
+      assert!(!sheet_only.contains("Keep the location"));
+      let all = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location, ReferenceKind::Prop], false);
+      assert!(all.contains("The attached pictures, in order: 1, the performer's reference sheet; 2, the location; 3, a prop.") && all.contains("Keep the location and the props as their pictures show them."));
+      let alone = still_prompt(&design, "A tunnel", &[], false);
+      assert_eq!(alone, "A single frame from a music video. A tunnel. The performer: a dancer in a lanyard. The video's look, which this frame must match: grainy black and white. No text, captions, subtitles, borders or logos.");
       assert_eq!(clip_prompt("grainy", "She runs", false), "She runs. Keep the look of the opening frame: grainy. No text or captions appear.");
+    }
+
+    /// With the sheet missing, the location's picture must not be taken for the performer.
+    #[test]
+    fn a_missing_sheet_isnt_mistaken_for_the_location() {
+      let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
+      let prompt = still_prompt(&design, "A tunnel", &[ReferenceKind::Location], false);
+      assert!(prompt.contains("The attached picture is the location.") && prompt.contains("The performer: a dancer."));
+      assert!(!prompt.contains("reference sheet"));
     }
 
     #[test]
     fn the_final_pass_recreates_the_approved_frame() {
       let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
-      let guided = still_prompt(&design, "A tunnel", 2, true);
-      assert!(guided.contains("The first attached picture is the approved draft of this exact frame. Recreate it faithfully"));
-      assert!(guided.contains("The other pictures are references"), "the references follow the draft frame");
-      assert!(still_prompt(&design, "A tunnel", 1, true).contains("The second picture is the performer's reference sheet"));
-      assert!(!still_prompt(&design, "A tunnel", 2, false).contains("approved draft"));
+      let guided = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], true);
+      assert!(guided.contains("in order: 1, the approved draft of this exact frame; 2, the performer's reference sheet; 3, the location."));
+      assert!(guided.contains("Recreate the approved draft faithfully"));
+      assert!(guided.contains("whatever this scene's wording or the draft suggests"), "the sheet outranks a draft that drifted");
+      assert!(!still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], false).contains("approved draft"));
     }
 
     #[test]
