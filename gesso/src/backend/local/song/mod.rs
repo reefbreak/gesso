@@ -55,9 +55,17 @@ use writer::{Brief, Design, Draft, PlannedShot, Read, Revision, Style, TimedLine
 const STILLS_AT_ONCE: usize = 4;
 /// Clips made at once (Veo's per-minute quota is small on new projects).
 const CLIPS_AT_ONCE: usize = 3;
-/// Waits before retrying a call the provider turned away for quota: 20 s, 40 s, 80 s.
-const QUOTA_RETRIES: u32 = 3;
+/// How often a call the provider turned away for quota is tried again, waiting 20 s, 40 s, 80 s
+/// and then two minutes each time: about eight minutes of patience per picture or clip.
+const QUOTA_RETRIES: u32 = 6;
 const QUOTA_WAIT: Duration = Duration::from_secs(20);
+const QUOTA_MAX_WAIT: Duration = Duration::from_secs(120);
+/// Once a run has been turned away, its calls start at least this far apart, doubling each time
+/// it happens again up to the longest gap.
+const QUOTA_FIRST_GAP: Duration = Duration::from_secs(3);
+const QUOTA_MAX_GAP: Duration = Duration::from_secs(24);
+/// How often a waiting call looks at whether the run was stopped.
+const STOP_CHECK: Duration = Duration::from_millis(400);
 /// Draft stills are storyboard frames and Veo's starting images: 1K is plenty. Final stills are
 /// redrawn at 2K, enough for 1080p clips.
 const STILL_SIZE: &str = "1K";
@@ -360,7 +368,7 @@ impl LocalEngine {
     }
     let engine = self.clone();
     tokio::spawn(async move {
-      let run = SongRun { engine: &engine, run_id, tx: &tx, ctx: &ctx, cancel, batch: LocalLibrary::new_batch_token() };
+      let run = SongRun { engine: &engine, run_id, tx: &tx, ctx: &ctx, cancel, batch: LocalLibrary::new_batch_token(), pace: Pace::new(QUOTA_WAIT) };
       let result = run.stage(request).await.map_err(|err| {
         warn!("Music video run {run_id} failed: {err:#}");
         format!("{err:#}")
@@ -399,6 +407,8 @@ struct SongRun<'a> {
   cancel: Arc<AtomicBool>,
   /// Groups the run's charges in the spend ledger.
   batch: String,
+  /// Slows the whole run down once a provider's per-minute limit is met.
+  pace: Pace,
 }
 
 impl SongRun<'_> {
@@ -598,7 +608,7 @@ impl SongRun<'_> {
       ReferenceKind::Location => aspect.ratio(),
       ReferenceKind::Prop => PROP_RATIO,
     };
-    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
+    let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
     let path = save_picture(dir, &format!("{}_{:02}_v{}.{}", job.kind.label(), job.index + 1, job.version, file.extension), &file.bytes)?;
     self.add_to_library(&file.bytes, file.extension, MediaClass::Image);
@@ -614,7 +624,7 @@ impl SongRun<'_> {
     let guide = job.guide.as_deref().map(|path| self.engine.load_path(path)).transpose()?;
     let prompt = still_prompt(design, &job.image, references.len(), guide.is_some());
     let images: Vec<RefImage> = guide.into_iter().chain(references.iter().cloned()).collect();
-    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
+    let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
     save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)
   }
@@ -624,7 +634,7 @@ impl SongRun<'_> {
     let still = self.engine.load_path(&job.still)?;
     let seconds = if resolution == "1080p" { HD_CLIP_SECONDS } else { plan::clip_seconds(job.seconds) };
     let prompt = clip_prompt(look, &job.motion, job.sing);
-    let files = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_video(VeoRequest { model: tier.model(), prompt: &prompt, start_frame: Some(&still), end_frame: None, aspect_ratio: Some(aspect.ratio()), resolution: Some(resolution), duration_seconds: Some(seconds), sample_count: 1, generate_audio: Some(false), extend: None })).await?;
+    let files = self.patiently(|| self.engine.vertex.generate_video(VeoRequest { model: tier.model(), prompt: &prompt, start_frame: Some(&still), end_frame: None, aspect_ratio: Some(aspect.ratio()), resolution: Some(resolution), duration_seconds: Some(seconds), sample_count: 1, generate_audio: Some(false), extend: None })).await?;
     let rate = self.engine.prices.veo_per_second(tier.model(), false, resolution).unwrap_or(0.0);
     self.charge(Account::Vertex, f64::from(seconds) * rate, tier.model());
     let file = files.into_iter().next().ok_or_else(|| anyhow::anyhow!("Veo returned no video"))?;
@@ -690,6 +700,17 @@ impl SongRun<'_> {
 
   fn charge(&self, account: Account, usd: f64, item: &str) {
     self.engine.charge(self.tx, vec![(account, usd, item.to_owned())], &self.batch);
+  }
+
+  /// Runs a provider call at the run's pace, waiting and trying again when its quota is met and
+  /// saying so on the page.
+  async fn patiently<T, F, Fut>(&self, call: F) -> anyhow::Result<T>
+  where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+  {
+    let waiting = |wait: Duration| self.send(SongUpdate::Note(format!("Google's per-minute limit is full; waiting {}s and going slower\u{2026}", wait.as_secs())));
+    with_quota_retries(&self.pace, || !self.stopped(), waiting, call).await
   }
 
   fn stopped(&self) -> bool {
@@ -793,26 +814,76 @@ pub fn thumb_path(path: &Path) -> PathBuf {
   path.with_extension("thumb.jpg")
 }
 
-/// Runs `call`, waiting (`first_wait`, then twice as long each time) and trying again when the
-/// provider turns it away for quota: dozens of stills and clips in a row will meet a per-minute
-/// limit sooner or later.
-async fn with_quota_retries<T, F, Fut>(first_wait: Duration, mut call: F) -> anyhow::Result<T>
+/// A run's shared pace. Dozens of stills and clips in a row meet a provider's per-minute limit
+/// sooner or later; when one call is turned away, every call of the run holds off and they start
+/// further apart from then on, instead of each retrying on its own and colliding again.
+struct Pace {
+  first_wait: Duration,
+  state: tokio::sync::Mutex<PaceState>,
+}
+
+struct PaceState {
+  /// When the next call may start.
+  next_start: tokio::time::Instant,
+  /// How far apart calls start (zero until the first refusal).
+  gap: Duration,
+}
+
+impl Pace {
+  fn new(first_wait: Duration) -> Self {
+    Self { first_wait, state: tokio::sync::Mutex::new(PaceState { next_start: tokio::time::Instant::now(), gap: Duration::ZERO }) }
+  }
+
+  /// Waits for this call's turn; `false` when the run was stopped while waiting.
+  async fn turn(&self, keep_going: &impl Fn() -> bool) -> bool {
+    let start = {
+      let mut state = self.state.lock().await;
+      let start = state.next_start.max(tokio::time::Instant::now());
+      state.next_start = start + state.gap;
+      start
+    };
+    while tokio::time::Instant::now() < start {
+      if !keep_going() {
+        return false;
+      }
+      tokio::time::sleep(STOP_CHECK.min(start - tokio::time::Instant::now())).await;
+    }
+    keep_going()
+  }
+
+  /// A call was turned away: nothing starts for `wait`, and calls start further apart after it.
+  async fn slow_down(&self, wait: Duration) {
+    let mut state = self.state.lock().await;
+    // No gap when there is no wait either (tests).
+    if !wait.is_zero() {
+      state.gap = (state.gap * 2).clamp(QUOTA_FIRST_GAP, QUOTA_MAX_GAP);
+    }
+    state.next_start = state.next_start.max(tokio::time::Instant::now() + wait);
+  }
+}
+
+/// Runs `call` at `pace`, and when the provider turns it away for quota slows the pace
+/// (`waiting` is told for how long) and tries again, up to [`QUOTA_RETRIES`] times.
+async fn with_quota_retries<T, F, Fut>(pace: &Pace, keep_going: impl Fn() -> bool, waiting: impl Fn(Duration), mut call: F) -> anyhow::Result<T>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = anyhow::Result<T>>,
 {
-  let mut wait = first_wait;
-  for _ in 0..QUOTA_RETRIES {
+  let mut wait = pace.first_wait;
+  for attempt in 0..=QUOTA_RETRIES {
+    anyhow::ensure!(pace.turn(&keep_going).await, "Stopped");
     match call().await {
-      Err(err) if is_quota(&err) => {
-        info!("Provider quota reached; trying again in {}s", wait.as_secs());
-        tokio::time::sleep(wait).await;
-        wait *= 2;
+      Err(err) if is_quota(&err) && attempt < QUOTA_RETRIES => {
+        info!("Provider quota reached; holding the run for {}s", wait.as_secs());
+        waiting(wait);
+        pace.slow_down(wait).await;
+        wait = (wait * 2).min(QUOTA_MAX_WAIT);
       },
+      Err(err) if is_quota(&err) => return Err(err.context("Google's per-minute limit was still full after several minutes of waiting. Give it a few minutes, then use the same button: it makes only the ones still missing. A quota increase for the model in the Google Cloud console stops this happening")),
       result => return result,
     }
   }
-  call().await
+  unreachable!("the last attempt returns")
 }
 
 fn is_quota(err: &anyhow::Error) -> bool {
@@ -1021,7 +1092,7 @@ mod tests {
     async fn a_stopped_run_makes_nothing_more() {
       let (base_url, requests) = fake_vertex(Vec::new());
       let (engine, dir) = engine(base_url);
-      let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into() };
+      let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO) };
       let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None }];
       run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());
@@ -1113,8 +1184,9 @@ mod tests {
 
     #[tokio::test]
     async fn quota_errors_are_retried_and_others_arent() {
-      let calls = Mutex::new(0);
-      let result = with_quota_retries(Duration::ZERO, || async {
+      let pace = Pace::new(Duration::ZERO);
+      let (calls, waits) = (Mutex::new(0), Mutex::new(0));
+      let result = with_quota_retries(&pace, || true, |_| *waits.lock().unwrap() += 1, || async {
         let mut n = calls.lock().unwrap();
         *n += 1;
         if *n < 3 {
@@ -1124,15 +1196,44 @@ mod tests {
         }
       })
       .await;
-      assert_eq!(result.unwrap(), 3);
+      assert_eq!((result.unwrap(), *waits.lock().unwrap()), (3, 2), "the page is told about each wait");
       let calls = Mutex::new(0);
-      let result: anyhow::Result<()> = with_quota_retries(Duration::ZERO, || async {
+      let result: anyhow::Result<()> = with_quota_retries(&pace, || true, |_| {}, || async {
         *calls.lock().unwrap() += 1;
         Err(anyhow::anyhow!("Vertex AI error 400 Bad Request: bad prompt"))
       })
       .await;
       assert!(result.is_err());
       assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_full_quota_gives_up_in_the_end_and_says_what_to_do() {
+      let pace = Pace::new(Duration::ZERO);
+      let calls = Mutex::new(0);
+      let result: anyhow::Result<()> = with_quota_retries(&pace, || true, |_| {}, || async {
+        *calls.lock().unwrap() += 1;
+        Err(anyhow::anyhow!("Vertex AI error 429 Too Many Requests: Resource has been exhausted (e.g. check quota)."))
+      })
+      .await;
+      let message = format!("{:#}", result.unwrap_err());
+      assert_eq!(*calls.lock().unwrap(), QUOTA_RETRIES + 1);
+      assert!(message.contains("only the ones still missing") && message.contains("error 429"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_holds_every_call_and_spaces_them_out_and_stop_ends_the_wait() {
+      let pace = Pace::new(Duration::from_secs(20));
+      pace.slow_down(Duration::from_millis(60)).await;
+      let began = tokio::time::Instant::now();
+      assert!(pace.turn(&|| true).await);
+      assert!(began.elapsed() >= Duration::from_millis(55), "the held call waited");
+      assert_eq!(pace.state.lock().await.gap, QUOTA_FIRST_GAP);
+      pace.slow_down(Duration::from_secs(600)).await;
+      assert_eq!(pace.state.lock().await.gap, QUOTA_FIRST_GAP * 2);
+      let began = tokio::time::Instant::now();
+      let stopped: anyhow::Result<()> = with_quota_retries(&pace, || false, |_| {}, || async { Ok(()) }).await;
+      assert!(stopped.unwrap_err().to_string().contains("Stopped") && began.elapsed() < Duration::from_secs(5));
     }
   }
 

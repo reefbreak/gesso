@@ -52,6 +52,9 @@ struct Run {
   id: u64,
   stage: Stage,
   note: String,
+  /// What the run said it was doing when it began; a passing note (a wait for quota) gives way to
+  /// it when the next picture or clip arrives.
+  started_as: String,
   /// Pictures or clips finished, of how many (zero for single-result stages).
   done: usize,
   total: usize,
@@ -640,7 +643,7 @@ impl MusicVideoPage {
     }
     let id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
     self.error = None;
-    self.run = Some(Run { id, stage: self.stage, note: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality });
+    self.run = Some(Run { id, stage: self.stage, note: note.to_owned(), started_as: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality });
     // The project's folder has to exist before a run writes into it.
     self.save(backend);
     backend.run_song(id, request);
@@ -671,6 +674,7 @@ impl MusicVideoPage {
   fn progress(&mut self) {
     if let Some(run) = &mut self.run {
       run.done += 1;
+      run.note.clone_from(&run.started_as);
     }
   }
 
