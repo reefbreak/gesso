@@ -151,7 +151,22 @@ impl VertexClient {
 
   /// Makes one image; an error explains a missing one (usually a safety block).
   pub async fn generate_image(&self, request: GeminiImageRequest<'_>) -> anyhow::Result<GeneratedFile> {
-    let response = self.generate_content(request.model, &gemini_image_body(&request), IMAGE_TIMEOUT).await?;
+    let body = gemini_image_body(&request);
+    let response = match (self.generate_content(request.model, &body, IMAGE_TIMEOUT).await, self.config.gemini_api_key.as_deref()) {
+      // Vertex serves the image models from capacity shared between projects, with no quota of
+      // their own to raise, and turns small projects away often. A Gemini API key has its own limit.
+      (Err(err), Some(key)) if is_out_of_capacity(&err) => {
+        info!("Vertex is out of capacity for {}; asking the Gemini API instead", request.model);
+        match self.generate_content_with_key(key, request.model, &body, IMAGE_TIMEOUT).await {
+          Ok(response) => response,
+          Err(other) => {
+            warn!("The Gemini API couldn't make the picture either: {other:#}");
+            return Err(err);
+          },
+        }
+      },
+      (response, _) => response?,
+    };
     let mut file = first_image(&response)?;
     file.usage = usage(&response);
     Ok(file)
@@ -226,6 +241,12 @@ impl VertexClient {
     let key = self.config.gemini_api_key.as_deref().ok_or_else(|| anyhow::anyhow!("No Gemini API key set"))?;
     let url = format!("{}v1beta/models/{model}", self.gemini_host());
     read_json(self.http.get(url).header("x-goog-api-key", key).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+  }
+
+  /// `generateContent` through the Gemini API with a Gemini API key.
+  async fn generate_content_with_key(&self, key: &str, model: &str, body: &Value, timeout: Duration) -> anyhow::Result<Value> {
+    let url = format!("{}v1beta/models/{model}:generateContent", self.gemini_host());
+    read_json(self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
   }
 
   /// A song through the Gemini API, which answers in one request (nothing is stored there).
@@ -711,6 +732,12 @@ fn refused_format_field(err: &anyhow::Error, body: &Value) -> Option<&'static st
   }
   let format = body.get("response_format")?;
   [("aspect ratio", "aspect_ratio"), ("aspect_ratio", "aspect_ratio"), ("resolution", "resolution"), ("duration", "duration")].into_iter().find(|(words, key)| text.contains(words) && format.get(*key).is_some()).map(|(_, key)| key)
+}
+
+/// Whether Vertex turned the request away for quota or shared capacity.
+fn is_out_of_capacity(err: &anyhow::Error) -> bool {
+  let text = err.to_string();
+  text.contains("error 429") || text.contains("RESOURCE_EXHAUSTED")
 }
 
 /// Whether Vertex said the model (or endpoint) doesn't exist.

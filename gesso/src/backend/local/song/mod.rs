@@ -1046,6 +1046,28 @@ mod tests {
       let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// When Vertex is out of capacity for a picture and a Gemini API key is set, the picture is
+    /// made through the Gemini API without waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_picture_vertex_has_no_room_for_goes_to_the_gemini_api() {
+      let refusal = format!("429:{}", json!({ "error": { "code": 429, "message": "Resource has been exhausted (e.g. check quota).", "status": "RESOURCE_EXHAUSTED" } }));
+      let (vertex_url, vertex_requests) = fake_vertex(vec![refusal]);
+      let (gemini_url, gemini_requests) = fake_vertex(vec![image_reply()]);
+      let dir = std::env::temp_dir().join(format!("gesso-song-{}", uuid::Uuid::new_v4()));
+      let config = LocalConfig { gcp_api_key: Some("test-key".into()), vertex_base_url: Some(vertex_url), gemini_api_key: Some("gm-key".into()), gemini_base_url: Some(gemini_url), bedrock_enabled: Some(false), ..Default::default() };
+      let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
+      let (tx, rx) = std::sync::mpsc::channel();
+      let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None }];
+      engine.start_song(11, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, shots }, tx, egui::Context::default());
+      let updates = finished(&rx, 11).await;
+      assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, .. })), "{updates:?}");
+      assert_eq!(vertex_requests.lock().unwrap().len(), 1);
+      let gemini_requests = gemini_requests.lock().unwrap();
+      assert!(gemini_requests[0].0.starts_with("POST /v1beta/models/gemini-3.1-flash-image:generateContent"), "{}", gemini_requests[0].0);
+      assert!(gemini_requests[0].1.contains("A wide shot"));
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Working on a section asks the writer once and returns its version of that section alone.
     #[tokio::test(flavor = "multi_thread")]
     async fn working_on_a_section_returns_the_writers_version_of_it() {
@@ -1279,8 +1301,8 @@ mod tests {
     bytes
   }
 
-  /// A one-thread HTTP server that answers with `replies` in order, recording each request line
-  /// and body.
+  /// A one-thread HTTP server that answers with `replies` in order (one that starts `429:` as a
+  /// quota refusal), recording each request line and body.
   fn fake_vertex(replies: Vec<String>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -1306,7 +1328,9 @@ mod tests {
         let mut body = vec![0; length];
         reader.read_exact(&mut body).unwrap();
         record.lock().unwrap().push((request_line.trim().to_owned(), String::from_utf8(body).unwrap()));
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+        // A reply that starts "429:" is sent as a quota refusal.
+        let (status, reply) = reply.strip_prefix("429:").map_or(("200 OK", reply.as_str()), |body| ("429 Too Many Requests", body));
+        write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
       }
     });
     (url, seen)

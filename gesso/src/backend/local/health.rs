@@ -158,14 +158,14 @@ impl LocalEngine {
   async fn check_gemini_key(&self) -> Check {
     let model = self.config.song_music_model.clone().unwrap_or_else(|| GEMINI_SONG_MODELS[0].to_owned());
     let (state, detail) = if self.config.gemini_api_key.is_none() {
-      (State::NotSetUp, "Optional. Without it, songs go through Vertex, which doesn't have Lyria 3.5 and can come back empty. Create a key at aistudio.google.com/apikey and add \"gemini_api_key\" to local_providers.json.".to_owned())
+      (State::NotSetUp, "Optional. Without it, songs go through Vertex, which doesn't have Lyria 3.5 and can come back empty, and pictures have nowhere else to go when Vertex is out of capacity. Create a key at aistudio.google.com/apikey and add \"gemini_api_key\" to local_providers.json.".to_owned())
     } else {
       match self.vertex.check_gemini_key(&model).await {
-        Ok(()) => (State::Ready, "The key is accepted and can see the model. Music Video makes its songs through it.".to_owned()),
+        Ok(()) => (State::Ready, "The key is accepted and can see the model. Music Video makes its songs through it, and pictures go through it when Vertex is out of capacity.".to_owned()),
         Err(err) => classify(&format!("{err:#}")),
       }
     };
-    Check { provider: Provider::GoogleCloud, name: "Lyria via Gemini API key".to_owned(), used_for: "Music Video song (used instead of Vertex when set)".to_owned(), upstream: model, state, detail }
+    Check { provider: Provider::GoogleCloud, name: "Gemini API key".to_owned(), used_for: "Music Video song; pictures when Vertex is out of capacity".to_owned(), upstream: model, state, detail }
   }
 
   async fn check_google(&self) -> Vec<Check> {

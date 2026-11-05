@@ -193,8 +193,13 @@ call run on the global endpoint.
 Songs go through Vertex unless `gemini_api_key` is set (a Gemini API key from Google AI Studio, or
 `ARTCRAFT_GEMINI_API_KEY`). With the key, the song is made through the Gemini API, which has
 `lyria-3.5` (tried first there, then `lyria-3-pro-preview`). Vertex can finish a Lyria 3 request
-without sending any audio; Gesso asks once more, then says so and points here. Everything else
-stays on Vertex.
+without sending any audio; Gesso asks once more, then says so and points here.
+
+The same key is a second route for pictures. Vertex serves the Gemini image models from capacity
+shared between projects, with no per-project quota to raise, and answers small projects with
+`429 Resource has been exhausted` often. When that happens and the key is set, that picture is made
+through the Gemini API instead, on the key's own limit and billing. Without the key, or if the
+Gemini API is full too, the run slows down and waits. Everything else stays on Vertex.
 
 ## System Health
 
