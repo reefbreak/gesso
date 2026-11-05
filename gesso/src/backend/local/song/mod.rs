@@ -42,7 +42,7 @@ use super::fal::{FalClient, VOCALS_MODEL};
 use super::library::{LocalLibrary, MediaClass, NewFile, Origin};
 use super::spend::Account;
 use super::tools::VeoTier;
-use super::vertex::{GeminiImageRequest, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS, TextRequest, VeoRequest};
+use super::vertex::{GeminiImageRequest, SONG_CLIP_MODEL, TEXT_MODELS, TextRequest, VeoRequest};
 use super::{LocalEngine, RefImage};
 use crate::backend::Event;
 use beats::BeatGrid;
@@ -362,7 +362,7 @@ impl LocalEngine {
   /// What a stage would cost at list prices.
   pub fn estimate_song(&self, estimate: &SongEstimate) -> f64 {
     match estimate {
-      SongEstimate::Song { clip } => self.prices.lyria_song(if *clip { SONG_CLIP_MODEL } else { SONG_MODELS[0] }),
+      SongEstimate::Song { clip } => self.prices.lyria_song(if *clip { SONG_CLIP_MODEL } else { self.vertex.song_models()[0] }),
       SongEstimate::Stills { count, pro, large } => *count as f64 * self.prices.gemini_call(still_model(*pro), None, Some(if *large { FINAL_STILL_SIZE } else { STILL_SIZE })).unwrap_or(0.0),
       SongEstimate::LipSync { seconds, pro, separate_seconds } => seconds * self.prices.lip_sync_per_second(*pro) + separate_seconds * self.prices.vocals_per_second(),
       SongEstimate::Clips { seconds, tier, resolution } => f64::from(*seconds) * self.prices.veo_per_second(tier.model(), false, resolution).unwrap_or(0.0),
@@ -502,7 +502,7 @@ impl SongRun<'_> {
     let models: Vec<&str> = match (clip, configured) {
       (true, _) => vec![SONG_CLIP_MODEL],
       (false, Some(model)) => vec![model],
-      (false, None) => SONG_MODELS.to_vec(),
+      (false, None) => self.engine.vertex.song_models().to_vec(),
     };
     let song = self.engine.vertex.generate_song(&models, &music_prompt(draft, clip, instrumental)).await?;
     info!("Song made by {}", song.model);
@@ -897,6 +897,27 @@ mod tests {
       let updates = finished(&rx, 5).await;
       assert!(matches!(updates.last(), Some(SongUpdate::Done(Err(message))) if message.contains("fal API key in Settings")), "{updates:?}");
       assert_eq!(engine.spend_summary().today.fal, 0.0);
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With a Gemini API key, the song goes to the Gemini API (Lyria 3.5 first), not Vertex.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gemini_api_key_takes_the_song_off_vertex() {
+      let song = json!({ "status": "completed", "steps": [{ "type": "model_output", "content": [{ "type": "text", "text": "[Verse]" }, { "type": "audio", "mime_type": "audio/mpeg", "data": "AQID" }] }] });
+      let (gemini_url, requests) = fake_vertex(vec![song.to_string()]);
+      let dir = std::env::temp_dir().join(format!("gesso-song-{}", uuid::Uuid::new_v4()));
+      let config = LocalConfig { gcp_project: Some("p".into()), gemini_api_key: Some("gm-key".into()), gemini_base_url: Some(gemini_url), vertex_base_url: Some("http://127.0.0.1:9/".into()), bedrock_enabled: Some(false), ..Default::default() };
+      let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
+      let (tx, rx) = std::sync::mpsc::channel();
+      let draft = Draft { title: "Night Bus".into(), style: "slow, 90 BPM".into(), lyrics: "[Verse]\nline one".into() };
+      engine.start_song(4, SongRequest::Compose { dir: dir.join("p"), draft, clip: false, instrumental: false, version: 1 }, tx, egui::Context::default());
+      let updates = finished(&rx, 4).await;
+      assert!(matches!(updates.last(), Some(SongUpdate::Done(Ok(())))), "{updates:?}");
+      assert!(updates.iter().any(|u| matches!(u, SongUpdate::Track { model, path, .. } if model == "lyria-3.5" && std::fs::read(path).unwrap() == [1, 2, 3])), "{updates:?}");
+      let requests = requests.lock().unwrap();
+      assert_eq!(requests[0].0, "POST /v1beta/interactions HTTP/1.1");
+      let body: Value = serde_json::from_str(&requests[0].1).unwrap();
+      assert_eq!((body["model"].clone(), body["store"].clone(), body.get("background")), (json!("lyria-3.5"), json!(false), None));
       let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -38,6 +38,13 @@ pub struct LocalConfig {
   pub gcp_video_location: String,
   /// A Vertex express-mode API key; only Gemini's `generateContent` accepts it (not Veo).
   pub gcp_api_key: Option<String>,
+  /// A Gemini API key (from Google AI Studio). When set, Music Video makes its songs through the
+  /// Gemini API, which has Lyria 3.5, instead of Vertex. `ARTCRAFT_GEMINI_API_KEY`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub gemini_api_key: Option<String>,
+  /// Replaces the Gemini API host (a mock server for testing).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub gemini_base_url: Option<String>,
   /// Replaces the Vertex host (a proxy, or a mock server for testing). `ARTCRAFT_VERTEX_BASE_URL`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub vertex_base_url: Option<String>,
@@ -91,7 +98,7 @@ pub struct LocalConfig {
 
 impl Default for LocalConfig {
   fn default() -> Self {
-    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, omni_model: None, omni_output_gcs_uri: None, song_text_model: None, song_music_model: None, song_claude_model: None, fal_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new(), suite_dir: None, suite_apps: HashMap::new() }
+    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, gemini_api_key: None, gemini_base_url: None, vertex_base_url: None, omni_model: None, omni_output_gcs_uri: None, song_text_model: None, song_music_model: None, song_claude_model: None, fal_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new(), suite_dir: None, suite_apps: HashMap::new() }
   }
 }
 
@@ -155,6 +162,9 @@ impl LocalConfig {
     }
     if let Some(key) = var("ARTCRAFT_GCP_API_KEY") {
       self.gcp_api_key = Some(key);
+    }
+    if let Some(key) = var("ARTCRAFT_GEMINI_API_KEY").filter(|k| !k.trim().is_empty()) {
+      self.gemini_api_key = Some(key.trim().to_owned());
     }
     if let Some(url) = var("ARTCRAFT_VERTEX_BASE_URL") {
       self.vertex_base_url = Some(if url.ends_with('/') { url } else { format!("{url}/") });

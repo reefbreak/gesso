@@ -39,6 +39,10 @@ pub const TEXT_MODELS: [&str; 2] = ["gemini-3.8-flash", "gemini-3.5-flash"];
 /// Lyria's full-song models (songs with vocals, a couple of minutes long). Lyria 3 Pro is the one
 /// Vertex lists; Lyria 3.5 is on the Gemini API only so far, and is tried in case it arrives.
 pub const SONG_MODELS: [&str; 2] = ["lyria-3-pro-preview", "lyria-3.5"];
+/// Full-song models through the Gemini API (a Gemini API key), which has Lyria 3.5.
+pub const GEMINI_SONG_MODELS: [&str; 2] = ["lyria-3.5", "lyria-3-pro-preview"];
+/// The Gemini API's host, where a Gemini API key makes songs.
+const GEMINI_API_HOST: &str = "https://generativelanguage.googleapis.com/";
 /// Lyria's 30-second model.
 pub const SONG_CLIP_MODEL: &str = "lyria-3-clip-preview";
 /// A long reply (a shot list for a whole song) fits in this many tokens.
@@ -170,31 +174,42 @@ impl VertexClient {
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Gemini text model configured")))
   }
 
-  /// Makes a song with Lyria 3 from a prompt that carries the music direction and the lyrics.
+  /// The full-song models to try, in order, for the route songs take (see `generate_song`).
+  pub fn song_models(&self) -> &'static [&'static str] {
+    if self.config.gemini_api_key.is_some() { &GEMINI_SONG_MODELS } else { &SONG_MODELS }
+  }
+
+  /// Makes a song with Lyria 3 from a prompt that carries the music direction and the lyrics:
+  /// through the Gemini API when a Gemini API key is set, else through Vertex.
   pub async fn generate_song(&self, models: &[&str], prompt: &str) -> anyhow::Result<Song> {
+    if let Some(key) = self.config.gemini_api_key.as_deref() {
+      return self.generate_song_with_key(key, models, prompt).await;
+    }
     let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Lyria needs a Google Cloud project in local_providers.json"))?;
     let base = format!("{}v1beta1/projects/{project}/locations/{OMNI_LOCATION}/interactions", self.host(OMNI_LOCATION));
     let mut last_error = None;
     for model in models {
       // In the background and stored, like Omni Flash: Vertex only lets stored interactions be polled.
+      let mut background = true;
       let mut sent = self.post_with_token(&base, &song_body(model, prompt, true), IMAGE_TIMEOUT).await;
       if sent.as_ref().is_err_and(refuses_background) {
         info!("{model} won't run in the background; waiting on the request instead");
+        background = false;
         sent = self.post_with_token(&base, &song_body(model, prompt, false), SONG_TIMEOUT).await;
       }
       match sent {
         Ok(started) => {
           let id = started.get("id").and_then(Value::as_str).map(str::to_owned);
-          let result = async {
-            let finished = self.wait_for_interaction(&base, started).await?;
-            let file = song_audio(&finished)?;
-            Ok(Song { file, text: interaction_text(&finished), model: (*model).to_owned() })
-          }
-          .await;
+          let mut finished = self.wait_for_interaction(&base, started).await;
           if let Some(id) = id {
             self.delete_interaction(&base, &id).await;
           }
-          return result;
+          // Vertex sometimes finishes a background song with nothing in it; ask once more and wait.
+          if background && finished.as_ref().is_ok_and(came_back_empty) {
+            warn!("{model} finished in the background with no output; asking again and waiting on the request");
+            finished = self.post_with_token(&base, &song_body(model, prompt, false), SONG_TIMEOUT).await;
+          }
+          return song_from(&finished?, model, Route::Vertex);
         },
         Err(err) if is_not_found(&err) => {
           info!("Music model {model} not found on Vertex; trying the next id");
@@ -204,6 +219,36 @@ impl VertexClient {
       }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Lyria model configured")))
+  }
+
+  /// Whether the Gemini API key can see `model` (reading a model's entry isn't billed).
+  pub async fn check_gemini_key(&self, model: &str) -> anyhow::Result<()> {
+    let key = self.config.gemini_api_key.as_deref().ok_or_else(|| anyhow::anyhow!("No Gemini API key set"))?;
+    let url = format!("{}v1beta/models/{model}", self.gemini_host());
+    read_json(self.http.get(url).header("x-goog-api-key", key).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+  }
+
+  /// A song through the Gemini API, which answers in one request (nothing is stored there).
+  async fn generate_song_with_key(&self, key: &str, models: &[&str], prompt: &str) -> anyhow::Result<Song> {
+    let url = format!("{}v1beta/interactions", self.gemini_host());
+    let mut last_error = None;
+    for model in models {
+      let mut body = song_body(model, prompt, false);
+      body["store"] = json!(false);
+      match read_json(self.http.post(&url).header("x-goog-api-key", key).json(&body).timeout(SONG_TIMEOUT).send().await?).await {
+        Ok(finished) => return song_from(&finished, model, Route::GeminiApi),
+        Err(err) if is_not_found(&err) => {
+          info!("Music model {model} not found on the Gemini API; trying the next id");
+          last_error = Some(err);
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Lyria model configured")))
+  }
+
+  fn gemini_host(&self) -> String {
+    self.config.gemini_base_url.clone().unwrap_or_else(|| GEMINI_API_HOST.to_owned())
   }
 
   /// Whether Google Cloud credentials can be found and exchanged for a token (no charge).
@@ -389,15 +434,15 @@ impl VertexClient {
       match interaction.get("status").and_then(Value::as_str).unwrap_or("completed") {
         "completed" => return Ok(interaction),
         "in_progress" | "queued" => {},
-        other => anyhow::bail!("Omni Flash {}: {}", other.replace('_', " "), interaction_error(&interaction).unwrap_or_else(|| "no reason given".to_owned())),
+        other => anyhow::bail!("Google reported the request {}: {}", other.replace('_', " "), interaction_error(&interaction).unwrap_or_else(|| "no reason given".to_owned())),
       }
-      anyhow::ensure!(tokio::time::Instant::now() < deadline, "Omni Flash didn't finish in time");
-      let id = interaction.get("id").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Omni Flash didn't return an interaction id"))?.to_owned();
+      anyhow::ensure!(tokio::time::Instant::now() < deadline, "Google didn't finish the request in time");
+      let id = interaction.get("id").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Google didn't return an interaction id"))?.to_owned();
       tokio::time::sleep(VIDEO_POLL_INTERVAL).await;
       let token = self.token().await?;
       match read_json(self.http.get(format!("{base}/{id}")).bearer_auth(token).timeout(IMAGE_TIMEOUT).send().await?).await {
         Ok(next) => interaction = next,
-        Err(err) if tokio::time::Instant::now() < deadline => warn!("Polling Omni Flash failed (will retry): {err:#}"),
+        Err(err) if tokio::time::Instant::now() < deadline => warn!("Polling the interaction failed (will retry): {err:#}"),
         Err(err) => return Err(err),
       }
     }
@@ -558,16 +603,60 @@ fn output_blocks<'a>(interaction: &'a Value, kind: &'a str) -> impl Iterator<Ite
   steps.filter(|s| s.get("type").and_then(Value::as_str).is_none_or(|t| t == "model_output")).flat_map(|s| s.get("content").and_then(Value::as_array).into_iter().flatten()).filter(move |c| c.get("type").and_then(Value::as_str) == Some(kind))
 }
 
+/// Which Google API made a song; the advice differs when one comes back without audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+  Vertex,
+  GeminiApi,
+}
+
+/// The song and its text in a finished interaction.
+fn song_from(finished: &Value, model: &str, route: Route) -> anyhow::Result<Song> {
+  let file = song_audio(finished, route)?;
+  Ok(Song { file, text: interaction_text(finished), model: model.to_owned() })
+}
+
 /// The song in a finished interaction (the last audio block, as the SDK's `output_audio` is).
-fn song_audio(interaction: &Value) -> anyhow::Result<GeneratedFile> {
+fn song_audio(interaction: &Value, route: Route) -> anyhow::Result<GeneratedFile> {
   let block = output_blocks(interaction, "audio").last().or_else(|| interaction.get("output_audio"));
   let Some(data) = block.and_then(|b| b.get("data")).and_then(Value::as_str) else {
-    anyhow::bail!("Lyria returned no audio{}", interaction_error(interaction).map(|e| format!(": {e}")).unwrap_or_else(|| " (the prompt or lyrics may have been blocked)".to_owned()));
+    warn!("A song came back without audio; the reply had: {}", reply_shape(interaction));
+    anyhow::bail!("{}", no_audio_reason(interaction, route));
   };
   let bytes = BASE64.decode(data)?;
   let mime = block.and_then(|b| b.get("mime_type")).and_then(Value::as_str).unwrap_or_default();
   let extension = if mime.contains("wav") || bytes.starts_with(b"RIFF") { "wav" } else { "mp3" };
   Ok(GeneratedFile { bytes, extension, usage: None })
+}
+
+/// Why a finished song has no audio: Google's error, Lyria's own words, or (a bare "completed"
+/// with no output at all) a fault on Google's side that the lyrics didn't cause.
+fn no_audio_reason(interaction: &Value, route: Route) -> String {
+  if let Some(error) = interaction_error(interaction) {
+    return format!("Lyria returned no audio: {error}");
+  }
+  let said = interaction_text(interaction);
+  if !said.is_empty() {
+    return format!("Lyria returned no audio, so the prompt or lyrics were probably blocked. It said: {}", said.chars().take(300).collect::<String>());
+  }
+  match (came_back_empty(interaction), route) {
+    (true, Route::Vertex) => "Vertex finished the request but sent no song back, twice. That is a fault on Google's side with Lyria 3 on Vertex, not your lyrics. Add a Gemini API key (System Health says how) to make songs through the Gemini API instead, or import a track.".to_owned(),
+    (true, Route::GeminiApi) => "The Gemini API finished the request but sent no song back. That is a fault on Google's side, not your lyrics; try again in a few minutes, or import a track.".to_owned(),
+    (false, _) => "Lyria returned no audio (the prompt or lyrics may have been blocked)".to_owned(),
+  }
+}
+
+/// Whether a "completed" interaction carries no output and no error at all.
+fn came_back_empty(interaction: &Value) -> bool {
+  let no_steps = interaction.get("steps").and_then(Value::as_array).is_none_or(Vec::is_empty);
+  no_steps && interaction.get("output_audio").is_none() && interaction_error(interaction).is_none()
+}
+
+/// A reply's field names and step types, for the log (never the audio itself).
+fn reply_shape(interaction: &Value) -> String {
+  let keys: Vec<&str> = interaction.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+  let steps: Vec<String> = interaction.get("steps").and_then(Value::as_array).into_iter().flatten().map(|s| format!("{}[{}]", s.get("type").and_then(Value::as_str).unwrap_or("?"), s.get("content").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.get("type").and_then(Value::as_str)).collect::<Vec<_>>().join(","))).collect();
+  format!("fields {keys:?}, status {:?}, steps {steps:?}", interaction.get("status").and_then(Value::as_str))
 }
 
 /// The text that came with an interaction's output, blocks joined by blank lines.
@@ -772,11 +861,24 @@ mod tests {
         { "type": "model_output", "content": [{ "type": "text", "text": "[Verse]\nla" }, { "type": "audio", "mime_type": "audio/mpeg", "data": "AQID" }] },
         { "type": "model_output", "content": [{ "type": "text", "text": " structure " }, { "type": "audio", "data": BASE64.encode(b"RIFFxxxx") }] },
       ] });
-      let file = song_audio(&finished).unwrap();
+      let file = song_audio(&finished, Route::Vertex).unwrap();
       assert_eq!((file.extension, file.bytes.as_slice()), ("wav", b"RIFFxxxx".as_slice()));
       assert_eq!(interaction_text(&finished), "[Verse]\nla\n\nstructure");
-      let empty = song_audio(&json!({ "status": "completed", "created": "2026-11-05T07:22:31Z" }));
-      assert!(empty.unwrap_err().to_string().contains("no audio"));
+    }
+
+    #[test]
+    fn a_song_without_audio_says_whose_fault_it_is() {
+      let bare = json!({ "status": "completed", "created": "2026-11-05T07:22:31Z", "object": "interaction", "model": "lyria-3-pro-preview" });
+      assert!(came_back_empty(&bare));
+      let on_vertex = song_audio(&bare, Route::Vertex).unwrap_err().to_string();
+      assert!(on_vertex.contains("not your lyrics") && on_vertex.contains("Gemini API key"), "{on_vertex}");
+      assert!(!song_audio(&bare, Route::GeminiApi).unwrap_err().to_string().contains("Gemini API key"));
+      let declined = json!({ "status": "completed", "steps": [{ "type": "model_output", "content": [{ "type": "text", "text": "I can't make that song." }] }] });
+      assert!(!came_back_empty(&declined));
+      assert!(song_audio(&declined, Route::Vertex).unwrap_err().to_string().contains("It said: I can't make that song."));
+      let failed = json!({ "status": "completed", "steps": [{ "type": "model_output", "error": { "message": "blocked by safety filters" } }] });
+      assert_eq!(song_audio(&failed, Route::Vertex).unwrap_err().to_string(), "Lyria returned no audio: blocked by safety filters");
+      assert_eq!(reply_shape(&declined), "fields [\"status\", \"steps\"], status Some(\"completed\"), steps [\"model_output[text]\"]");
     }
   }
 

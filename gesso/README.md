@@ -177,6 +177,12 @@ Optional settings in `local_providers.json`: `song_text_model` (default: `gemini
 `song_claude_model` (default: `global.anthropic.claude-sonnet-4-6`). Lyria 3 and the listening
 call run on the global endpoint.
 
+Songs go through Vertex unless `gemini_api_key` is set (a Gemini API key from Google AI Studio, or
+`ARTCRAFT_GEMINI_API_KEY`). With the key, the song is made through the Gemini API, which has
+`lyria-3.5` (tried first there, then `lyria-3-pro-preview`). Vertex can finish a Lyria 3 request
+without sending any audio; Gesso asks once more, then says so and points here. Everything else
+stays on Vertex.
+
 ## System Health
 
 **System Health** (System) shows whether each model can be reached with your accounts, and what

@@ -19,7 +19,7 @@ use futures::future::join_all;
 use super::LocalEngine;
 use super::bedrock::{DEFAULT_CLAUDE_MODEL, ModelAccess};
 use super::fal::{LIP_SYNC_MODEL, VOCALS_MODEL};
-use super::vertex::{OMNI_MODELS, ProbeCall, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS};
+use super::vertex::{GEMINI_SONG_MODELS, OMNI_MODELS, ProbeCall, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS};
 use crate::backend::video;
 
 /// Lyria 3 and Omni Flash are served from the global endpoint.
@@ -144,13 +144,28 @@ impl Model {
 impl LocalEngine {
   /// Checks every connection at once. Nothing here generates anything, so nothing is billed.
   pub async fn check_health(&self) -> HealthReport {
-    let (google, aws) = futures::join!(self.check_google(), self.check_aws());
+    let (google, songs, aws) = futures::join!(self.check_google(), self.check_gemini_key(), self.check_aws());
     let mut checks = google;
+    checks.push(songs);
     checks.extend(aws);
     checks.extend(self.check_local());
     checks.extend(self.check_fal());
     checks.push(self.check_jev());
     HealthReport { checked_at: Local::now(), checks, accounts: self.account_lines() }
+  }
+
+  /// The Gemini API key that songs go through when it is set (reading a model's entry is free).
+  async fn check_gemini_key(&self) -> Check {
+    let model = self.config.song_music_model.clone().unwrap_or_else(|| GEMINI_SONG_MODELS[0].to_owned());
+    let (state, detail) = if self.config.gemini_api_key.is_none() {
+      (State::NotSetUp, "Optional. Without it, songs go through Vertex, which doesn't have Lyria 3.5 and can come back empty. Create a key at aistudio.google.com/apikey and add \"gemini_api_key\" to local_providers.json.".to_owned())
+    } else {
+      match self.vertex.check_gemini_key(&model).await {
+        Ok(()) => (State::Ready, "The key is accepted and can see the model. Music Video makes its songs through it.".to_owned()),
+        Err(err) => classify(&format!("{err:#}")),
+      }
+    };
+    Check { provider: Provider::GoogleCloud, name: "Lyria via Gemini API key".to_owned(), used_for: "Music Video song (used instead of Vertex when set)".to_owned(), upstream: model, state, detail }
   }
 
   async fn check_google(&self) -> Vec<Check> {
@@ -364,8 +379,8 @@ mod tests {
       let (engine, dir) = engine(LocalConfig { bedrock_enabled: Some(false), ..Default::default() });
       let report = engine.check_health().await;
       let google: Vec<&Check> = report.checks.iter().filter(|c| c.provider == Provider::GoogleCloud).collect();
-      assert_eq!(google.len(), 11);
-      assert!(google.iter().all(|c| c.state == State::NotSetUp && c.detail.contains("gcp_project")));
+      assert_eq!(google.len(), 12);
+      assert!(google.iter().all(|c| c.state == State::NotSetUp && (c.detail.contains("gcp_project") || c.detail.contains("gemini_api_key"))));
       assert!(report.checks.iter().filter(|c| c.provider == Provider::Aws).all(|c| c.state == State::NotSetUp));
       assert_eq!(report.needing_attention(), usize::from(!video::ffmpeg_available()));
       assert_eq!(report.accounts[0], (Provider::GoogleCloud, "No project set".to_owned()));
