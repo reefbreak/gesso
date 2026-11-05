@@ -9,7 +9,8 @@ use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{Aspect, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace};
-use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
+use crate::backend::local::song::project::{Quality, Stage};
+use crate::backend::local::song::writer::{Subject, Swatch};
 use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
 use crate::backend::media_cache::{Lookup, MediaCache};
 use crate::backend::video::VideoPlayer;
@@ -145,7 +146,9 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
           waveform::player(ui, ui.id().with("mv-song"), env.audio, &file_url(&track.path), None, false);
         });
         if !track.sung.trim().is_empty() {
-          text_card(ui, "What the model says it sang", &track.sung);
+          card(ui, "What the model says it sang".to_owned(), |ui| {
+            ui.label(body(&track.sung));
+          });
         }
       },
       None => empty(ui, Icon::Music, "No song yet", "Generate one, or import a track."),
@@ -266,38 +269,51 @@ fn analysis(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Re
 
 fn style(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
+  // While the writer is redoing this stage its reply would replace anything typed.
+  let running = page.running_here();
   let mut changed = false;
   column(ui, stage, "style", |ui| {
-    heading(ui, Stage::Style, "Visual style", "The look guiding every picture in the film.");
+    heading(ui, Stage::Style, "Visual style", "The look guiding every picture in the film. Click any part to edit it.");
     let Some(visual) = &mut page.project.visual else {
       empty(ui, Icon::Wand, "No style yet", "Say how you want it to look in the panel, or leave that blank and let the writer decide from the track.");
       return;
     };
-    if !visual.statement.is_empty() {
-      ui.label(widgets::heading(&visual.statement, 20.0));
-      ui.add_space(10.0);
+    if running {
+      ui.disable();
     }
-    if !visual.palette.is_empty() {
-      card(ui, "Colour palette".to_owned(), |ui| {
-        ui.horizontal_wrapped(|ui| {
-          for swatch in &visual.palette {
-            let (dot, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-            ui.painter().rect(dot, theme::RADIUS, colour(&swatch.hex), theme::hairline(), egui::StrokeKind::Inside);
-            ui.label(body(&swatch.name));
-            ui.add_space(12.0);
+    changed |= edit_heading(ui, "mv-style-statement", &mut visual.statement, "The look in one sentence", 20.0);
+    ui.add_space(10.0);
+    card(ui, "Colour palette".to_owned(), |ui| {
+      let mut removed = None;
+      for (i, swatch) in visual.palette.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+          let (dot, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+          ui.painter().rect(dot, theme::RADIUS, colour(&swatch.hex), theme::hairline(), egui::StrokeKind::Inside);
+          changed |= edit_line(ui, &format!("mv-swatch-name-{i}"), &mut swatch.name, "Colour name", body_font(), 220.0);
+          changed |= edit_line(ui, &format!("mv-swatch-hex-{i}"), &mut swatch.hex, "#rrggbb", FontId::new(12.5, theme::mono()), 80.0);
+          if ui.add(egui::Button::new(small("Remove")).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            removed = Some(i);
           }
         });
-      });
-    }
-    text_card(ui, "Lighting", &visual.lighting);
-    text_card(ui, "Texture", &visual.texture);
+      }
+      if let Some(i) = removed {
+        visual.palette.remove(i);
+        changed = true;
+      }
+      if ui.add(egui::Button::new(small("+ Add a colour")).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        visual.palette.push(Swatch { name: String::new(), hex: "#808080".to_owned() });
+        changed = true;
+      }
+    });
+    changed |= edit_card(ui, "Lighting", &mut visual.lighting, 2);
+    changed |= edit_card(ui, "Texture", &mut visual.texture, 2);
     card(ui, "Common style block \u{b7} added to every image and clip".to_owned(), |ui| {
       changed |= ui.add(egui::TextEdit::multiline(&mut visual.block).desired_rows(3).desired_width(f32::INFINITY).frame(egui::Frame::NONE)).changed();
     });
   });
   let line = page.progress_line().filter(|_| page.running_here());
   let styled = page.project.visual.is_some();
-  panel(ui, panel_rect, "Visual Style", "Edit the common style block to steer every picture at once.", |ui| {
+  panel(ui, panel_rect, "Visual Style", "Everything here can be edited. The common style block is what steers every picture; pictures already made keep the look they had.", |ui| {
     field(ui, "Your direction (optional)");
     let before = page.project.direction.clone();
     prompt_field(ui, "mv-direction", &mut page.project.direction, "Gritty black-and-white 1990s rave video in a derelict rail tunnel, harsh single light, heavy grain\u{2026}");
@@ -323,39 +339,57 @@ fn style(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
 
 fn brief(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
+  // While the writer is redoing this stage its reply would replace anything typed.
+  let running = page.running_here();
+  let mut changed = false;
   column(ui, stage, "brief", |ui| {
-    heading(ui, Stage::Brief, "Creative brief", "The idea connecting your track, the performer and the visual world.");
-    let Some(brief) = &page.project.brief else {
+    heading(ui, Stage::Brief, "Creative brief", "The idea connecting your track, the performer and the visual world. Click any part to edit it.");
+    let Some(brief) = &mut page.project.brief else {
       empty(ui, Icon::Pencil, "No brief yet", "The writer invents the film's idea, an original performer, a venue and a few signature props.");
       return;
     };
-    if !brief.title.is_empty() {
-      ui.label(widgets::heading(&brief.title, 22.0));
-      ui.add_space(10.0);
+    if running {
+      ui.disable();
     }
-    text_card(ui, "Logline", &brief.logline);
-    text_card(ui, "Core drive", &brief.drive);
-    text_card(ui, "Director's vision", &brief.vision);
-    text_card(ui, "Editing strategy", &brief.editing);
-    if !brief.motifs.is_empty() {
-      card(ui, "Visual motifs".to_owned(), |ui| {
-        for motif in &brief.motifs {
-          ui.label(body(&format!("\u{b7} {motif}")));
-        }
-      });
+    changed |= edit_heading(ui, "mv-brief-title", &mut brief.title, "The film's title", 22.0);
+    ui.add_space(10.0);
+    changed |= edit_card(ui, "Logline", &mut brief.logline, 2);
+    changed |= edit_card(ui, "Core drive", &mut brief.drive, 2);
+    changed |= edit_card(ui, "Director's vision", &mut brief.vision, 3);
+    changed |= edit_card(ui, "Editing strategy", &mut brief.editing, 2);
+    card(ui, "Visual motifs \u{b7} one per line".to_owned(), |ui| {
+      let mut motifs = brief.motifs.join("\n");
+      if edit_text(ui, "mv-brief-motifs", &mut motifs, 3) {
+        brief.motifs = motifs.split('\n').map(str::to_owned).collect();
+        changed = true;
+      }
+    });
+    changed |= subject_card(ui, "Character", "character", &mut brief.character, true);
+    changed |= subject_card(ui, "Venue", "venue", &mut brief.venue, true);
+    let mut removed = None;
+    for (i, prop) in brief.props.iter_mut().enumerate() {
+      changed |= subject_card(ui, "Prop", &format!("prop-{i}"), prop, false);
+      if prop.name.trim().is_empty() && prop.description.trim().is_empty() && secondary(ui, Icon::Plus, "Remove this empty prop", true) {
+        removed = Some(i);
+      }
     }
-    for (title, subject) in [("Character", &brief.character), ("Venue", &brief.venue)].into_iter().chain(brief.props.iter().map(|prop| ("Prop", prop))) {
-      card(ui, title.to_owned(), |ui| {
-        let name = if subject.role.is_empty() { subject.name.clone() } else { format!("{} \u{b7} {}", subject.name, subject.role) };
-        ui.label(egui::RichText::new(name).size(14.0).family(theme::semibold()).color(theme::INK));
-        ui.add_space(2.0);
-        ui.label(body(&subject.description));
-      });
+    if let Some(i) = removed {
+      brief.props.remove(i);
+      changed = true;
+    }
+    if secondary(ui, Icon::Plus, "Add a prop", true) {
+      brief.props.push(Subject::default());
+      changed = true;
     }
   });
+  if changed {
+    // The reference images take the new names and wording, and keep their pictures.
+    page.project.follow_edited_brief();
+    page.touch(ui);
+  }
   let line = page.progress_line().filter(|_| page.running_here());
   let briefed = page.project.brief.is_some();
-  panel(ui, panel_rect, "Creative Brief", "The performer, venue and props here become the reference images, where you can edit how each is described.", |ui| {
+  panel(ui, panel_rect, "Creative Brief", "Everything here can be edited. The performer, venue and props become the reference images; scenes already written keep their wording until you plan them again.", |ui| {
     writer_choice(ui, &mut page.writer);
     error_line(ui, page.error.as_deref());
     if run_button(ui, Icon::Pencil, if briefed { "Write it again" } else { "Write the brief" }, Some(CENTS.to_owned()), page.project.visual.is_some() && !busy, line.as_deref()) {
@@ -365,12 +399,28 @@ fn brief(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, 
   });
 }
 
+/// The performer, the venue or a prop, edited in place; returns whether anything changed.
+fn subject_card(ui: &mut Ui, title: &str, id: &str, subject: &mut Subject, has_role: bool) -> bool {
+  let mut changed = false;
+  card(ui, title.to_owned(), |ui| {
+    changed |= edit_line(ui, &format!("mv-brief-{id}-name"), &mut subject.name, "Name", FontId::new(14.0, theme::semibold()), f32::INFINITY);
+    if has_role {
+      changed |= edit_line(ui, &format!("mv-brief-{id}-role"), &mut subject.role, if title == "Venue" { "Its mood" } else { "Their role" }, FontId::new(12.5, egui::FontFamily::Proportional), f32::INFINITY);
+    }
+    ui.add_space(2.0);
+    changed |= edit_text(ui, &format!("mv-brief-{id}-description"), &mut subject.description, 3);
+  });
+  changed
+}
+
 // --- Reference Images ------------------------------------------------------------------------
 
 fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
   let mut changed = false;
   let mut redraw = None;
+  let mut upload = None;
+  page.reference_changes.resize(page.project.references.len(), String::new());
   column_wide(ui, stage, "references", |ui| {
     heading(ui, Stage::References, "Reference images", "The performer, the location and the signature details. Every scene is drawn from these, so they stay the same from shot to shot.");
     if page.project.references.is_empty() {
@@ -384,6 +434,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
         ui.spacing_mut().item_spacing.x = CARD_GAP;
         for index in row * columns..((row + 1) * columns).min(page.project.references.len()) {
           let reference = &mut page.project.references[index];
+          let change = &mut page.reference_changes[index];
           ui.vertical(|ui| {
             ui.set_width(width);
             let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -397,13 +448,28 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
               ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
               ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
-                  if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again", false).clicked() {
+                  if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again from its description", false).clicked() {
                     redraw = Some(index);
+                  }
+                  if widgets::ghost(ui, Icon::Upload, None, "Use a picture of your own instead", false).clicked() {
+                    upload = Some(index);
                   }
                 });
               });
             });
-            changed |= ui.add(egui::TextEdit::multiline(&mut reference.description).desired_rows(3).desired_width(width).font(FontId::new(12.5, egui::FontFamily::Proportional))).changed();
+            changed |= ui.add(egui::TextEdit::multiline(&mut reference.description).id_salt(("mv-reference", index)).desired_rows(3).desired_width(width).font(FontId::new(12.5, egui::FontFamily::Proportional))).changed();
+            // Changing the picture itself, rather than drawing a new one from the description.
+            if reference.image.is_some() {
+              ui.add_space(4.0);
+              ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(change).id_salt(("mv-reference-change", index)).desired_width(width - 44.0).font(FontId::new(12.5, egui::FontFamily::Proportional)).hint_text(egui::RichText::new("Change it: a longer coat\u{2026}").color(theme::FAINT)));
+                ui.add_enabled_ui(!busy && !change.trim().is_empty(), |ui| {
+                  if widgets::ghost(ui, Icon::Wand, None, "Change the picture as written, keeping the rest", false).clicked() {
+                    actions.push(Action::ChangeReference(index, std::mem::take(change)));
+                  }
+                });
+              });
+            }
           });
         }
       });
@@ -411,21 +477,15 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
     }
   });
   if changed {
-    // The brief's performer and venue follow their reference's wording: scenes are drawn from both.
-    let edited: Vec<(ReferenceKind, String)> = page.project.references.iter().map(|r| (r.kind, r.description.clone())).collect();
-    if let Some(brief) = &mut page.project.brief {
-      for (kind, description) in edited {
-        match kind {
-          ReferenceKind::Look => brief.character.description = description,
-          ReferenceKind::Location => brief.venue.description = description,
-          ReferenceKind::Prop => {},
-        }
-      }
-    }
+    // The brief follows its references' wording: scenes are drawn from both.
+    page.project.follow_edited_references();
     page.touch(ui);
   }
   if let Some(index) = redraw {
     actions.push(Action::References(vec![index]));
+  }
+  if let Some(file) = upload.and_then(|_| pick_files(&[RefKind::Image], false).into_iter().next()) {
+    actions.push(Action::UploadReference(upload.unwrap_or_default(), file));
   }
   let missing: Vec<usize> = page.project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
   let all: Vec<usize> = (0..page.project.references.len()).collect();
@@ -434,7 +494,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let line = page.progress_line().filter(|_| page.running_here());
   let any = page.project.references.iter().any(|r| r.image.is_some());
   let pro = page.pro();
-  panel(ui, panel_rect, "Reference Images", "Edit a description under its picture, then draw it again.", |ui| {
+  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, upload a picture of your own, or write a change to the picture you have. Names, and adding or removing props, are on the Creative Brief.", |ui| {
     picture_model(ui, pro);
     error_line(ui, page.error.as_deref());
     let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };
@@ -887,12 +947,30 @@ fn card(ui: &mut Ui, title: String, content: impl FnOnce(&mut Ui)) {
   ui.add_space(CARD_GAP);
 }
 
-fn text_card(ui: &mut Ui, title: &str, text: &str) {
-  if !text.trim().is_empty() {
-    card(ui, title.to_owned(), |ui| {
-      ui.label(body(text));
-    });
-  }
+/// A card whose text is edited in place; returns whether it changed.
+fn edit_card(ui: &mut Ui, title: &str, text: &mut String, rows: usize) -> bool {
+  let mut changed = false;
+  card(ui, title.to_owned(), |ui| changed = edit_text(ui, title, text, rows));
+  changed
+}
+
+/// Body text edited in place, with no box of its own; returns whether it changed.
+fn edit_text(ui: &mut Ui, id: &str, text: &mut String, rows: usize) -> bool {
+  ui.add(egui::TextEdit::multiline(text).id_salt(id).frame(egui::Frame::NONE).desired_rows(rows).desired_width(f32::INFINITY).font(body_font()).text_color(theme::INK).hint_text(egui::RichText::new("Click to write\u{2026}").color(theme::FAINT))).changed()
+}
+
+/// One line edited in place in `font`; returns whether it changed.
+fn edit_line(ui: &mut Ui, id: &str, text: &mut String, hint: &str, font: FontId, width: f32) -> bool {
+  ui.add(egui::TextEdit::singleline(text).id_salt(id).frame(egui::Frame::NONE).desired_width(width).font(font).text_color(theme::INK).hint_text(egui::RichText::new(hint).color(theme::FAINT))).changed()
+}
+
+/// A heading edited in place, wrapping onto as many lines as it needs.
+fn edit_heading(ui: &mut Ui, id: &str, text: &mut String, hint: &str, size: f32) -> bool {
+  ui.add(egui::TextEdit::multiline(text).id_salt(id).frame(egui::Frame::NONE).desired_rows(1).desired_width(f32::INFINITY).font(FontId::new(size, theme::display())).text_color(theme::INK).hint_text(egui::RichText::new(hint).color(theme::FAINT))).changed()
+}
+
+fn body_font() -> FontId {
+  FontId::new(13.5, egui::FontFamily::Proportional)
 }
 
 /// The splash a stage shows before it has anything.

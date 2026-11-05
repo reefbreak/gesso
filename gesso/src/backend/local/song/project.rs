@@ -375,6 +375,44 @@ impl SongProject {
     self.brief = Some(brief);
   }
 
+  /// After the brief was edited by hand: the references take its names and wording and keep their
+  /// pictures, which can be drawn again on the next stage.
+  pub fn follow_edited_brief(&mut self) {
+    let Some(brief) = &self.brief else {
+      return;
+    };
+    let wanted = [(ReferenceKind::Look, &brief.character)].into_iter().chain([(ReferenceKind::Location, &brief.venue)]).chain(brief.props.iter().map(|prop| (ReferenceKind::Prop, prop)));
+    let mut old = std::mem::take(&mut self.references);
+    let references = wanted
+      .filter(|(_, subject)| !subject.description.trim().is_empty())
+      .map(|(kind, subject)| {
+        // The performer and the venue are one of a kind; a prop is found by whichever half wasn't edited.
+        let found = old.iter().position(|r| r.kind == kind && (kind != ReferenceKind::Prop || r.name == subject.name || r.description == subject.description));
+        let kept = found.map(|i| old.remove(i));
+        Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image: kept.as_ref().and_then(|r| r.image.clone()), version: kept.as_ref().map_or(0, |r| r.version), error: kept.and_then(|r| r.error) }
+      })
+      .collect();
+    self.references = references;
+  }
+
+  /// After a reference's description was edited by hand: the brief takes the new wording (props
+  /// are found by name).
+  pub fn follow_edited_references(&mut self) {
+    let Some(brief) = &mut self.brief else {
+      return;
+    };
+    for reference in &self.references {
+      let subject = match reference.kind {
+        ReferenceKind::Look => Some(&mut brief.character),
+        ReferenceKind::Location => Some(&mut brief.venue),
+        ReferenceKind::Prop => brief.props.iter_mut().find(|prop| prop.name == reference.name),
+      };
+      if let Some(subject) = subject {
+        subject.description.clone_from(&reference.description);
+      }
+    }
+  }
+
   /// The reference pictures that exist, the performer first: what every still is drawn from.
   pub fn reference_images(&self) -> Vec<PathBuf> {
     let mut made: Vec<&Reference> = self.references.iter().filter(|r| r.image.is_some()).collect();
@@ -502,6 +540,38 @@ mod tests {
     assert_eq!(project.references[0].image, Some(PathBuf::from("0.png")), "the performer is unchanged");
     assert_eq!((project.references[1].image.clone(), project.references[1].version), (None, 2), "the venue changed, so its picture goes");
     assert_eq!(project.design(), Design { look: "grainy".into(), character: "Wiry, cable hair.".into(), venue: "A flooded car park.".into() });
+  }
+
+  #[test]
+  fn an_edited_brief_renames_its_references_and_keeps_their_pictures() {
+    let mut project = SongProject::new();
+    project.set_brief(brief());
+    for (i, reference) in project.references.iter_mut().enumerate() {
+      reference.image = Some(PathBuf::from(format!("{i}.png")));
+      reference.version = 2;
+    }
+    let edited = project.brief.as_mut().unwrap();
+    edited.character.name = "The Captain".to_owned();
+    edited.character.description = "Wiry, cable hair, a torn greatcoat.".to_owned();
+    edited.props[0].description = "A brass compass with no needle.".to_owned();
+    edited.props.push(Subject { name: "Ship's wheel".into(), role: String::new(), description: "A splintered wooden wheel.".into() });
+    edited.props.push(Subject::default());
+    project.follow_edited_brief();
+    let summary: Vec<_> = project.references.iter().map(|r| (r.kind, r.name.as_str(), r.image.clone(), r.version)).collect();
+    assert_eq!(summary, [(ReferenceKind::Look, "The Captain", Some(PathBuf::from("0.png")), 2), (ReferenceKind::Location, "Rail Vault", Some(PathBuf::from("1.png")), 2), (ReferenceKind::Prop, "Lanyard", Some(PathBuf::from("2.png")), 2), (ReferenceKind::Prop, "Ship's wheel", None, 0)], "a prop with nothing written isn't a reference");
+    assert_eq!(project.references[0].description, "Wiry, cable hair, a torn greatcoat.");
+    assert_eq!(project.design().character, "Wiry, cable hair, a torn greatcoat.");
+  }
+
+  #[test]
+  fn an_edited_reference_rewords_the_brief() {
+    let mut project = SongProject::new();
+    project.set_brief(brief());
+    project.references[0].description = "Wiry, in a greatcoat.".to_owned();
+    project.references[2].description = "A brass compass.".to_owned();
+    project.follow_edited_references();
+    let brief = project.brief.as_ref().unwrap();
+    assert_eq!((brief.character.description.as_str(), brief.venue.description.as_str(), brief.props[0].description.as_str()), ("Wiry, in a greatcoat.", "A brick tunnel.", "A brass compass."));
   }
 
   #[test]

@@ -75,6 +75,10 @@ pub(super) enum Action {
   Brief,
   /// Reference images to make, by index.
   References(Vec<usize>),
+  /// The user's own picture for a reference.
+  UploadReference(usize, PathBuf),
+  /// A written change to a reference's picture.
+  ChangeReference(usize, String),
   Plan,
   /// Scenes whose stills to draw, by index.
   Stills(Vec<usize>),
@@ -122,6 +126,8 @@ pub struct MusicVideoPage {
   /// The scene picked in the Scenes and Shots grids.
   selected: Option<usize>,
   player: Option<VideoPlayer>,
+  /// What to change in each reference's picture, as typed under it.
+  reference_changes: Vec<String>,
   /// The slots a plan in flight was asked for.
   pending_slots: Vec<Slot>,
   /// When the project last changed without being saved.
@@ -132,7 +138,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -459,12 +465,29 @@ impl MusicVideoPage {
           if let Some(reference) = self.project.references.get_mut(index) {
             reference.version += 1;
             reference.error = None;
-            items.push(ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone() });
+            items.push(ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: None });
           }
         }
         if !items.is_empty() {
           let look = self.project.design().look;
           self.start(backend, items.len(), "Drawing reference images\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items });
+        }
+      },
+      Action::UploadReference(index, file) => {
+        if let Some(reference) = self.project.references.get_mut(index) {
+          reference.version += 1;
+          reference.error = None;
+          self.start(backend, 1, "Bringing in your picture\u{2026}", SongRequest::ImportReference { dir, index, version: self.project.references[index].version, kind: self.project.references[index].kind, file });
+        }
+      },
+      Action::ChangeReference(index, change) => {
+        let pictured = self.project.references.get_mut(index).and_then(|reference| reference.image.clone().map(|picture| (reference, picture)));
+        if let Some((reference, picture)) = pictured {
+          reference.version += 1;
+          reference.error = None;
+          let item = ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: Some((picture, change)) };
+          let look = self.project.design().look;
+          self.start(backend, 1, "Changing the picture\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items: vec![item] });
         }
       },
       Action::Plan => {

@@ -134,6 +134,12 @@ runs, and leaves everything it made editable before the next stage uses it.
 | Shots            | A silent clip per scene from its still; sung scenes lip-synced    | Vertex (Veo 3.1); fal (lip sync)                 |
 | Final Video      | Every clip trimmed to its scene and laid under the song           | Your Mac (FFmpeg)                                |
 
+- **What the writer makes is yours to edit.** Every part of the Visual Style and the Creative Brief
+  is edited in place (props can be added and removed), and the reference images follow the brief's
+  names and wording without losing their pictures. Each reference image can be drawn from its
+  description, replaced with a picture of your own, or changed by a written instruction that keeps
+  the rest of the picture. Edits apply to what is made after them: scenes already written keep
+  their wording until they are planned again.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

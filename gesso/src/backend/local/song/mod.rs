@@ -110,6 +110,8 @@ pub struct ReferenceJob {
   pub kind: ReferenceKind,
   pub name: String,
   pub description: String,
+  /// Instead of drawing from the description: the picture to change, and how.
+  pub change: Option<(PathBuf, String)>,
 }
 
 /// A still to make.
@@ -226,6 +228,14 @@ pub enum SongRequest {
     resolution: String,
     quality: Quality,
     shots: Vec<ClipJob>,
+  },
+  /// The user's own picture for a reference, copied into the project.
+  ImportReference {
+    dir: PathBuf,
+    index: usize,
+    version: u32,
+    kind: ReferenceKind,
+    file: PathBuf,
   },
   /// A vocal stem the user already has (exported from the app that made the song).
   ImportVocals {
@@ -458,6 +468,18 @@ impl SongRun<'_> {
         });
         stream::iter(jobs).buffer_unordered(CLIPS_AT_ONCE).collect::<Vec<()>>().await;
       },
+      SongRequest::ImportReference { dir, index, version, kind, file } => {
+        let bytes = std::fs::read(&file).map_err(|e| anyhow::anyhow!("Couldn't read {}: {e}", file.display()))?;
+        // Re-encoded as PNG: the image models take PNG, JPEG and WebP, and uploads come in more kinds.
+        let png = tokio::task::block_in_place(|| -> anyhow::Result<Vec<u8>> {
+          let image = image::load_from_memory(&bytes).map_err(|e| anyhow::anyhow!("{} isn't a picture Gesso can read: {e}", file.display()))?;
+          let mut out = Vec::new();
+          image.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+          Ok(out)
+        })?;
+        let path = save_picture(&dir.join("references"), &format!("{}_{:02}_v{version}.png", kind.label(), index + 1), &png)?;
+        self.send(SongUpdate::Reference { index, path });
+      },
       SongRequest::ImportVocals { dir, file } => {
         let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_ascii_lowercase();
         std::fs::create_dir_all(&dir)?;
@@ -551,13 +573,18 @@ impl SongRun<'_> {
 
   async fn reference(&self, dir: &Path, look: &str, aspect: Aspect, pro: bool, job: ReferenceJob) -> anyhow::Result<PathBuf> {
     let model = still_model(pro);
-    let prompt = reference_prompt(job.kind, &job.name, &job.description, look);
+    let picture = job.change.as_ref().map(|(path, _)| self.engine.load_path(path)).transpose()?;
+    let prompt = match &job.change {
+      Some((_, change)) => change_prompt(change),
+      None => reference_prompt(job.kind, &job.name, &job.description, look),
+    };
+    let images: Vec<RefImage> = picture.into_iter().collect();
     let ratio = match job.kind {
       ReferenceKind::Look => LOOK_RATIO,
       ReferenceKind::Location => aspect.ratio(),
       ReferenceKind::Prop => PROP_RATIO,
     };
-    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &[], aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
+    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
     let path = save_picture(dir, &format!("{}_{:02}_v{}.{}", job.kind.label(), job.index + 1, job.version, file.extension), &file.bytes)?;
     self.add_to_library(&file.bytes, file.extension, MediaClass::Image);
@@ -680,6 +707,11 @@ fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &s
     ReferenceKind::Prop => format!("A reference photograph of a single prop from a music video, alone on a plain white background. The prop, {}: {}", name.trim(), sentence(description)),
   };
   format!("{subject} The video's look, which this picture must match: {} No text, captions or logos.", sentence(look))
+}
+
+/// A written change to a reference picture the user already has.
+fn change_prompt(change: &str) -> String {
+  format!("Change the attached reference picture as follows: {} Keep everything else exactly as it is: the same subject, pose, framing, background and style. No text, captions or logos.", sentence(change))
 }
 
 fn still_prompt(design: &Design, image: &str, references: usize, guided: bool) -> String {
@@ -840,7 +872,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply()]);
       let (engine, dir) = engine(base_url);
       let project = dir.join("project");
-      let items = vec![ReferenceJob { index: 0, version: 1, kind: ReferenceKind::Look, name: "The Orchestrator".into(), description: "Wiry, cable hair".into() }, ReferenceJob { index: 1, version: 3, kind: ReferenceKind::Location, name: "Rail Vault".into(), description: "A brick tunnel".into() }];
+      let items = vec![ReferenceJob { index: 0, version: 1, kind: ReferenceKind::Look, name: "The Orchestrator".into(), description: "Wiry, cable hair".into(), change: None }, ReferenceJob { index: 1, version: 3, kind: ReferenceKind::Location, name: "Rail Vault".into(), description: "A brick tunnel".into(), change: None }];
       let (tx, rx) = std::sync::mpsc::channel();
       engine.start_song(4, SongRequest::References { dir: project.clone(), look: "Raw 16mm black-and-white film".into(), aspect: Aspect::Wide, pro: false, items }, tx, egui::Context::default());
 
@@ -854,6 +886,35 @@ mod tests {
       let prompts: Vec<String> = requests.iter().map(|(_, body)| serde_json::from_str::<Value>(body).unwrap()["contents"][0]["parts"][0]["text"].as_str().unwrap().to_owned()).collect();
       assert!(prompts.iter().any(|p| p.contains("from the front, the side and the back") && p.contains("Wiry, cable hair.") && p.contains("Raw 16mm black-and-white film.")));
       assert!(prompts.iter().any(|p| p.contains("with nobody in it") && p.contains("Rail Vault")));
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An uploaded picture is copied into the project as a PNG with its small copy, at no charge;
+    /// a written change sends the current picture back with the change.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reference_can_be_uploaded_and_then_changed() {
+      let (base_url, requests) = fake_vertex(vec![image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let project = dir.join("project");
+      std::fs::create_dir_all(&dir).unwrap();
+      let mine = dir.join("mine.jpg");
+      image::RgbImage::from_pixel(8, 8, image::Rgb([10, 20, 30])).save(&mine).unwrap();
+      let (tx, rx) = std::sync::mpsc::channel();
+      engine.start_song(5, SongRequest::ImportReference { dir: project.clone(), index: 0, version: 2, kind: ReferenceKind::Look, file: mine }, tx.clone(), egui::Context::default());
+      let updates = finished(&rx, 5).await;
+      let Some(SongUpdate::Reference { index: 0, path }) = updates.first() else { panic!("{updates:?}") };
+      assert!(path.ends_with("references/look_01_v2.png") && thumb_path(path).exists());
+      assert!(image::open(path).unwrap().to_rgb8().get_pixel(0, 0).0[2].abs_diff(30) < 6, "the picture itself is kept");
+      assert!(requests.lock().unwrap().is_empty(), "nothing is generated for an upload");
+
+      let item = ReferenceJob { index: 0, version: 3, kind: ReferenceKind::Look, name: "The Captain".into(), description: "Wiry".into(), change: Some((path.clone(), "a longer coat".into())) };
+      engine.start_song(6, SongRequest::References { dir: project, look: "grainy".into(), aspect: Aspect::Wide, pro: false, items: vec![item] }, tx, egui::Context::default());
+      let updates = finished(&rx, 6).await;
+      assert!(matches!(updates.first(), Some(SongUpdate::Reference { index: 0, path }) if path.ends_with("references/look_01_v3.png")), "{updates:?}");
+      let requests = requests.lock().unwrap();
+      let parts = serde_json::from_str::<Value>(&requests[0].1).unwrap()["contents"][0]["parts"].clone();
+      assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+      assert!(parts[1]["text"].as_str().unwrap().starts_with("Change the attached reference picture as follows: a longer coat. Keep everything else"), "{parts}");
       let _ = std::fs::remove_dir_all(dir);
     }
 
