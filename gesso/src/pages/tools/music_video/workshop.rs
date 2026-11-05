@@ -5,7 +5,7 @@
 use egui::{FontId, Key, Ui};
 
 use super::stages::{body, label, small};
-use super::{Action, MusicVideoPage};
+use super::{Action, MusicVideoPage, kind_title};
 use crate::backend::local::song::project::SongProject;
 use crate::backend::local::song::writer::{Subject, Turn};
 use crate::theme;
@@ -59,6 +59,8 @@ pub(in crate::pages::tools) enum Target {
   Character,
   Venue,
   Prop(usize),
+  /// The description a reference image is drawn from, by the reference's index.
+  Reference(usize),
 }
 
 impl Target {
@@ -77,6 +79,15 @@ impl Target {
       Self::Character => "Character (the performer)",
       Self::Venue => "Venue",
       Self::Prop(_) => "Prop",
+      Self::Reference(_) => "Reference image description",
+    }
+  }
+
+  /// The section as the writer is told it: for a reference image, which picture the words are for.
+  pub fn section(self, project: &SongProject) -> String {
+    match self {
+      Self::Reference(index) => project.references.get(index).map_or_else(|| self.title().to_owned(), |r| format!("The description an image model draws the reference picture of \"{}\" ({}) from", r.name.trim(), kind_title(r.kind).to_lowercase())),
+      _ => self.title().to_owned(),
     }
   }
 
@@ -105,6 +116,7 @@ impl Target {
       Self::Character => subject(&brief?.character, true),
       Self::Venue => subject(&brief?.venue, true),
       Self::Prop(index) => subject(brief?.props.get(index)?, false),
+      Self::Reference(index) => one(&project.references.get(index)?.description),
     }
   }
 
@@ -117,6 +129,14 @@ impl Target {
       subject.role = field("role").unwrap_or_default();
       subject.description = field("description").unwrap_or_default();
     };
+    if let Self::Reference(index) = self {
+      // The brief's performer, venue or prop takes the same wording: scenes are drawn from both.
+      if let Some(reference) = project.references.get_mut(index) {
+        reference.description = text;
+      }
+      project.follow_edited_references();
+      return;
+    }
     let (style, brief) = (project.visual.as_mut(), project.brief.as_mut());
     match self {
       Self::Statement => style.into_iter().for_each(|s| s.statement.clone_from(&text)),
@@ -131,6 +151,7 @@ impl Target {
       Self::Character => brief.into_iter().for_each(|b| into(&mut b.character)),
       Self::Venue => brief.into_iter().for_each(|b| into(&mut b.venue)),
       Self::Prop(index) => brief.and_then(|b| b.props.get_mut(index)).into_iter().for_each(into),
+      Self::Reference(_) => {},
     }
   }
 }
@@ -274,6 +295,20 @@ mod tests {
     assert_eq!(project.visual.as_ref().unwrap().block, "cold steel");
     assert!(Workshop::open(&project, Target::Prop(3)).is_none(), "there is no fourth prop");
     assert!(Workshop::open(&SongProject::new(), Target::Logline).is_none(), "nor a brief yet");
+  }
+
+  #[test]
+  fn a_reference_description_goes_back_to_its_card_and_the_brief() {
+    let mut project = project();
+    project.references[2].image = Some("compass.png".into());
+    let workshop = Workshop::open(&project, Target::Reference(2)).unwrap();
+    assert_eq!(workshop.fields, [(TEXT.to_owned(), "No needle.".to_owned())]);
+    assert_eq!(Target::Reference(2).section(&project), "The description an image model draws the reference picture of \"Compass\" (prop) from");
+    Target::Reference(2).write(&mut project, &[(TEXT.to_owned(), "Brass, no needle.".to_owned())]);
+    project.follow_edited_brief();
+    assert_eq!((project.references[2].description.as_str(), project.references[2].image.is_some()), ("Brass, no needle.", true), "the picture stays");
+    assert_eq!(project.brief.as_ref().unwrap().props[0].description, "Brass, no needle.");
+    assert!(Workshop::open(&project, Target::Reference(9)).is_none());
   }
 
   #[test]

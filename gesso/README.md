@@ -144,7 +144,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   Brief has a "Work on this with AI" link. It opens a conversation about that section alone: say
   what to change, read the writer's version (and edit it yourself), ask again, and put it back in
   the box when it is right. The writer sees the rest of the film for context but returns only that
-  section, and nothing in the video changes until you put it back.
+  section, and nothing in the video changes until you put it back. Each reference image's
+  description has the same link, and each card has a save button beside its upload button, so a
+  picture can be saved, edited in another app and uploaded back to the same card.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

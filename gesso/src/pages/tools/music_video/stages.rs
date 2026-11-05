@@ -433,6 +433,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let mut changed = false;
   let mut redraw = None;
   let mut upload = None;
+  let mut download = None;
   page.reference_changes.resize(page.project.references.len(), String::new());
   column_wide(ui, stage, "references", |ui| {
     heading(ui, Stage::References, "Reference images", "The performer, the location and the signature details. Every scene is drawn from these, so they stay the same from shot to shot.");
@@ -458,16 +459,27 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
               ui.label(egui::RichText::new(&reference.name).size(14.0).family(theme::semibold()).color(theme::INK));
-              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
               ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                   if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again from its description", false).clicked() {
                     redraw = Some(index);
                   }
-                  if widgets::ghost(ui, Icon::Upload, None, "Use a picture of your own instead", false).clicked() {
+                  if widgets::ghost(ui, Icon::Upload, None, "Upload a picture: your own, or this one after editing it elsewhere", false).clicked() {
                     upload = Some(index);
                   }
+                  if reference.image.is_some() && widgets::ghost(ui, Icon::Download, None, "Save a copy of this picture to edit in another app", false).clicked() {
+                    download = Some(index);
+                  }
                 });
+              });
+            });
+            // The kind sits on its own line: three buttons leave no room for it beside a long name.
+            ui.horizontal(|ui| {
+              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
+              ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!busy, egui::Button::new(egui::RichText::new("Work on this with AI").size(12.0).color(theme::MUTED)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Talk this description through with the writer, then put the result back here").clicked() {
+                  actions.push(Action::Workshop(Target::Reference(index)));
+                }
               });
             });
             changed |= ui.add(egui::TextEdit::multiline(&mut reference.description).id_salt(("mv-reference", index)).desired_rows(3).desired_width(width).font(FontId::new(12.5, egui::FontFamily::Proportional))).changed();
@@ -497,6 +509,14 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   if let Some(index) = redraw {
     actions.push(Action::References(vec![index]));
   }
+  if let Some(index) = download {
+    let reference = &page.project.references[index];
+    let extension = reference.image.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str()).unwrap_or("png");
+    let name = format!("{}.{extension}", reference.name.trim().replace(['/', '\\', ':'], "-"));
+    if let Some(to) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+      actions.push(Action::DownloadReference(index, to));
+    }
+  }
   if let Some(file) = upload.and_then(|_| pick_files(&[RefKind::Image], false).into_iter().next()) {
     actions.push(Action::UploadReference(upload.unwrap_or_default(), file));
   }
@@ -507,7 +527,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let line = page.progress_line().filter(|_| page.running_here());
   let any = page.project.references.iter().any(|r| r.image.is_some());
   let pro = page.pro();
-  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, upload a picture of your own, or write a change to the picture you have. Names, and adding or removing props, are on the Creative Brief.", |ui| {
+  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, work on the description with AI, write a change to the picture, or save the picture, edit it in another app and upload it back to the same card. Names, and adding or removing props, are on the Creative Brief.", |ui| {
     picture_model(ui, pro);
     error_line(ui, page.error.as_deref());
     let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };

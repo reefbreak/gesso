@@ -82,6 +82,8 @@ pub(super) enum Action {
   UploadReference(usize, PathBuf),
   /// A written change to a reference's picture.
   ChangeReference(usize, String),
+  /// Saves a copy of a reference's picture where the user chose, to edit in another app.
+  DownloadReference(usize, PathBuf),
   /// Opens a conversation with the writer about one section.
   Workshop(Target),
   /// Sends what was typed in that conversation.
@@ -503,7 +505,7 @@ impl MusicVideoPage {
           w.turns.push(Turn { from_user: true, text: std::mem::take(&mut w.input).trim().to_owned() });
           w.waiting = true;
           w.error = None;
-          SongRequest::Workshop { context: workshop::context(&self.project), section: w.target.title().to_owned(), fields: w.fields.clone(), turns: w.turns.clone(), writer: self.writer }
+          SongRequest::Workshop { context: workshop::context(&self.project), section: w.target.section(&self.project), fields: w.fields.clone(), turns: w.turns.clone(), writer: self.writer }
         });
         if let Some(request) = request {
           self.start(backend, 0, "Working on the section\u{2026}", request);
@@ -518,6 +520,14 @@ impl MusicVideoPage {
         }
       },
       Action::WorkshopClose => self.workshop = None,
+      Action::DownloadReference(index, to) => {
+        if let Some(picture) = self.project.references.get(index).and_then(|r| r.image.as_ref()) {
+          match std::fs::copy(picture, &to) {
+            Ok(_) => env.toasts.success(format!("Saved to {}. Edit it, then use the upload button on the same card.", to.display())),
+            Err(err) => env.toasts.error(format!("Couldn't save the picture: {err}")),
+          }
+        }
+      },
       Action::UploadReference(index, file) => {
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.version += 1;
