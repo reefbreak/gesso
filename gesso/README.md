@@ -121,18 +121,18 @@ Gesso tries the model id `gemini-omni-1.1-flash-preview`, then `gemini-omni-1.1-
 its beat. Each stage opens once the one before it has what it needs, shows its cost before it
 runs, and leaves everything it made editable before the next stage uses it.
 
-| Stage            | What you get                                                      | Runs on                                      |
-|------------------|-------------------------------------------------------------------|----------------------------------------------|
-| Idea             | Lyrics and a music direction from a description (or your own)     | Writer: Gemini (Vertex) or Claude (Bedrock)  |
-| Lyrics           | The words and direction, edited by hand or rewritten from notes   | Writer                                       |
-| Song             | A sung song or 30-second clip, or a track you import              | Vertex (Lyria 3)                             |
-| Music Analysis   | Tempo and beats; mood, sections and timed lyrics                  | Your Mac (FFmpeg); Vertex (Gemini listening) |
-| Visual Style     | A look statement, palette, lighting and the common style block    | Writer                                       |
-| Creative Brief   | Logline, arc, editing strategy, motifs, performer, venue, props   | Writer                                       |
-| Reference Images | The performer's three-view sheet, the venue and each prop         | Vertex (Nano Banana 2 or Pro)                |
-| Scenes           | The song cut into scenes on its beats, each with an opening frame | Your Mac (timing); writer; Vertex (stills)   |
-| Shots            | A silent clip per scene, animated from its still                  | Vertex (Veo 3.1 Lite, Fast or standard)      |
-| Final Video      | Every clip trimmed to its scene and laid under the song           | Your Mac (FFmpeg)                            |
+| Stage            | What you get                                                      | Runs on                                          |
+|------------------|-------------------------------------------------------------------|--------------------------------------------------|
+| Idea             | Lyrics and a music direction from a description (or your own)     | Writer: Gemini (Vertex) or Claude (Bedrock)      |
+| Lyrics           | The words and direction, edited by hand or rewritten from notes   | Writer                                           |
+| Song             | A sung song or 30-second clip, or a track you import              | Vertex (Lyria 3)                                 |
+| Music Analysis   | Tempo and beats; mood, sections and timed lyrics                  | Your Mac (FFmpeg); Vertex (Gemini listening)     |
+| Visual Style     | A look statement, palette, lighting and the common style block    | Writer                                           |
+| Creative Brief   | Logline, arc, editing strategy, motifs, performer, venue, props   | Writer                                           |
+| Reference Images | The performer's three-view sheet, the venue and each prop         | Vertex (Nano Banana 2, or Pro in the final pass) |
+| Scenes           | The song cut into scenes on its beats, each with an opening frame | Your Mac (timing); writer; Vertex (stills)       |
+| Shots            | A silent clip per scene from its still; sung scenes lip-synced    | Vertex (Veo 3.1); fal (lip sync)                 |
+| Final Video      | Every clip trimmed to its scene and laid under the song           | Your Mac (FFmpeg)                                |
 
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
@@ -149,11 +149,28 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **Lyrics are written new.** The writer is told to carry over an idea's energy and structure, not
   the words of an existing song, and to describe music without artist or song names (Lyria refuses
   them).
-- **Lip sync.** Veo's clips are silent and aren't synced to the vocal, so the writer steers scenes
-  toward movement and cutaways, not close-ups of singing.
+- **Draft, then final.** The Quality switch in the left rail picks the pass. **Draft** uses the
+  cheap, fast models (Nano Banana 2 at 1K, Veo 3.1 Lite) to settle the direction. **Final** runs
+  the same scenes again with the best ones: each still is redrawn by Nano Banana Pro at 2K with
+  its approved draft still attached as the frame to recreate, then filmed by the Veo tier you
+  pick (Veo 3.1 by default). The scenes, their wording and their timing are shared; each pass
+  keeps its own stills and clips, and the final cut uses a draft clip wherever a final one hasn't
+  been made yet.
+- **Lip sync.** Veo's clips are silent, and neither cloud hosts a model that syncs a mouth to a
+  track you supply, so this runs on fal with your own key (Settings). Tick **The performer sings
+  on camera** on the Scenes stage and the writer marks the scenes to sing, framed as close-ups
+  with the mouth in view; untick it and scenes keep to movement and cutaways. On the Shots stage,
+  each sung scene's clip is trimmed to its slot and sent with the vocal under it to Sync Lipsync
+  v2 (`lipsync-2` in the draft pass at $3 a minute, `lipsync-2-pro` in the final at $5). It
+  follows the vocal stem, not the full mix: import one on the Song stage if your music app
+  exports stems, or Gesso separates it once with Demucs on fal (about $0.13 for three minutes).
+  Sung and shouted vocals sync less reliably than speech, so expect to redo a few scenes.
 - **Projects.** Each video is a folder in `~/Artcraft/local/songs/` with `project.json`, the song,
   reference images, stills, clips and cuts. The song, the reference images and the finished film
   also go into the library; the dozens of stills and clips don't.
+
+The pipeline's order, for a new video: run every stage in Draft; cut it; fix scenes until the
+direction is right; switch to Final; redraw the stills; make the clips; lip-sync; cut again.
 
 Optional settings in `local_providers.json`: `song_text_model` (default: `gemini-3.8-flash`, then
 `gemini-3.5-flash`), `song_music_model` (default: `lyria-3-pro-preview`, then `lyria-3.5`) and

@@ -10,6 +10,7 @@ pub mod bgremove;
 pub mod catalog;
 pub mod config;
 pub mod estimate;
+pub mod fal;
 pub mod health;
 pub mod jev;
 pub mod library;
@@ -95,6 +96,8 @@ pub struct LocalEngine {
   suite: SuiteLocator,
   /// `~/Artcraft`: the inbox and PhotoCraft's control token live under it.
   data_root: PathBuf,
+  /// For calls outside the two clouds (fal).
+  http: reqwest::Client,
   /// Music Video runs in flight, each with the flag that stops it.
   song_runs: Mutex<HashMap<u64, Arc<AtomicBool>>>,
 }
@@ -112,7 +115,7 @@ impl LocalEngine {
     let spend = SpendLedger::load(library.dir());
     let remover = BackgroundRemover::new(data_root, http.clone());
     let suite = SuiteLocator::new(config.suite_dir.as_deref(), &config.suite_apps);
-    Self { song_runs: Mutex::new(HashMap::new()), suite, data_root: data_root.to_path_buf(), remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
+    Self { http: http.clone(), song_runs: Mutex::new(HashMap::new()), suite, data_root: data_root.to_path_buf(), remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
   }
 
   /// Who the app shows as signed in.
@@ -144,6 +147,17 @@ impl LocalEngine {
   /// What the page's request would cost, before it's sent (`fields` as for generating).
   pub fn estimate(&self, modality: Modality, fields: &Map<String, Value>) -> Option<CostEstimate> {
     estimate::estimate(&self.config, &self.prices, modality, &Request::from_fields(modality, fields))
+  }
+
+  /// fal with the user's saved key, or why it can't be used.
+  pub fn fal(&self) -> anyhow::Result<fal::FalClient> {
+    let key = crate::backend::providers::accounts::saved_fal_key(&self.data_root).ok_or_else(|| anyhow::anyhow!("Lip sync runs on fal, which isn't connected. Add your fal API key in Settings."))?;
+    Ok(fal::FalClient::new(self.http.clone(), key, self.config.fal_base_url.clone()))
+  }
+
+  /// Whether a fal key is saved.
+  pub fn fal_connected(&self) -> bool {
+    crate::backend::providers::accounts::saved_fal_key(&self.data_root).is_some()
   }
 
   /// Spend per model on each account (System Health).

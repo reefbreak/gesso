@@ -21,16 +21,19 @@ pub enum Account {
   Jev,
   Vertex,
   Bedrock,
+  /// fal, with the user's own key (lip sync and vocal separation).
+  Fal,
 }
 
 impl Account {
-  pub const ALL: [Account; 3] = [Account::Vertex, Account::Bedrock, Account::Jev];
+  pub const ALL: [Account; 4] = [Account::Vertex, Account::Bedrock, Account::Fal, Account::Jev];
 
   pub fn label(self) -> &'static str {
     match self {
       Account::Jev => "Jev (TypeSafe)",
       Account::Vertex => "Google Cloud",
       Account::Bedrock => "AWS Bedrock",
+      Account::Fal => "fal",
     }
   }
 }
@@ -53,11 +56,12 @@ pub struct Totals {
   pub jev: f64,
   pub vertex: f64,
   pub bedrock: f64,
+  pub fal: f64,
 }
 
 impl Totals {
   pub fn total(&self) -> f64 {
-    self.jev + self.vertex + self.bedrock
+    self.jev + self.vertex + self.bedrock + self.fal
   }
 
   pub fn of(&self, account: Account) -> f64 {
@@ -65,6 +69,7 @@ impl Totals {
       Account::Jev => self.jev,
       Account::Vertex => self.vertex,
       Account::Bedrock => self.bedrock,
+      Account::Fal => self.fal,
     }
   }
 
@@ -73,6 +78,7 @@ impl Totals {
       Account::Jev => self.jev += usd,
       Account::Vertex => self.vertex += usd,
       Account::Bedrock => self.bedrock += usd,
+      Account::Fal => self.fal += usd,
     }
   }
 }

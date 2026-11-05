@@ -60,6 +60,10 @@ pub struct LocalConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub song_claude_model: Option<String>,
 
+  /// Replaces fal's queue host (a mock server for testing).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub fal_base_url: Option<String>,
+
   // --- AWS (Bedrock) ---
   /// `None`: on when an AWS credential source is found.
   pub bedrock_enabled: Option<bool>,
@@ -87,7 +91,7 @@ pub struct LocalConfig {
 
 impl Default for LocalConfig {
   fn default() -> Self {
-    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, omni_model: None, omni_output_gcs_uri: None, song_text_model: None, song_music_model: None, song_claude_model: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new(), suite_dir: None, suite_apps: HashMap::new() }
+    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, omni_model: None, omni_output_gcs_uri: None, song_text_model: None, song_music_model: None, song_claude_model: None, fal_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new(), suite_dir: None, suite_apps: HashMap::new() }
   }
 }
 

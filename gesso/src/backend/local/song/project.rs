@@ -103,7 +103,56 @@ pub struct Reference {
   pub error: Option<String>,
 }
 
-/// One scene of the video: a still, then the clip made from it.
+/// Which pass over the pictures and clips is being worked on. The scenes, their wording and
+/// their timing are shared; each pass keeps its own stills and clips.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+  /// Cheap, fast models, for settling the direction.
+  #[default]
+  Draft,
+  /// The best models, once the direction is locked: each still is redrawn from its draft.
+  Final,
+}
+
+impl Quality {
+  pub const ALL: [Quality; 2] = [Quality::Draft, Quality::Final];
+
+  pub fn label(self) -> &'static str {
+    match self {
+      Quality::Draft => "Draft",
+      Quality::Final => "Final",
+    }
+  }
+
+  /// The file-name tag that keeps the passes' media apart.
+  pub fn tag(self) -> &'static str {
+    match self {
+      Quality::Draft => "draft",
+      Quality::Final => "final",
+    }
+  }
+}
+
+/// One pass's media for a scene.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Take {
+  pub still: Option<PathBuf>,
+  /// The clip as the video model made it.
+  pub clip: Option<PathBuf>,
+  /// The clip with the mouth redrawn to the vocal, for scenes the performer sings.
+  pub synced: Option<PathBuf>,
+}
+
+impl Take {
+  /// The clip the cut uses: lip-synced when there is one.
+  pub fn best_clip(&self) -> Option<&PathBuf> {
+    self.synced.as_ref().or(self.clip.as_ref())
+  }
+}
+
+/// One scene of the video: a still, then the clip made from it, in each pass.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Shot {
@@ -114,12 +163,51 @@ pub struct Shot {
   pub motion: String,
   /// The scene's feeling in a few words.
   pub beat: String,
-  pub still: Option<PathBuf>,
+  /// The performer sings this scene's line to the camera, so its clip is lip-synced.
+  pub sing: bool,
+  pub draft: Take,
+  #[serde(rename = "final")]
+  pub finished: Take,
+  /// Count regenerations, so each one gets its own file name (the media cache keys on it).
   pub still_version: u32,
-  pub clip: Option<PathBuf>,
   pub clip_version: u32,
-  /// Why the last still or clip failed.
+  /// Why the last still, clip or lip sync failed.
   pub error: Option<String>,
+  /// Where the draft's media was kept before scenes had two passes; moved into `draft` on load.
+  #[serde(rename = "still", skip_serializing)]
+  old_still: Option<PathBuf>,
+  #[serde(rename = "clip", skip_serializing)]
+  old_clip: Option<PathBuf>,
+}
+
+impl Shot {
+  pub fn take(&self, quality: Quality) -> &Take {
+    match quality {
+      Quality::Draft => &self.draft,
+      Quality::Final => &self.finished,
+    }
+  }
+
+  pub fn take_mut(&mut self, quality: Quality) -> &mut Take {
+    match quality {
+      Quality::Draft => &mut self.draft,
+      Quality::Final => &mut self.finished,
+    }
+  }
+
+  /// The still to show for a pass: its own, or the draft's while the final hasn't been drawn.
+  pub fn still_for(&self, quality: Quality) -> Option<&PathBuf> {
+    self.take(quality).still.as_ref().or(self.draft.still.as_ref())
+  }
+
+  /// Whether any pass has a still (or a clip).
+  pub fn has_still(&self) -> bool {
+    self.draft.still.is_some() || self.finished.still.is_some()
+  }
+
+  pub fn has_clip(&self) -> bool {
+    self.draft.clip.is_some() || self.finished.clip.is_some()
+  }
 }
 
 /// A music video in progress.
@@ -146,6 +234,13 @@ pub struct SongProject {
   pub visual: Option<Style>,
   pub brief: Option<Brief>,
   pub references: Vec<Reference>,
+  /// The pass being worked on.
+  pub quality: Quality,
+  /// The performer sings on camera: the writer marks scenes to sing, and their clips are
+  /// lip-synced (needs a fal key).
+  pub lip_sync: bool,
+  /// The track's vocal stem, which lip sync follows better than the full mix.
+  pub vocals: Option<PathBuf>,
   pub aspect: Aspect,
   pub grade: Grade,
   pub pace: Pace,
@@ -174,7 +269,17 @@ impl SongProject {
   pub fn load(library_dir: &Path, id: &str) -> Option<Self> {
     let path = library_dir.join(DIRECTORY).join(id).join(FILENAME);
     let text = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&text).map_err(|err| warn!("Ignoring unreadable {}: {err}", path.display())).ok()
+    let mut project: Self = serde_json::from_str(&text).map_err(|err| warn!("Ignoring unreadable {}: {err}", path.display())).ok()?;
+    // Projects saved before scenes had two passes kept the draft's media on the scene itself.
+    for shot in &mut project.shots {
+      if let Some(still) = shot.old_still.take() {
+        shot.draft.still.get_or_insert(still);
+      }
+      if let Some(clip) = shot.old_clip.take() {
+        shot.draft.clip.get_or_insert(clip);
+      }
+    }
+    Some(project)
   }
 
   /// Every saved project, most recently worked on first.
@@ -238,10 +343,10 @@ impl SongProject {
       Stage::Style
     } else if self.brief.is_none() {
       Stage::Brief
-    } else if self.shots.is_empty() || self.shots.iter().all(|s| s.still.is_none()) {
+    } else if self.shots.is_empty() || self.shots.iter().all(|s| !s.has_still()) {
       // Reference images help but aren't required: scenes can be drawn from words alone.
       Stage::Scenes
-    } else if self.shots.iter().all(|s| s.clip.is_none()) {
+    } else if self.shots.iter().all(|s| !s.has_clip()) {
       Stage::Shots
     } else {
       Stage::Final
@@ -289,25 +394,42 @@ impl SongProject {
       .map(|slot| {
         let scene = planned.iter().find(|p| p.index == slot.index);
         let (still_version, clip_version) = self.shots.get(slot.index).map_or((0, 0), |old| (old.still_version, old.clip_version));
-        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), still: None, still_version, clip: None, clip_version, error: None }
+        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
       })
       .collect();
     self.cut = None;
   }
 
-  /// The cut's shots: each slot's clip, or its still held when the clip is missing. `None` while
-  /// any slot has neither.
-  pub fn cut_shots(&self) -> Option<Vec<CutShot>> {
+  /// The cut's shots for a pass. Each slot takes that pass's clip (lip-synced when there is
+  /// one), then the other pass's clip, then a still held for the slot. `None` while any slot has
+  /// nothing at all.
+  pub fn cut_shots(&self, quality: Quality) -> Option<Vec<CutShot>> {
     if self.shots.is_empty() {
       return None;
     }
-    self.shots.iter().map(|shot| shot.clip.clone().map(ShotMedia::Clip).or_else(|| shot.still.clone().map(ShotMedia::Still)).map(|media| CutShot { start: shot.slot.start, end: shot.slot.end, media })).collect()
+    let other = if quality == Quality::Draft { Quality::Final } else { Quality::Draft };
+    self
+      .shots
+      .iter()
+      .map(|shot| {
+        let clip = shot.take(quality).best_clip().or_else(|| shot.take(other).best_clip()).cloned().map(ShotMedia::Clip);
+        let still = || shot.take(quality).still.as_ref().or(shot.take(other).still.as_ref()).cloned().map(ShotMedia::Still);
+        clip.or_else(still).map(|media| CutShot { start: shot.slot.start, end: shot.slot.end, media })
+      })
+      .collect()
   }
 
-  /// Seconds of video the clips would take to generate, at the clip lengths Veo makes (or
+  /// Seconds of video a pass's clips would take to generate, at the clip lengths Veo makes (or
   /// `whole_clips_of` seconds each, for resolutions that only come in one length).
-  pub fn seconds_to_generate(&self, only_missing: bool, whole_clips_of: Option<u16>) -> u32 {
-    self.shots.iter().filter(|s| s.still.is_some() && (!only_missing || s.clip.is_none())).map(|s| u32::from(whole_clips_of.unwrap_or_else(|| super::plan::clip_seconds(s.slot.seconds())))).sum()
+  pub fn seconds_to_generate(&self, quality: Quality, only_missing: bool, whole_clips_of: Option<u16>) -> u32 {
+    self.shots.iter().filter(|s| s.take(quality).still.is_some() && (!only_missing || s.take(quality).clip.is_none())).map(|s| u32::from(whole_clips_of.unwrap_or_else(|| super::plan::clip_seconds(s.slot.seconds())))).sum()
+  }
+
+  /// The scenes of a pass that are sung and have a clip to sync, and how many seconds they run.
+  pub fn scenes_to_sync(&self, quality: Quality, only_missing: bool) -> (Vec<usize>, f64) {
+    let scenes: Vec<usize> = self.shots.iter().enumerate().filter(|(_, s)| s.sing && s.take(quality).clip.is_some() && (!only_missing || s.take(quality).synced.is_none())).map(|(i, _)| i).collect();
+    let seconds = scenes.iter().map(|i| self.shots[*i].slot.seconds()).sum();
+    (scenes, seconds)
   }
 }
 
@@ -353,9 +475,9 @@ mod tests {
     project.set_brief(brief());
     assert_eq!(project.furthest(), Stage::Scenes);
     assert!(project.reachable(Stage::References));
-    project.shots = vec![Shot { still: Some(PathBuf::from("a.png")), ..Default::default() }];
+    project.shots = vec![Shot { draft: Take { still: Some(PathBuf::from("a.png")), ..Default::default() }, ..Default::default() }];
     assert_eq!(project.furthest(), Stage::Shots);
-    project.shots[0].clip = Some(PathBuf::from("a.mp4"));
+    project.shots[0].draft.clip = Some(PathBuf::from("a.mp4"));
     assert_eq!(project.furthest(), Stage::Final);
     assert!(Stage::ALL.iter().all(|s| project.reachable(*s)));
   }
@@ -385,28 +507,81 @@ mod tests {
   #[test]
   fn a_new_plan_keeps_version_counters_and_drops_old_media() {
     let mut project = SongProject::new();
-    project.shots = vec![Shot { still: Some(PathBuf::from("old.png")), still_version: 3, clip: Some(PathBuf::from("old.mp4")), clip_version: 2, ..Default::default() }];
+    project.shots = vec![Shot { draft: Take { still: Some(PathBuf::from("old.png")), clip: Some(PathBuf::from("old.mp4")), synced: None }, still_version: 3, clip_version: 2, ..Default::default() }];
     project.cut = Some(PathBuf::from("cut.mp4"));
     let slots = [slot(0, 0.0, 2.0), slot(1, 2.0, 4.0)];
-    project.set_plan(&slots, &[PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into() }]);
+    let scene = PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into(), sing: true };
+    project.set_plan(&slots, std::slice::from_ref(&scene));
     assert_eq!(project.shots.len(), 2);
-    assert_eq!((project.shots[0].still.clone(), project.shots[0].still_version, project.shots[0].clip_version), (None, 3, 2));
+    assert_eq!((project.shots[0].draft.clone(), project.shots[0].still_version, project.shots[0].clip_version), (Take::default(), 3, 2));
     assert_eq!((project.shots[1].image.as_str(), project.shots[1].motion.as_str(), project.shots[1].beat.as_str()), ("B", "m", "manic"));
+    assert!(!project.shots[1].sing, "nobody sings unless lip sync is on");
     assert_eq!(project.cut, None);
+    project.lip_sync = true;
+    project.set_plan(&slots, &[scene]);
+    assert!(project.shots[1].sing && !project.shots[0].sing);
   }
 
   #[test]
   fn the_cut_uses_stills_where_clips_are_missing() {
     let mut project = SongProject::new();
-    assert_eq!(project.cut_shots(), None);
-    project.shots = vec![Shot { slot: slot(0, 0.0, 2.0), clip: Some("a.mp4".into()), still: Some("a.png".into()), ..Default::default() }, Shot { slot: slot(1, 2.0, 7.0), still: Some("b.png".into()), ..Default::default() }];
-    let cut = project.cut_shots().unwrap();
+    assert_eq!(project.cut_shots(Quality::Draft), None);
+    let take = |still: &str, clip: Option<&str>| Take { still: Some(still.into()), clip: clip.map(Into::into), synced: None };
+    project.shots = vec![Shot { slot: slot(0, 0.0, 2.0), draft: take("a.png", Some("a.mp4")), ..Default::default() }, Shot { slot: slot(1, 2.0, 7.0), draft: take("b.png", None), ..Default::default() }];
+    let cut = project.cut_shots(Quality::Draft).unwrap();
     assert_eq!(cut[0].media, ShotMedia::Clip("a.mp4".into()));
     assert_eq!(cut[1], CutShot { start: 2.0, end: 7.0, media: ShotMedia::Still("b.png".into()) });
     // 2 s needs a 4-second clip, 5 s a 6-second one; only the second is missing.
-    assert_eq!((project.seconds_to_generate(false, None), project.seconds_to_generate(true, None), project.seconds_to_generate(true, Some(8))), (10, 6, 8));
+    let seconds = |only_missing, whole| project.seconds_to_generate(Quality::Draft, only_missing, whole);
+    assert_eq!((seconds(false, None), seconds(true, None), seconds(true, Some(8))), (10, 6, 8));
     project.shots.push(Shot::default());
-    assert_eq!(project.cut_shots(), None);
+    assert_eq!(project.cut_shots(Quality::Draft), None);
+  }
+
+  mod passes {
+    use super::*;
+
+    /// The final cut takes final clips where they exist and falls back to the draft's, so a
+    /// half-finished final pass still cuts; a lip-synced clip always wins over its raw one.
+    #[test]
+    fn each_pass_cuts_from_its_own_media_first() {
+      let mut project = SongProject::new();
+      let draft = Take { still: Some("d.png".into()), clip: Some("d.mp4".into()), synced: Some("d_sync.mp4".into()) };
+      project.shots = vec![Shot { slot: slot(0, 0.0, 2.0), draft: draft.clone(), finished: Take { still: Some("f.png".into()), clip: Some("f.mp4".into()), synced: None }, ..Default::default() }, Shot { slot: slot(1, 2.0, 4.0), draft, finished: Take { still: Some("f2.png".into()), ..Default::default() }, ..Default::default() }];
+      let media = |quality| project.cut_shots(quality).unwrap().into_iter().map(|s| s.media).collect::<Vec<_>>();
+      assert_eq!(media(Quality::Final), [ShotMedia::Clip("f.mp4".into()), ShotMedia::Clip("d_sync.mp4".into())]);
+      assert_eq!(media(Quality::Draft), [ShotMedia::Clip("d_sync.mp4".into()), ShotMedia::Clip("d_sync.mp4".into())]);
+      assert_eq!(project.shots[1].still_for(Quality::Final), Some(&PathBuf::from("f2.png")));
+      assert_eq!(Shot { draft: Take { still: Some("d.png".into()), ..Default::default() }, ..Default::default() }.still_for(Quality::Final), Some(&PathBuf::from("d.png")));
+      // Final clips are made from final stills: one is drawn, none has a clip yet.
+      assert_eq!(project.seconds_to_generate(Quality::Final, true, None), 4);
+    }
+
+    #[test]
+    fn only_sung_scenes_with_a_clip_are_synced() {
+      let mut project = SongProject::new();
+      let clip = |synced: bool| Take { still: Some("s.png".into()), clip: Some("c.mp4".into()), synced: synced.then(|| "x.mp4".into()) };
+      project.shots = vec![Shot { slot: slot(0, 0.0, 2.0), sing: true, draft: clip(false), ..Default::default() }, Shot { slot: slot(1, 2.0, 5.0), sing: true, draft: clip(true), ..Default::default() }, Shot { slot: slot(2, 5.0, 9.0), draft: clip(false), ..Default::default() }, Shot { slot: slot(3, 9.0, 11.0), sing: true, ..Default::default() }];
+      assert_eq!(project.scenes_to_sync(Quality::Draft, true), (vec![0], 2.0));
+      assert_eq!(project.scenes_to_sync(Quality::Draft, false), (vec![0, 1], 5.0));
+      assert_eq!(project.scenes_to_sync(Quality::Final, false), (Vec::new(), 0.0));
+    }
+
+    /// A project saved before scenes had two passes opens with its media in the draft.
+    #[test]
+    fn older_projects_keep_their_stills_and_clips() {
+      let dir = tempfile::tempdir().unwrap();
+      let folder = dir.path().join(DIRECTORY).join("song_old");
+      std::fs::create_dir_all(&folder).unwrap();
+      std::fs::write(folder.join(FILENAME), r#"{"id":"song_old","shots":[{"image":"A","still":"/p/a.png","clip":"/p/a.mp4","still_version":2}]}"#).unwrap();
+      let mut project = SongProject::load(dir.path(), "song_old").unwrap();
+      assert_eq!(project.shots[0].draft, Take { still: Some("/p/a.png".into()), clip: Some("/p/a.mp4".into()), synced: None });
+      assert_eq!((project.quality, project.shots[0].still_version), (Quality::Draft, 2));
+      project.save(dir.path()).unwrap();
+      let saved = std::fs::read_to_string(folder.join(FILENAME)).unwrap();
+      assert!(saved.contains("\"draft\"") && !saved.contains("\"still\": \"/p/a.png\",\n      \"still_version"), "{saved}");
+      assert_eq!(SongProject::load(dir.path(), "song_old").unwrap().shots[0].draft, project.shots[0].draft);
+    }
   }
 
   fn brief() -> Brief {

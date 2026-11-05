@@ -13,6 +13,12 @@ const MIDJOURNEY_FILENAME: &str = "midjourney_cookies.toml";
 const MIDJOURNEY_LEGACY_FILENAME: &str = "midjourney_state.json";
 const FAL_KEY_FILENAME: &str = "fal.api_key.txt";
 
+/// The fal API key saved under `data_root`, if there is one (the local engine reads it without
+/// loading the other accounts).
+pub fn saved_fal_key(data_root: &Path) -> Option<String> {
+  std::fs::read_to_string(data_root.join("credentials").join(FAL_KEY_FILENAME)).ok().map(|k| k.trim().to_owned()).filter(|k| !k.is_empty())
+}
+
 #[derive(Clone)]
 pub struct ProviderAccounts {
   pub midjourney: MidjourneyCredentialManager,

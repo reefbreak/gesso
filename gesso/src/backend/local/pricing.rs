@@ -48,7 +48,8 @@ pub struct GeminiUsage {
 /// `stability.stable-image-ultra-v1:1` (per image), `jev.input` (per million tokens),
 /// `gemini-omni-flash.input` / `.text_out` / `.video_out` (per million tokens),
 /// `lyria-3.5` (per song), `gemini-3.8-flash.input` / `.text_out` and `claude.input` /
-/// `.text_out` (the Music Video page's writer, per million tokens).
+/// `.text_out` (the Music Video page's writer, per million tokens), `lipsync-2` /
+/// `lipsync-2-pro` (fal's lip sync, per second) and `fal-ai/demucs` (per second of audio).
 #[derive(Clone, Debug, Default)]
 pub struct PriceBook {
   overrides: HashMap<String, f64>,
@@ -145,6 +146,20 @@ impl PriceBook {
       _ => 0.08,
     };
     self.get(model, base)
+  }
+
+  /// fal's lip sync, per second of video (key: the model, `lipsync-2` or `lipsync-2-pro`).
+  pub fn lip_sync_per_second(&self, pro: bool) -> f64 {
+    if pro {
+      self.get("lipsync-2-pro", 5.0 / 60.0)
+    } else {
+      self.get("lipsync-2", 3.0 / 60.0)
+    }
+  }
+
+  /// fal's vocal separation (Demucs), per second of audio.
+  pub fn vocals_per_second(&self) -> f64 {
+    self.get("fal-ai/demucs", 0.0007)
   }
 
   /// A text model's token rates, per million tokens: `(input, output)`. Keys are the model id

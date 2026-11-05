@@ -1,7 +1,7 @@
 //! What each stage of the Music Video page shows: its work in the middle column, and its
 //! settings, run button and cost in the options panel.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 
@@ -9,7 +9,7 @@ use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{Aspect, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace};
-use crate::backend::local::song::project::{ReferenceKind, Stage};
+use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
 use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
 use crate::backend::media_cache::{Lookup, MediaCache};
 use crate::backend::video::VideoPlayer;
@@ -170,6 +170,16 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
     if secondary(ui, Icon::Upload, "Import a track", !busy) {
       if let Some(file) = pick_files(&[RefKind::Audio], false).into_iter().next() {
         actions.push(Action::Import(file));
+      }
+    }
+    if has_track {
+      field(ui, "Vocal stem (optional)");
+      ui.label(small(if page.project.vocals.is_some() { "A vocal stem is in place. Lip sync follows it instead of the full mix." } else { "If the app that made your song exports stems, bring the vocal one in: lip sync follows a clean vocal better. Without it, the vocal is separated for you on fal when lip sync first runs." }));
+      ui.add_space(6.0);
+      if secondary(ui, Icon::Mic, if page.project.vocals.is_some() { "Replace the vocal stem" } else { "Import a vocal stem" }, !busy) {
+        if let Some(file) = pick_files(&[RefKind::Audio], false).into_iter().next() {
+          actions.push(Action::ImportVocals(file));
+        }
       }
     }
     next_button(ui, Stage::Analysis, has_track, actions);
@@ -420,11 +430,12 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let missing: Vec<usize> = page.project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
   let all: Vec<usize> = (0..page.project.references.len()).collect();
   let targets = if missing.is_empty() { all } else { missing };
-  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro });
+  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro(), large: false });
   let line = page.progress_line().filter(|_| page.running_here());
   let any = page.project.references.iter().any(|r| r.image.is_some());
+  let pro = page.pro();
   panel(ui, panel_rect, "Reference Images", "Edit a description under its picture, then draw it again.", |ui| {
-    picture_model(ui, &mut page.pro);
+    picture_model(ui, pro);
     error_line(ui, page.error.as_deref());
     let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };
     if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
@@ -440,6 +451,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
 
 fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
+  let quality = page.quality();
   column_wide(ui, stage, "scenes", |ui| {
     heading(ui, Stage::Scenes, "Scene planning", "The film cut into scenes on the beat, each with its opening frame. Pick one to edit it.");
     if page.project.shots.is_empty() {
@@ -449,53 +461,76 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     scene_grid(page, ui, env.cache, false);
   });
   let slots = page.project.grid.as_ref().map_or(0, |grid| plan::slots(grid, &page.project.sections, page.project.pace).len());
-  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_none()).map(|(i, _)| i).collect();
-  let all: Vec<usize> = (0..page.project.shots.len()).collect();
-  let targets = if missing.is_empty() { all } else { missing };
-  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro });
-  let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro: page.pro });
+  // The final pass redraws the stills the draft settled on; the draft draws whatever is missing.
+  let drawable = |shot: &&crate::backend::local::song::project::Shot| !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s) && s.take(quality).still.is_none()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s)).map(|(i, _)| i).collect();
+  let only_missing = !missing.is_empty();
+  let targets = if only_missing { missing } else { all };
+  let (pro, large) = (page.pro(), quality == Quality::Final);
+  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro, large });
+  let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro, large });
   let line = page.progress_line().filter(|_| page.running_here());
   let planned = !page.project.shots.is_empty();
-  let drawn = page.project.shots.iter().any(|s| s.still.is_some());
+  let drawn = page.project.shots.iter().any(|s| s.has_still());
+  let sung = page.project.shots.iter().filter(|s| s.sing).count();
+  let fal = env.backend.fal_connected();
   let mut changed = false;
-  panel(ui, panel_rect, "Scenes", "Planning again replaces the scenes and their stills.", |ui| {
+  panel(ui, panel_rect, "Scenes", "Planning again replaces the scenes and their stills, in both passes.", |ui| {
     field(ui, "Pace");
     if let Some(i) = segmented(ui, &Pace::ALL.map(Pace::label), Pace::ALL.iter().position(|p| *p == page.project.pace).unwrap_or(1)) {
       page.project.pace = Pace::ALL[i];
       changed = true;
     }
     ui.label(small(&format!("{slots} scenes at this pace. Faster pacing means more scenes, so more stills and clips to pay for.")));
+    field(ui, "Lip sync");
+    changed |= ui.checkbox(&mut page.project.lip_sync, "The performer sings on camera").changed();
+    ui.label(small(&lip_sync_note(page.project.lip_sync, fal, planned, sung)));
     writer_choice(ui, &mut page.writer);
     error_line(ui, page.error.as_deref());
     if run_button(ui, Icon::List, if planned { "Plan again" } else { "Plan the scenes" }, Some(A_CENT.to_owned()), page.project.brief.is_some() && page.project.grid.is_some() && !busy, None) {
       actions.push(Action::Plan);
     }
     if planned {
-      field(ui, "Stills");
-      picture_model(ui, &mut page.pro);
-      let label = if drawn && targets.len() == page.project.shots.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} still{}", targets.len(), plural(targets.len())) };
+      field(ui, &format!("Stills \u{b7} {} pass", quality.label().to_lowercase()));
+      picture_model(ui, pro);
+      let label = match (quality, only_missing) {
+        (Quality::Draft, true) => format!("Draw {} still{}", targets.len(), plural(targets.len())),
+        (Quality::Draft, false) => format!("Draw all {} again", targets.len()),
+        (Quality::Final, true) => format!("Redraw {} still{}", targets.len(), plural(targets.len())),
+        (Quality::Final, false) => format!("Redraw all {} again", targets.len()),
+      };
       if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
         actions.push(Action::Stills(targets.clone()));
+      }
+      if quality == Quality::Final && targets.is_empty() {
+        ui.label(small("The final pass redraws draft stills. Draw them in the Draft pass first."));
       }
       stop_button(ui, page.running_here(), actions);
     }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
+      let lip_sync = page.project.lip_sync;
       let shot = &mut page.project.shots[index];
       field(ui, &format!("Scene {} \u{b7} {}", index + 1, shot.slot.section));
       if !shot.slot.lyric.is_empty() {
         ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
       }
       ui.label(label("Opening frame"));
-      let before = (shot.image.clone(), shot.motion.clone());
+      let before = (shot.image.clone(), shot.motion.clone(), shot.sing);
       prompt_field(ui, "mv-scene-image", &mut shot.image, "Who or what is in the frame, the framing, the place and the light");
       ui.add_space(6.0);
       ui.label(label("What moves"));
       prompt_field(ui, "mv-scene-motion", &mut shot.motion, "The performer's movement and the camera's");
-      changed |= before != (shot.image.clone(), shot.motion.clone());
+      if lip_sync {
+        ui.add_space(6.0);
+        ui.checkbox(&mut shot.sing, "The performer sings this scene (lip-synced)").on_hover_text("Works best as a close-up with the face towards the camera and the mouth in view");
+      }
+      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing);
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
       }
-      if run_button(ui, Icon::RotateCw, "Draw this still", one.map(estimate), !busy && !shot.image.trim().is_empty(), None) {
+      let can_draw = !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
+      if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
         actions.push(Action::Stills(vec![index]));
       }
     }
@@ -506,11 +541,23 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   }
 }
 
+/// What the lip-sync setting means right now, and what it still needs.
+fn lip_sync_note(on: bool, fal_connected: bool, planned: bool, sung: usize) -> String {
+  match (on, fal_connected, planned) {
+    (false, _, _) => "Off: the writer keeps to movement and cutaways, with no one mouthing words.".to_owned(),
+    (true, false, _) => "Lip sync runs on fal, which isn't connected. Add your fal API key in Settings, then come back.".to_owned(),
+    (true, true, false) => "The writer will mark the scenes the performer sings, framed so the sync holds.".to_owned(),
+    (true, true, true) if sung == 0 => "No scene is marked as sung yet. Plan again so the writer picks them, or tick scenes yourself.".to_owned(),
+    (true, true, true) => format!("{sung} scene{} marked as sung. Their clips are lip-synced on the Shots stage.", plural(sung)),
+  }
+}
+
 // --- Shots -----------------------------------------------------------------------------------
 
 fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
-  let selected_clip = page.selected.and_then(|i| page.project.shots.get(i)).and_then(|s| s.clip.clone());
+  let quality = page.quality();
+  let selected_clip = page.selected.and_then(|i| page.project.shots.get(i)).and_then(|s| s.take(quality).best_clip().cloned());
   let mut grid_area = stage;
   if let Some(clip) = &selected_clip {
     // The picked scene's clip plays above the grid.
@@ -523,48 +570,90 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
     scene_grid(page, ui, env.cache, true);
   });
   let whole = page.whole_clips_of();
-  let with_still = page.project.shots.iter().filter(|s| s.still.is_some()).count();
-  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_some() && s.clip.is_none()).map(|(i, _)| i).collect();
-  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_some()).map(|(i, _)| i).collect();
+  let with_still = page.project.shots.iter().filter(|s| s.take(quality).still.is_some()).count();
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.take(quality).still.is_some() && s.take(quality).clip.is_none()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.take(quality).still.is_some()).map(|(i, _)| i).collect();
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
-  let resolution = RESOLUTIONS[page.resolution].to_owned();
-  let seconds = page.project.seconds_to_generate(only_missing, whole);
-  let cost = env.backend.estimate_song(&SongEstimate::Clips { seconds, tier: TIERS[page.tier], resolution: resolution.clone() });
+  let (tier, resolution) = (page.tier(), page.resolution().to_owned());
+  let seconds = page.project.seconds_to_generate(quality, only_missing, whole);
+  let cost = env.backend.estimate_song(&SongEstimate::Clips { seconds, tier, resolution: resolution.clone() });
   let line = page.progress_line().filter(|_| page.running_here());
-  let made = page.project.shots.iter().filter(|s| s.clip.is_some()).count();
+  let made = page.project.shots.iter().filter(|s| s.take(quality).clip.is_some()).count();
+  // Lip sync: the sung scenes that have a clip, and whether the vocal still has to be separated.
+  let lip_sync = page.project.lip_sync;
+  let fal = env.backend.fal_connected();
+  let (unsynced, unsynced_seconds) = page.project.scenes_to_sync(quality, true);
+  let (syncable, syncable_seconds) = page.project.scenes_to_sync(quality, false);
+  let sync_missing = !unsynced.is_empty();
+  let (sync_targets, sync_seconds) = if sync_missing { (unsynced, unsynced_seconds) } else { (syncable, syncable_seconds) };
+  let separate_seconds = if page.project.vocals.is_some() { 0.0 } else { page.project.grid.as_ref().map_or(0.0, |g| g.duration) };
+  let sync_cost = env.backend.estimate_song(&SongEstimate::LipSync { seconds: sync_seconds, pro: page.pro(), separate_seconds });
+  let pass = page.pass();
   panel(ui, panel_rect, "Shots", "The most expensive stage: check the estimate before you run it. Try a few scenes first by picking one and making just its clip.", |ui| {
-    field(ui, "Model");
-    if let Some(i) = segmented(ui, &TIERS.map(|tier| tier.label()), page.tier) {
-      page.tier = i;
+    field(ui, &format!("Model \u{b7} {} pass", quality.label().to_lowercase()));
+    if let Some(i) = segmented(ui, &TIERS.map(|tier| tier.label()), page.tier[pass]) {
+      page.tier[pass] = i;
     }
     field(ui, "Resolution");
-    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution) {
-      page.resolution = i;
+    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution[pass]) {
+      page.resolution[pass] = i;
     }
     ui.label(small(if whole.is_some() { "Veo makes 1080p only as 8-second clips, so every scene costs 8 seconds whatever its length." } else { "Clips are 4, 6 or 8 seconds: the shortest that covers the scene." }));
     ui.add_space(4.0);
     ui.label(small(&format!("{made} of {with_still} clips made \u{b7} {seconds} s of video to generate")));
+    if with_still == 0 && quality == Quality::Final {
+      ui.label(small("Final clips are filmed from final stills. Redraw the stills on the Scenes stage first."));
+    }
     error_line(ui, page.error.as_deref());
     let label = if only_missing { format!("Make {} clip{}", targets.len(), plural(targets.len())) } else { format!("Make all {} again", targets.len()) };
     if run_button(ui, Icon::Video, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
       actions.push(Action::Clips(targets.clone()));
     }
     stop_button(ui, page.running_here(), actions);
+    if lip_sync {
+      field(ui, "Lip sync");
+      let note = match (fal, sync_targets.is_empty()) {
+        (false, _) => "Lip sync runs on fal, which isn't connected. Add your fal API key in Settings.".to_owned(),
+        (true, true) => "No sung scene has a clip yet. Make the clips first.".to_owned(),
+        (true, false) => format!("{} sung scene{}, {sync_seconds:.0} s in all. The mouth is redrawn to the vocal{}; expect to redo a few.", sync_targets.len(), plural(sync_targets.len()), if separate_seconds > 0.0 { ", which is separated from the track first" } else { "" }),
+      };
+      ui.label(small(&note));
+      let label = match (sync_targets.is_empty(), sync_missing) {
+        (true, _) => "Lip-sync sung scenes".to_owned(),
+        (false, true) => format!("Lip-sync {} scene{}", sync_targets.len(), plural(sync_targets.len())),
+        (false, false) => format!("Lip-sync all {} again", sync_targets.len()),
+      };
+      // Nothing to sync, nothing to price.
+      let price = sync_cost.filter(|_| !sync_targets.is_empty()).map(estimate);
+      if run_button(ui, Icon::Mic, &label, price, fal && !sync_targets.is_empty() && !busy, None) {
+        actions.push(Action::LipSync(sync_targets.clone()));
+      }
+    }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
       let shot = &page.project.shots[index];
+      let take = shot.take(quality);
       field(ui, &format!("Scene {} \u{b7} {:.1} s", index + 1, shot.slot.seconds()));
       ui.label(body(&shot.motion));
+      if shot.sing {
+        ui.label(small(if take.synced.is_some() { "Sung and lip-synced." } else { "Sung: not lip-synced yet." }));
+      }
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
       }
       let clip_seconds = u32::from(whole.unwrap_or_else(|| plan::clip_seconds(shot.slot.seconds())));
-      let one = env.backend.estimate_song(&SongEstimate::Clips { seconds: clip_seconds, tier: TIERS[page.tier], resolution: resolution.clone() });
-      if run_button(ui, Icon::RotateCw, if shot.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), !busy && shot.still.is_some(), None) {
+      let one = env.backend.estimate_song(&SongEstimate::Clips { seconds: clip_seconds, tier, resolution: resolution.clone() });
+      if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), !busy && take.still.is_some(), None) {
         actions.push(Action::Clips(vec![index]));
       }
+      if lip_sync && shot.sing && take.clip.is_some() {
+        let one_sync = env.backend.estimate_song(&SongEstimate::LipSync { seconds: shot.slot.seconds(), pro: quality == Quality::Final, separate_seconds });
+        if run_button(ui, Icon::Mic, if take.synced.is_some() { "Lip-sync this scene again" } else { "Lip-sync this scene" }, one_sync.map(estimate), fal && !busy, None) {
+          actions.push(Action::LipSync(vec![index]));
+        }
+      }
     }
-    next_button(ui, Stage::Final, made > 0, actions);
+    next_button(ui, Stage::Final, page.project.shots.iter().any(|s| s.has_clip()), actions);
   });
 }
 
@@ -572,6 +661,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
 
 fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
+  let quality = page.quality();
   match page.project.cut.clone() {
     Some(cut) => play(page, ui, stage.shrink(12.0), &cut),
     None => column(ui, stage, "final", |ui| {
@@ -579,12 +669,25 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
       empty(ui, Icon::Film, "Not cut yet", "Cutting runs on your Mac with FFmpeg and costs nothing, so cut as often as you like.");
     }),
   }
-  let stills_held = page.project.shots.iter().filter(|s| s.clip.is_none() && s.still.is_some()).count();
-  let blank = page.project.shots.iter().filter(|s| s.clip.is_none() && s.still.is_none()).count();
+  let total = page.project.shots.len();
+  let own_clips = page.project.shots.iter().filter(|s| s.take(quality).clip.is_some()).count();
+  let any_clip = page.project.shots.iter().filter(|s| s.has_clip()).count();
+  let stills_held = page.project.shots.iter().filter(|s| !s.has_clip() && s.has_still()).count();
+  let blank = page.project.shots.iter().filter(|s| !s.has_clip() && !s.has_still()).count();
+  let unsynced = page.project.scenes_to_sync(quality, true).0.len();
   let line = page.progress_line().filter(|_| page.running_here());
   let mut changed = false;
+  let pass = page.pass();
   let _ = env;
   panel(ui, panel_rect, "Final Video", "The film is saved to your library, where it can go on to FilmCraft or Edit Video.", |ui| {
+    field(ui, &format!("{} pass", quality.label()));
+    let borrowed = any_clip - own_clips;
+    let pass_note = match (quality, borrowed) {
+      (_, 0) => format!("{own_clips} of {total} scenes have a clip from this pass."),
+      (Quality::Final, _) => format!("{own_clips} of {total} scenes have a final clip; {borrowed} will use their draft clip until the final one is made."),
+      (Quality::Draft, _) => format!("{own_clips} of {total} scenes have a draft clip; {borrowed} will use their final clip."),
+    };
+    ui.label(small(&pass_note));
     field(ui, "Finish");
     if let Some(i) = segmented(ui, &Grade::ALL.map(Grade::label), Grade::ALL.iter().position(|g| *g == page.project.grade).unwrap_or(0)) {
       page.project.grade = Grade::ALL[i];
@@ -592,8 +695,8 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
     }
     ui.label(small("Applied to every shot when the film is cut, so clips from different generations sit together."));
     field(ui, "Resolution");
-    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution) {
-      page.resolution = i;
+    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution[pass]) {
+      page.resolution[pass] = i;
     }
     if blank > 0 {
       ui.add_space(6.0);
@@ -602,8 +705,12 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
       ui.add_space(6.0);
       ui.label(small(&format!("{stills_held} scene{} without a clip will hold on {} still.", plural(stills_held), if stills_held == 1 { "its" } else { "their" })));
     }
+    if page.project.lip_sync && unsynced > 0 {
+      ui.add_space(6.0);
+      ui.label(small(&format!("{unsynced} sung scene{} not lip-synced yet, so the mouth won't match there.", if unsynced == 1 { " is" } else { "s are" })));
+    }
     error_line(ui, page.error.as_deref());
-    if run_button(ui, Icon::Film, if page.project.cut.is_some() { "Cut it again" } else { "Cut the film" }, Some("Free".to_owned()), blank == 0 && page.project.cut_shots().is_some() && !busy, line.as_deref()) {
+    if run_button(ui, Icon::Film, if page.project.cut.is_some() { "Cut it again" } else { "Cut the film" }, Some("Free".to_owned()), blank == 0 && page.project.cut_shots(quality).is_some() && !busy, line.as_deref()) {
       actions.push(Action::Cut);
     }
     if let Some(cut) = &page.project.cut {
@@ -621,8 +728,11 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
 // --- Shared pieces ---------------------------------------------------------------------------
 
 /// The scenes as a grid of cards: the still (or a placeholder), the scene's number, time and
-/// section, and its beat. With `clips`, a badge says whether the clip has been made.
+/// section, and its beat. With `clips`, badges say whether the clip has been made and, for sung
+/// scenes, whether it's been lip-synced. In the final pass, a scene still on its draft still is
+/// tagged so.
 fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, clips: bool) {
+  let quality = page.quality();
   let (columns, width) = grid_columns(ui.available_width(), CARD_MIN_WIDTH);
   let picture = match page.project.aspect {
     Aspect::Wide => vec2(width, width * 9.0 / 16.0),
@@ -634,20 +744,28 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, cl
       ui.spacing_mut().item_spacing.x = CARD_GAP;
       for index in row * columns..((row + 1) * columns).min(page.project.shots.len()) {
         let shot = &page.project.shots[index];
+        let take = shot.take(quality);
         let (rect, resp) = ui.allocate_exact_size(picture + vec2(0.0, CARD_TEXT_HEIGHT), Sense::click());
         if !ui.is_rect_visible(rect) {
           continue;
         }
         let image = Rect::from_min_size(rect.min, picture);
-        thumbnail(ui, image, cache, shot.still.as_deref(), Icon::Image);
+        thumbnail(ui, image, cache, shot.still_for(quality).map(PathBuf::as_path), Icon::Image);
         let selected = page.selected == Some(index);
         if selected || resp.hovered() {
           ui.painter().rect_stroke(image, theme::RADIUS, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { theme::ACCENT } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
         }
+        if quality == Quality::Final && take.still.is_none() && shot.draft.still.is_some() {
+          tag(ui, image, "Draft");
+        }
         if let Some(error) = &shot.error {
           failed_badge(ui, image, error);
-        } else if clips && shot.clip.is_some() {
-          badge(ui, image, Icon::Play, theme::ACCENT);
+        } else if clips && take.clip.is_some() {
+          badge(ui, image, 0, Icon::Play, theme::ACCENT);
+        }
+        if shot.sing {
+          // Filled once the clip is lip-synced.
+          badge(ui, image, 1, Icon::Mic, if take.synced.is_some() { theme::ACCENT } else { Color32::from_black_alpha(170) });
         }
         let text = Rect::from_min_max(pos2(rect.left(), image.bottom() + 6.0), rect.max);
         let caption = format!("{} \u{b7} {} \u{b7} {:.1}s", index + 1, format_time(shot.slot.start as f32), shot.slot.seconds());
@@ -701,14 +819,23 @@ fn thumbnail(ui: &mut Ui, rect: Rect, cache: &mut MediaCache, picture: Option<&P
   }
 }
 
-fn badge(ui: &Ui, picture: Rect, icon: Icon, fill: Color32) {
-  let dot = Rect::from_center_size(picture.right_top() + vec2(-16.0, 16.0), vec2(22.0, 22.0));
+/// A round badge at the picture's top-right corner; `slot` 1 sits to the left of slot 0.
+fn badge(ui: &Ui, picture: Rect, slot: usize, icon: Icon, fill: Color32) {
+  let dot = Rect::from_center_size(picture.right_top() + vec2(-16.0 - 26.0 * slot as f32, 16.0), vec2(22.0, 22.0));
   ui.painter().circle_filled(dot.center(), 11.0, fill);
   icons::paint(ui.painter(), dot.shrink(6.0), icon, Color32::WHITE);
 }
 
+/// A small label at the picture's top-left corner.
+fn tag(ui: &Ui, picture: Rect, text: &str) {
+  let galley = widgets::caps(ui, text, 9.5, theme::mono_bold(), 1.0, Color32::WHITE);
+  let chip = Rect::from_min_size(picture.left_top() + vec2(8.0, 8.0), galley.size() + vec2(10.0, 6.0));
+  ui.painter().rect_filled(chip, theme::RADIUS, Color32::from_black_alpha(170));
+  ui.painter().galley(chip.min + vec2(5.0, 3.0), galley, Color32::WHITE);
+}
+
 fn failed_badge(ui: &mut Ui, picture: Rect, error: &str) {
-  badge(ui, picture, Icon::AlertCircle, theme::DANGER);
+  badge(ui, picture, 0, Icon::AlertCircle, theme::DANGER);
   let dot = Rect::from_center_size(picture.right_top() + vec2(-16.0, 16.0), vec2(22.0, 22.0));
   ui.interact(dot, ui.id().with(("mv-failed", picture.min.x as i32, picture.min.y as i32)), Sense::hover()).on_hover_text(error);
 }
@@ -795,12 +922,9 @@ fn writer_choice(ui: &mut Ui, writer: &mut Writer) {
   }
 }
 
-fn picture_model(ui: &mut Ui, pro: &mut bool) {
-  field(ui, "Image model");
-  if let Some(i) = segmented(ui, &["Nano Banana 2", "Nano Banana Pro"], usize::from(*pro)) {
-    *pro = i == 1;
-  }
-  ui.label(small(if *pro { "Pro holds a face and outfit better across many pictures, at about twice the price." } else { "Fast and cheap. Switch to Pro if the performer drifts between pictures." }));
+/// Which image model the current pass draws with.
+fn picture_model(ui: &mut Ui, pro: bool) {
+  ui.label(small(if pro { "Final pass: Nano Banana Pro, which holds a face and outfit better and renders finer detail, at about twice the price." } else { "Draft pass: Nano Banana 2, fast and cheap. Switch the quality to Final in the left rail once the direction is settled." }));
 }
 
 /// A stage's main button with what it costs beside it, and the run's progress line while it's
@@ -920,6 +1044,15 @@ mod tests {
     assert_eq!(columns, 4);
     assert!((width * 4.0 + CARD_GAP * 3.0 - 900.0).abs() < 0.01);
     assert_eq!(grid_columns(100.0, 210.0).0, 1);
+  }
+
+  #[test]
+  fn the_lip_sync_note_says_what_is_still_needed() {
+    assert!(lip_sync_note(false, true, true, 3).starts_with("Off"));
+    assert!(lip_sync_note(true, false, true, 3).contains("fal API key in Settings"));
+    assert!(lip_sync_note(true, true, false, 0).contains("will mark the scenes"));
+    assert!(lip_sync_note(true, true, true, 0).contains("No scene is marked"));
+    assert_eq!(lip_sync_note(true, true, true, 1), "1 scene marked as sung. Their clips are lip-synced on the Shots stage.");
   }
 
   #[test]

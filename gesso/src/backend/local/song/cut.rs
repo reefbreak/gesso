@@ -152,6 +152,32 @@ pub fn listening_copy(path: &Path) -> anyhow::Result<(Vec<u8>, &'static str)> {
   Ok((std::fs::read(&out)?, "audio/aac"))
 }
 
+/// A clip's first `seconds`, silent, re-encoded so it's exactly that long. Lip sync is billed by
+/// the second and syncs the whole clip, so only the part the cut will use is sent.
+pub fn head_of_clip(clip: &Path, seconds: f64) -> anyhow::Result<Vec<u8>> {
+  anyhow::ensure!(video::ffmpeg_available(), "Lip sync needs FFmpeg: install it with `brew install ffmpeg`.");
+  let dir = tempfile::tempdir()?;
+  let out = dir.path().join("head.mp4");
+  let frames = frame_count(0.0, seconds).max(1);
+  let filter = format!("fps={FPS},tpad=stop_mode=clone:stop_duration={}", seconds + 1.0);
+  let mut args: Vec<String> = ["-y", "-v", "error", "-i"].iter().map(|a| (*a).to_owned()).collect();
+  args.extend([clip.to_string_lossy().into_owned(), "-vf".into(), filter, "-frames:v".into(), frames.to_string(), "-an".into()]);
+  args.extend(ENCODE.iter().map(|a| (*a).to_owned()));
+  args.push(out.to_string_lossy().into_owned());
+  run(&args)?;
+  Ok(std::fs::read(&out)?)
+}
+
+/// The stretch of a track from `start` to `end` seconds, as a WAV.
+pub fn slice_of_track(track: &Path, start: f64, end: f64) -> anyhow::Result<Vec<u8>> {
+  anyhow::ensure!(video::ffmpeg_available(), "Lip sync needs FFmpeg: install it with `brew install ffmpeg`.");
+  anyhow::ensure!(end > start, "The slice ends before it starts");
+  let dir = tempfile::tempdir()?;
+  let out = dir.path().join("slice.wav");
+  run(&["-y", "-v", "error", "-ss", &format!("{start:.3}"), "-i", &track.to_string_lossy(), "-t", &format!("{:.3}", end - start), "-vn", "-ac", "1", "-ar", "44100", &out.to_string_lossy()].map(str::to_owned))?;
+  Ok(std::fs::read(&out)?)
+}
+
 /// One encoding for every part, so the concat can copy.
 const ENCODE: [&str; 10] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-video_track_timescale", "12288"];
 
@@ -206,6 +232,7 @@ mod tests {
     let short = make(&["testsrc2=size=320x240:rate=30:duration=1", "-pix_fmt", "yuv420p"], "short.mp4");
     let still = make(&["color=c=red:size=400x400", "-frames:v", "1"], "still.png");
     let song = make(&["sine=frequency=440:duration=6"], "song.wav");
+    let shots_clip = long.clone();
     let shots = [CutShot { start: 0.0, end: 1.7, media: ShotMedia::Clip(long) }, CutShot { start: 1.7, end: 3.9, media: ShotMedia::Clip(short) }, CutShot { start: 3.9, end: 5.5, media: ShotMedia::Still(still) }];
     let out = dir.path().join("cut.mp4");
     assemble(&shots, &song, Aspect::Wide.size("720p"), Grade::Mono, &out).unwrap();
@@ -217,5 +244,15 @@ mod tests {
     assert!((duration(&song).unwrap() - 6.0).abs() < 0.05);
     let (copy, mime) = listening_copy(&song).unwrap();
     assert!(copy.len() > 1000 && mime == "audio/aac");
+
+    // Lip sync gets only what the cut uses: the clip's first 1.7 s and the song under it.
+    let head = dir.path().join("head.mp4");
+    std::fs::write(&head, head_of_clip(&shots_clip, 1.7).unwrap()).unwrap();
+    let (_, _, _, head_seconds) = video::probe_file(&head).unwrap();
+    assert!((head_seconds - 1.7).abs() < 0.06, "the head runs {head_seconds:.2}s");
+    let slice = dir.path().join("slice.wav");
+    std::fs::write(&slice, slice_of_track(&song, 1.7, 3.9).unwrap()).unwrap();
+    assert!((duration(&slice).unwrap() - 2.2).abs() < 0.05);
+    assert!(slice_of_track(&song, 3.0, 3.0).is_err());
   }
 }

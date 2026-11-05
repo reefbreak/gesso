@@ -15,8 +15,8 @@ use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
-use crate::backend::local::song::project::{ReferenceKind, SongProject, Stage, Summary, Track};
-use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, Writer};
+use crate::backend::local::song::project::{Quality, ReferenceKind, SongProject, Stage, Summary, Track};
+use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::tools::VeoTier;
 use crate::backend::video::VideoPlayer;
 use crate::pages::common::Env;
@@ -34,6 +34,10 @@ pub(super) const TIERS: [VeoTier; 3] = [VeoTier::Lite, VeoTier::Fast, VeoTier::S
 pub(super) const RESOLUTIONS: [&str; 2] = ["720p", "1080p"];
 /// Veo makes 1080p only as 8-second clips.
 const HD_CLIP_SECONDS: u16 = 8;
+/// Each pass's Veo tier to start with: the cheapest for the draft, the best for the final.
+const DEFAULT_TIERS: [usize; 2] = [0, 2];
+/// Both passes start at 720p: 1080p costs about twice as much, because every clip is 8 seconds.
+const DEFAULT_RESOLUTIONS: [usize; 2] = [0, 0];
 
 /// Names a saved project to open at startup.
 const OPEN_ENV: &str = "ARTCRAFT_MUSIC_VIDEO";
@@ -50,6 +54,8 @@ struct Run {
   total: usize,
   /// Analyse the track as soon as this run delivers one.
   then_analyse: bool,
+  /// The pass its stills, clips and syncs belong to.
+  quality: Quality,
 }
 
 /// What a stage asked for; applied after the frame is drawn.
@@ -74,6 +80,12 @@ pub(super) enum Action {
   Stills(Vec<usize>),
   /// Scenes whose clips to make, by index.
   Clips(Vec<usize>),
+  /// Scenes whose clips to lip-sync, by index.
+  LipSync(Vec<usize>),
+  /// A vocal stem the user already has.
+  ImportVocals(PathBuf),
+  /// Switch between the draft and final passes.
+  Pass(Quality),
   Cut,
   Stop,
   Reveal(PathBuf),
@@ -103,10 +115,10 @@ pub struct MusicVideoPage {
   /// A 30-second clip instead of a full song.
   short_song: bool,
   instrumental: bool,
-  /// Nano Banana Pro for pictures.
-  pro: bool,
-  tier: usize,
-  resolution: usize,
+  /// The Veo tier and resolution picked for each pass (draft, then final), as indices into
+  /// [`TIERS`] and [`RESOLUTIONS`].
+  tier: [usize; 2],
+  resolution: [usize; 2],
   /// The scene picked in the Scenes and Shots grids.
   selected: Option<usize>,
   player: Option<VideoPlayer>,
@@ -120,7 +132,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, pro: false, tier: 0, resolution: 0, selected: None, player: None, pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, player: None, pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -157,6 +169,7 @@ impl MusicVideoPage {
       return None;
     }
     let mut notice = None;
+    let quality = self.run.as_ref().map_or(self.project.quality, |run| run.quality);
     let library = |message: &str| Some(Notice { error: false, message: message.to_owned(), library_changed: true });
     match update {
       SongUpdate::Written(draft) => {
@@ -174,6 +187,7 @@ impl MusicVideoPage {
         self.project.sections.clear();
         self.project.lines.clear();
         self.project.shots.clear();
+        self.project.vocals = None;
         self.project.cut = None;
         if generated {
           notice = library("The song is in your library");
@@ -209,16 +223,21 @@ impl MusicVideoPage {
       },
       SongUpdate::Still { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
-          // The clip was made from the old still.
-          shot.still = Some(path);
-          shot.clip = None;
+          // The clip (and its lip sync) was made from the old still.
+          let take = shot.take_mut(quality);
+          take.still = Some(path);
+          take.clip = None;
+          take.synced = None;
           shot.error = None;
         }
         self.progress();
       },
       SongUpdate::Clip { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
-          shot.clip = Some(path);
+          // A lip sync of the old clip no longer applies.
+          let take = shot.take_mut(quality);
+          take.clip = Some(path);
+          take.synced = None;
           shot.error = None;
         }
         if self.selected == Some(index) {
@@ -226,6 +245,17 @@ impl MusicVideoPage {
         }
         self.progress();
       },
+      SongUpdate::Synced { index, path } => {
+        if let Some(shot) = self.project.shots.get_mut(index) {
+          shot.take_mut(quality).synced = Some(path);
+          shot.error = None;
+        }
+        if self.selected == Some(index) {
+          self.player = None;
+        }
+        self.progress();
+      },
+      SongUpdate::Vocals(path) => self.project.vocals = Some(path),
       SongUpdate::ShotFailed { index, message } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
           shot.error = Some(message);
@@ -279,7 +309,30 @@ impl MusicVideoPage {
 
   /// The length each clip is generated at, when the resolution fixes it.
   pub(super) fn whole_clips_of(&self) -> Option<u16> {
-    (RESOLUTIONS[self.resolution] == "1080p").then_some(HD_CLIP_SECONDS)
+    (self.resolution() == "1080p").then_some(HD_CLIP_SECONDS)
+  }
+
+  /// The pass being worked on.
+  pub(super) fn quality(&self) -> Quality {
+    self.project.quality
+  }
+
+  /// The current pass's place in the per-pass settings.
+  pub(super) fn pass(&self) -> usize {
+    usize::from(self.project.quality == Quality::Final)
+  }
+
+  pub(super) fn tier(&self) -> VeoTier {
+    TIERS[self.tier[self.pass()]]
+  }
+
+  pub(super) fn resolution(&self) -> &'static str {
+    RESOLUTIONS[self.resolution[self.pass()]]
+  }
+
+  /// Pictures are drawn with Nano Banana Pro in the final pass.
+  pub(super) fn pro(&self) -> bool {
+    self.project.quality == Quality::Final
   }
 
   /// The left rail: the project's name and the stages, each with its state.
@@ -323,6 +376,22 @@ impl MusicVideoPage {
       }
     }
     ui.add_space(12.0);
+    // Draft or final: which models the pictures and clips use, and which set is on screen.
+    widgets::hud(ui, "Quality", theme::FAINT);
+    ui.add_space(4.0);
+    let busy = self.busy();
+    ui.add_enabled_ui(!busy, |ui| {
+      if let Some(i) = super::segmented(ui, &Quality::ALL.map(Quality::label), self.pass()) {
+        actions.push(Action::Pass(Quality::ALL[i]));
+      }
+    });
+    ui.add_space(2.0);
+    let hint = match self.project.quality {
+      Quality::Draft => "Cheap, fast models, to settle the direction.",
+      Quality::Final => "The best models: each still is redrawn from its draft, then filmed again.",
+    };
+    ui.label(egui::RichText::new(hint).size(11.5).color(theme::FAINT));
+    ui.add_space(12.0);
     if let Some(line) = self.progress_line() {
       ui.label(egui::RichText::new(line).size(12.0).color(theme::MUTED));
       if let Some(run) = self.run.as_ref().filter(|run| run.total > 0) {
@@ -348,13 +417,13 @@ impl MusicVideoPage {
       Action::Go(stage) => self.go(stage),
       Action::New => {
         self.save(backend);
-        *self = Self { writer: self.writer, pro: self.pro, tier: self.tier, resolution: self.resolution, ..Self::default() };
+        *self = Self { writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
       },
       Action::Open(id) => {
         self.save(backend);
         if let Some(project) = SongProject::load(&library_dir, &id) {
           let stage = if project.reachable(project.stage) { project.stage } else { project.furthest() };
-          *self = Self { project, stage, writer: self.writer, pro: self.pro, tier: self.tier, resolution: self.resolution, ..Self::default() };
+          *self = Self { project, stage, writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
         }
       },
       Action::Write { rewrite } => {
@@ -395,7 +464,7 @@ impl MusicVideoPage {
         }
         if !items.is_empty() {
           let look = self.project.design().look;
-          self.start(backend, items.len(), "Drawing reference images\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro, items });
+          self.start(backend, items.len(), "Drawing reference images\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items });
         }
       },
       Action::Plan => {
@@ -404,40 +473,72 @@ impl MusicVideoPage {
         };
         let slots = plan::slots(grid, &self.project.sections, self.project.pace);
         self.pending_slots = slots.clone();
-        self.start(backend, 0, &format!("Writing {} scenes\u{2026}", slots.len()), SongRequest::Plan { brief, style, slots, writer: self.writer });
+        self.start(backend, 0, &format!("Writing {} scenes\u{2026}", slots.len()), SongRequest::Plan { brief, style, slots, lip_sync: self.project.lip_sync, writer: self.writer });
       },
       Action::Stills(indices) => {
+        let quality = self.quality();
         let mut shots = Vec::new();
         for index in indices {
           if let Some(shot) = self.project.shots.get_mut(index).filter(|s| !s.image.trim().is_empty()) {
             shot.still_version += 1;
             shot.error = None;
-            shots.push(StillJob { index, version: shot.still_version, image: shot.image.clone() });
+            // The final pass recreates the approved draft frame, when there is one.
+            let guide = if quality == Quality::Final { shot.draft.still.clone() } else { None };
+            shots.push(StillJob { index, version: shot.still_version, image: shot.image.clone(), guide });
           }
         }
         if !shots.is_empty() {
-          self.start(backend, shots.len(), "Drawing stills\u{2026}", SongRequest::Stills { dir, design: self.project.design(), references: self.project.reference_images(), aspect: self.project.aspect, pro: self.pro, shots });
+          let note = if quality == Quality::Final { "Redrawing stills in final quality\u{2026}" } else { "Drawing stills\u{2026}" };
+          self.start(backend, shots.len(), note, SongRequest::Stills { dir, design: self.project.design(), references: self.project.reference_images(), aspect: self.project.aspect, quality, shots });
         }
       },
       Action::Clips(indices) => {
+        let quality = self.quality();
         let mut shots = Vec::new();
         for index in indices {
           if let Some(shot) = self.project.shots.get_mut(index) {
-            if let Some(still) = shot.still.clone() {
+            if let Some(still) = shot.take(quality).still.clone() {
               shot.clip_version += 1;
               shot.error = None;
-              shots.push(ClipJob { index, version: shot.clip_version, still, motion: shot.motion.clone(), seconds: shot.slot.seconds() });
+              shots.push(ClipJob { index, version: shot.clip_version, still, motion: shot.motion.clone(), seconds: shot.slot.seconds(), sing: shot.sing });
             }
           }
         }
         if !shots.is_empty() {
-          self.start(backend, shots.len(), "Veo is making clips\u{2026}", SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: TIERS[self.tier], resolution: RESOLUTIONS[self.resolution].to_owned(), shots });
+          self.start(backend, shots.len(), "Veo is making clips\u{2026}", SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: self.tier(), resolution: self.resolution().to_owned(), quality, shots });
+        }
+      },
+      Action::LipSync(indices) => {
+        let quality = self.quality();
+        let Some(track) = self.project.track.as_ref().map(|t| t.path.clone()) else {
+          return;
+        };
+        let mut shots = Vec::new();
+        for index in indices {
+          if let Some(shot) = self.project.shots.get_mut(index) {
+            if let Some(clip) = shot.take(quality).clip.clone() {
+              shot.clip_version += 1;
+              shot.error = None;
+              shots.push(SyncJob { index, version: shot.clip_version, clip, start: shot.slot.start, end: shot.slot.end });
+            }
+          }
+        }
+        if !shots.is_empty() {
+          self.start(backend, shots.len(), "Lip-syncing sung scenes\u{2026}", SongRequest::LipSync { dir, track, vocals: self.project.vocals.clone(), quality, shots });
+        }
+      },
+      Action::ImportVocals(file) => self.start(backend, 0, "Bringing in the vocal stem\u{2026}", SongRequest::ImportVocals { dir, file }),
+      Action::Pass(quality) => {
+        if quality != self.project.quality {
+          self.project.quality = quality;
+          self.player = None;
+          self.touch_now();
         }
       },
       Action::Cut => {
-        if let (Some(track), Some(shots)) = (&self.project.track, self.project.cut_shots()) {
+        if let (Some(track), Some(shots)) = (&self.project.track, self.project.cut_shots(self.quality())) {
           self.project.cut_version += 1;
-          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: RESOLUTIONS[self.resolution].to_owned(), grade: self.project.grade, shots, version: self.project.cut_version };
+          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, shots, version: self.project.cut_version };
           self.start(backend, 0, "Cutting the film on your Mac\u{2026}", request);
         }
       },
@@ -461,7 +562,7 @@ impl MusicVideoPage {
     }
     let id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
     self.error = None;
-    self.run = Some(Run { id, stage: self.stage, note: note.to_owned(), done: 0, total, then_analyse: false });
+    self.run = Some(Run { id, stage: self.stage, note: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality });
     // The project's folder has to exist before a run writes into it.
     self.save(backend);
     backend.run_song(id, request);

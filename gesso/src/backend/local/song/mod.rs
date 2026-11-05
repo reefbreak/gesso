@@ -38,6 +38,7 @@ use futures::stream;
 use log::{info, warn};
 
 use super::bedrock::DEFAULT_CLAUDE_MODEL;
+use super::fal::{FalClient, VOCALS_MODEL};
 use super::library::{LocalLibrary, MediaClass, NewFile, Origin};
 use super::spend::Account;
 use super::tools::VeoTier;
@@ -47,7 +48,7 @@ use crate::backend::Event;
 use beats::BeatGrid;
 use cut::{Aspect, CutShot, Grade};
 use plan::{Section, Slot};
-use project::ReferenceKind;
+use project::{Quality, ReferenceKind};
 use writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 
 /// Stills made at once (each is one Gemini call).
@@ -57,8 +58,12 @@ const CLIPS_AT_ONCE: usize = 3;
 /// Waits before retrying a call the provider turned away for quota: 20 s, 40 s, 80 s.
 const QUOTA_RETRIES: u32 = 3;
 const QUOTA_WAIT: Duration = Duration::from_secs(20);
-/// Stills are storyboard frames and Veo's starting images: 1K is plenty.
+/// Draft stills are storyboard frames and Veo's starting images: 1K is plenty. Final stills are
+/// redrawn at 2K, enough for 1080p clips.
 const STILL_SIZE: &str = "1K";
+const FINAL_STILL_SIZE: &str = "2K";
+/// Scenes lip-synced at once (each is one fal job).
+const SYNCS_AT_ONCE: usize = 3;
 /// A still is drawn from at most this many reference images (the performer first).
 const REFERENCES_PER_STILL: usize = 5;
 /// The performer's sheet shows them three times side by side; props are shot square.
@@ -113,6 +118,8 @@ pub struct StillJob {
   pub index: usize,
   pub version: u32,
   pub image: String,
+  /// The approved draft still to recreate at higher quality (the final pass).
+  pub guide: Option<PathBuf>,
 }
 
 /// A clip to make from a still.
@@ -124,6 +131,19 @@ pub struct ClipJob {
   pub motion: String,
   /// The slot's length; the clip is made at the shortest length Veo offers that covers it.
   pub seconds: f64,
+  /// The performer sings in this scene: the clip is asked for with the mouth moving and in view,
+  /// ready to be lip-synced.
+  pub sing: bool,
+}
+
+/// A clip to lip-sync to the stretch of the song it plays over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncJob {
+  pub index: usize,
+  pub version: u32,
+  pub clip: PathBuf,
+  pub start: f64,
+  pub end: f64,
 }
 
 /// One stage's run. `dir` is the project's folder.
@@ -178,20 +198,24 @@ pub enum SongRequest {
     pro: bool,
     items: Vec<ReferenceJob>,
   },
-  /// A picture and a movement for every slot.
+  /// A picture and a movement for every slot. With `lip_sync`, the writer also marks the scenes
+  /// the performer sings.
   Plan {
     brief: Brief,
     style: Style,
     slots: Vec<Slot>,
+    lip_sync: bool,
     writer: Writer,
   },
-  /// Each scene's opening frame, drawn from `references` (the performer's sheet first).
+  /// Each scene's opening frame, drawn from `references` (the performer's sheet first). The
+  /// draft pass draws with Nano Banana 2 at 1K; the final pass redraws each approved draft still
+  /// with Nano Banana Pro at 2K.
   Stills {
     dir: PathBuf,
     design: Design,
     references: Vec<PathBuf>,
     aspect: Aspect,
-    pro: bool,
+    quality: Quality,
     shots: Vec<StillJob>,
   },
   Clips {
@@ -200,7 +224,22 @@ pub enum SongRequest {
     aspect: Aspect,
     tier: VeoTier,
     resolution: String,
+    quality: Quality,
     shots: Vec<ClipJob>,
+  },
+  /// A vocal stem the user already has (exported from the app that made the song).
+  ImportVocals {
+    dir: PathBuf,
+    file: PathBuf,
+  },
+  /// Redraws the mouth in each sung scene's clip to match the vocal, on fal. Without `vocals`,
+  /// the vocal stem is separated from `track` first.
+  LipSync {
+    dir: PathBuf,
+    track: PathBuf,
+    vocals: Option<PathBuf>,
+    quality: Quality,
+    shots: Vec<SyncJob>,
   },
   Cut {
     dir: PathBuf,
@@ -248,6 +287,13 @@ pub enum SongUpdate {
     index: usize,
     path: PathBuf,
   },
+  /// The track's vocal stem.
+  Vocals(PathBuf),
+  /// A scene's clip, lip-synced.
+  Synced {
+    index: usize,
+    path: PathBuf,
+  },
   ShotFailed {
     index: usize,
     message: String,
@@ -264,10 +310,18 @@ pub enum SongEstimate {
   Song {
     clip: bool,
   },
-  /// Reference images or stills: `count` pictures.
+  /// Reference images or stills: `count` pictures. `large` is the final pass's 2K.
   Stills {
     count: usize,
     pro: bool,
+    large: bool,
+  },
+  /// Lip sync for `seconds` of video, plus separating the vocal from a track of
+  /// `separate_seconds` when that hasn't been done.
+  LipSync {
+    seconds: f64,
+    pro: bool,
+    separate_seconds: f64,
   },
   /// `seconds` of video in all (see [`project::SongProject::seconds_to_generate`]).
   Clips {
@@ -309,7 +363,8 @@ impl LocalEngine {
   pub fn estimate_song(&self, estimate: &SongEstimate) -> f64 {
     match estimate {
       SongEstimate::Song { clip } => self.prices.lyria_song(if *clip { SONG_CLIP_MODEL } else { SONG_MODELS[0] }),
-      SongEstimate::Stills { count, pro } => *count as f64 * self.prices.gemini_call(still_model(*pro), None, Some(STILL_SIZE)).unwrap_or(0.0),
+      SongEstimate::Stills { count, pro, large } => *count as f64 * self.prices.gemini_call(still_model(*pro), None, Some(if *large { FINAL_STILL_SIZE } else { STILL_SIZE })).unwrap_or(0.0),
+      SongEstimate::LipSync { seconds, pro, separate_seconds } => seconds * self.prices.lip_sync_per_second(*pro) + separate_seconds * self.prices.vocals_per_second(),
       SongEstimate::Clips { seconds, tier, resolution } => f64::from(*seconds) * self.prices.veo_per_second(tier.model(), false, resolution).unwrap_or(0.0),
     }
   }
@@ -364,8 +419,8 @@ impl SongRun<'_> {
         });
         stream::iter(jobs).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<()>>().await;
       },
-      SongRequest::Plan { brief, style, slots, writer } => {
-        let reply = self.write(writer, writer::DIRECTOR, &writer::scenes_prompt(&brief, &style, &slots)).await?;
+      SongRequest::Plan { brief, style, slots, lip_sync, writer } => {
+        let reply = self.write(writer, writer::DIRECTOR, &writer::scenes_prompt(&brief, &style, &slots, lip_sync)).await?;
         let written = writer::parse_scenes(&reply);
         let missing = slots.iter().filter(|slot| !written.iter().any(|scene| scene.index == slot.index)).count();
         if missing > 0 {
@@ -374,7 +429,7 @@ impl SongRun<'_> {
         let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).collect();
         self.send(SongUpdate::Planned(scenes));
       },
-      SongRequest::Stills { dir, design, references, aspect, pro, shots } => {
+      SongRequest::Stills { dir, design, references, aspect, quality, shots } => {
         let references: Vec<RefImage> = references.iter().take(REFERENCES_PER_STILL).map(|path| self.engine.load_path(path)).collect::<anyhow::Result<_>>()?;
         let (dir, design, references) = (&dir.join("shots"), &design, &references);
         let jobs = shots.into_iter().map(|job| async move {
@@ -382,26 +437,52 @@ impl SongRun<'_> {
             return;
           }
           let index = job.index;
-          match self.still(dir, design, references, aspect, pro, job).await {
+          match self.still(dir, design, references, aspect, quality, job).await {
             Ok(path) => self.send(SongUpdate::Still { index, path }),
             Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
           }
         });
         stream::iter(jobs).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<()>>().await;
       },
-      SongRequest::Clips { dir, look, aspect, tier, resolution, shots } => {
+      SongRequest::Clips { dir, look, aspect, tier, resolution, quality, shots } => {
         let (dir, look, resolution) = (&dir.join("clips"), look.as_str(), resolution.as_str());
         let jobs = shots.into_iter().map(|job| async move {
           if self.stopped() {
             return;
           }
           let index = job.index;
-          match self.clip(dir, look, aspect, tier, resolution, job).await {
+          match self.clip(dir, look, aspect, tier, resolution, quality, job).await {
             Ok(path) => self.send(SongUpdate::Clip { index, path }),
             Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
           }
         });
         stream::iter(jobs).buffer_unordered(CLIPS_AT_ONCE).collect::<Vec<()>>().await;
+      },
+      SongRequest::ImportVocals { dir, file } => {
+        let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_ascii_lowercase();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("vocals_imported.{extension}"));
+        std::fs::copy(&file, &path).map_err(|e| anyhow::anyhow!("Couldn't copy {}: {e}", file.display()))?;
+        self.send(SongUpdate::Vocals(path));
+      },
+      SongRequest::LipSync { dir, track, vocals, quality, shots } => {
+        let fal = self.engine.fal()?;
+        let vocals = match vocals {
+          Some(path) => path,
+          None => self.separate_vocals(&fal, &dir, &track).await?,
+        };
+        let (dir, fal, vocals) = (&dir.join("clips"), &fal, vocals.as_path());
+        let jobs = shots.into_iter().map(|job| async move {
+          if self.stopped() {
+            return;
+          }
+          let index = job.index;
+          match self.sync(fal, dir, vocals, quality, job).await {
+            Ok(path) => self.send(SongUpdate::Synced { index, path }),
+            Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
+          }
+        });
+        stream::iter(jobs).buffer_unordered(SYNCS_AT_ONCE).collect::<Vec<()>>().await;
       },
       SongRequest::Cut { dir, audio, aspect, resolution, grade, shots, version } => {
         std::fs::create_dir_all(&dir)?;
@@ -483,23 +564,54 @@ impl SongRun<'_> {
     Ok(path)
   }
 
-  async fn still(&self, dir: &Path, design: &Design, references: &[RefImage], aspect: Aspect, pro: bool, job: StillJob) -> anyhow::Result<PathBuf> {
-    let model = still_model(pro);
-    let prompt = still_prompt(design, &job.image, references.len());
-    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: references, aspect_ratio: Some(aspect.ratio()), image_size: Some(STILL_SIZE) })).await?;
-    self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
-    save_picture(dir, &format!("shot_{:03}_v{}.{}", job.index + 1, job.version, file.extension), &file.bytes)
+  async fn still(&self, dir: &Path, design: &Design, references: &[RefImage], aspect: Aspect, quality: Quality, job: StillJob) -> anyhow::Result<PathBuf> {
+    let (model, size) = match quality {
+      Quality::Draft => (still_model(false), STILL_SIZE),
+      Quality::Final => (still_model(true), FINAL_STILL_SIZE),
+    };
+    // The final pass recreates the approved draft frame: it goes first, ahead of the references.
+    let guide = job.guide.as_deref().map(|path| self.engine.load_path(path)).transpose()?;
+    let prompt = still_prompt(design, &job.image, references.len(), guide.is_some());
+    let images: Vec<RefImage> = guide.into_iter().chain(references.iter().cloned()).collect();
+    let file = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
+    self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
+    save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)
   }
 
-  async fn clip(&self, dir: &Path, look: &str, aspect: Aspect, tier: VeoTier, resolution: &str, job: ClipJob) -> anyhow::Result<PathBuf> {
+  #[allow(clippy::too_many_arguments)]
+  async fn clip(&self, dir: &Path, look: &str, aspect: Aspect, tier: VeoTier, resolution: &str, quality: Quality, job: ClipJob) -> anyhow::Result<PathBuf> {
     let still = self.engine.load_path(&job.still)?;
     let seconds = if resolution == "1080p" { HD_CLIP_SECONDS } else { plan::clip_seconds(job.seconds) };
-    let prompt = clip_prompt(look, &job.motion);
+    let prompt = clip_prompt(look, &job.motion, job.sing);
     let files = with_quota_retries(QUOTA_WAIT, || self.engine.vertex.generate_video(VeoRequest { model: tier.model(), prompt: &prompt, start_frame: Some(&still), end_frame: None, aspect_ratio: Some(aspect.ratio()), resolution: Some(resolution), duration_seconds: Some(seconds), sample_count: 1, generate_audio: Some(false), extend: None })).await?;
     let rate = self.engine.prices.veo_per_second(tier.model(), false, resolution).unwrap_or(0.0);
     self.charge(Account::Vertex, f64::from(seconds) * rate, tier.model());
     let file = files.into_iter().next().ok_or_else(|| anyhow::anyhow!("Veo returned no video"))?;
-    save(dir, &format!("clip_{:03}_v{}.mp4", job.index + 1, job.version), &file.bytes)
+    save(dir, &format!("clip_{:03}_{}_v{}.mp4", job.index + 1, quality.tag(), job.version), &file.bytes)
+  }
+
+  /// The track's vocal stem, separated on fal and kept in the project for every later sync.
+  async fn separate_vocals(&self, fal: &FalClient, dir: &Path, track: &Path) -> anyhow::Result<PathBuf> {
+    self.send(SongUpdate::Note("Separating the vocal from the track\u{2026}".to_owned()));
+    let source = track.to_path_buf();
+    let (seconds, copy) = tokio::task::spawn_blocking(move || (cut::duration(&source), cut::listening_copy(&source))).await?;
+    let (bytes, mime) = copy?;
+    let vocals = fal.vocals(&bytes, mime).await?;
+    self.charge(Account::Fal, seconds.unwrap_or(0.0) * self.engine.prices.vocals_per_second(), VOCALS_MODEL);
+    let path = save(dir, "vocals.mp3", &vocals)?;
+    self.send(SongUpdate::Vocals(path.clone()));
+    Ok(path)
+  }
+
+  /// One scene: the part of the clip the cut uses, and the vocal under it, synced on fal.
+  async fn sync(&self, fal: &FalClient, dir: &Path, vocals: &Path, quality: Quality, job: SyncJob) -> anyhow::Result<PathBuf> {
+    let (clip, stem, seconds) = (job.clip.clone(), vocals.to_path_buf(), job.end - job.start);
+    let (start, end) = (job.start, job.end);
+    let (head, voice) = tokio::task::spawn_blocking(move || (cut::head_of_clip(&clip, seconds), cut::slice_of_track(&stem, start, end))).await?;
+    let pro = quality == Quality::Final;
+    let synced = fal.lip_sync(&head?, &voice?, pro).await?;
+    self.charge(Account::Fal, seconds * self.engine.prices.lip_sync_per_second(pro), if pro { "lipsync-2-pro" } else { "lipsync-2" });
+    save(dir, &format!("clip_{:03}_{}_synced_v{}.mp4", job.index + 1, quality.tag(), job.version), &synced)
   }
 
   /// Asks the writer for JSON.
@@ -570,18 +682,22 @@ fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &s
   format!("{subject} The video's look, which this picture must match: {} No text, captions or logos.", sentence(look))
 }
 
-fn still_prompt(design: &Design, image: &str, references: usize) -> String {
+fn still_prompt(design: &Design, image: &str, references: usize, guided: bool) -> String {
   let performer = match references {
     0 => format!("The performer: {}", sentence(&design.character)),
-    1 => format!("The attached picture is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. For the record, they are: {}", sentence(&design.character)),
-    _ => format!("The attached pictures are references. The first is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. The others are the location and the props: keep them as shown. For the record, the performer is: {}", sentence(&design.character)),
+    1 => format!("The {} picture is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. For the record, they are: {}", if guided { "second" } else { "attached" }, sentence(&design.character)),
+    _ => format!("The {} pictures are references. The first of them is the performer's reference sheet: keep their face, hair, build and clothes exactly as shown wherever they appear. The others are the location and the props: keep them as shown. For the record, the performer is: {}", if guided { "other" } else { "attached" }, sentence(&design.character)),
   };
   let venue = if design.venue.trim().is_empty() { String::new() } else { format!(" The venue: {}", sentence(&design.venue)) };
-  format!("A single frame from a music video. {} {performer}{venue} The video's look, which this frame must match: {} No text, captions, subtitles, borders or logos.", sentence(image), sentence(&design.look))
+  // The final pass: the director has approved this frame, so it's recreated, not reimagined.
+  let guide = if guided { " The first attached picture is the approved draft of this exact frame. Recreate it faithfully: the same composition, framing, pose, expression and lighting, with finer detail and cleaner rendering. Change nothing about what is in the frame or where." } else { "" };
+  format!("A single frame from a music video. {}{guide} {performer}{venue} The video's look, which this frame must match: {} No text, captions, subtitles, borders or logos.", sentence(image), sentence(&design.look))
 }
 
-fn clip_prompt(look: &str, motion: &str) -> String {
-  format!("{} Keep the look of the opening frame: {} No text or captions appear.", sentence(motion), sentence(look))
+fn clip_prompt(look: &str, motion: &str, sing: bool) -> String {
+  // A sung scene's mouth is redrawn afterwards; that works when the face stays in view and the mouth is already moving.
+  let singing = if sing { " The performer sings to the camera throughout, mouth moving and clearly visible, face towards the lens and never covered, head fairly steady." } else { "" };
+  format!("{}{singing} Keep the look of the opening frame: {} No text or captions appear.", sentence(motion), sentence(look))
 }
 
 /// `text` trimmed, ending in a full stop.
@@ -706,7 +822,7 @@ mod tests {
       let (engine, dir) = engine(base_url);
       let slots = vec![slot(0, Energy::Low), slot(1, Energy::High)];
       let (tx, rx) = std::sync::mpsc::channel();
-      engine.start_song(1, SongRequest::Plan { brief: Brief::default(), style: Style::default(), slots, writer: Writer::Gemini }, tx, egui::Context::default());
+      engine.start_song(1, SongRequest::Plan { brief: Brief::default(), style: Style::default(), slots, lip_sync: false, writer: Writer::Gemini }, tx, egui::Context::default());
 
       let updates = finished(&rx, 1).await;
       let planned = updates.iter().find_map(|u| if let SongUpdate::Planned(shots) = u { Some(shots) } else { None }).unwrap();
@@ -750,9 +866,9 @@ mod tests {
       let (engine, dir) = engine(base_url);
       let project = dir.join("project");
       let portrait = save(&project, "portrait_v1.png", &tiny_png()).unwrap();
-      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into() }, StillJob { index: 1, version: 2, image: "A tunnel".into() }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None }];
       let (tx, rx) = std::sync::mpsc::channel();
-      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![portrait], aspect: Aspect::Tall, pro: false, shots }, tx, egui::Context::default());
+      engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![portrait], aspect: Aspect::Tall, quality: Quality::Draft, shots }, tx, egui::Context::default());
 
       let updates = finished(&rx, 3).await;
       let made: Vec<&PathBuf> = updates.iter().filter_map(|u| if let SongUpdate::Still { path, .. } = u { Some(path) } else { None }).collect();
@@ -771,13 +887,26 @@ mod tests {
       let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Lip sync needs fal: without a key the run says how to connect it, and calls nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lip_sync_without_a_fal_key_says_how_to_connect() {
+      let (engine, dir) = engine("http://127.0.0.1:9/".to_owned());
+      let (tx, rx) = std::sync::mpsc::channel();
+      let shots = vec![SyncJob { index: 0, version: 1, clip: dir.join("c.mp4"), start: 0.0, end: 2.0 }];
+      engine.start_song(5, SongRequest::LipSync { dir: dir.join("p"), track: dir.join("song.mp3"), vocals: Some(dir.join("v.mp3")), quality: Quality::Draft, shots }, tx, egui::Context::default());
+      let updates = finished(&rx, 5).await;
+      assert!(matches!(updates.last(), Some(SongUpdate::Done(Err(message))) if message.contains("fal API key in Settings")), "{updates:?}");
+      assert_eq!(engine.spend_summary().today.fal, 0.0);
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stopped_run_makes_nothing_more() {
       let (base_url, requests) = fake_vertex(Vec::new());
       let (engine, dir) = engine(base_url);
       let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into() };
-      let shots = vec![StillJob { index: 0, version: 1, image: "x".into() }];
-      run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, pro: false, shots }).await.unwrap();
+      let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None }];
+      run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());
       let _ = std::fs::remove_dir_all(dir);
     }
@@ -810,11 +939,28 @@ mod tests {
     #[test]
     fn stills_say_what_the_attached_pictures_are() {
       let design = Design { look: "grainy black and white".into(), character: "a dancer in a lanyard".into(), venue: String::new() };
-      assert!(still_prompt(&design, "A tunnel", 1).contains("The attached picture is the performer's reference sheet"));
-      assert!(still_prompt(&design, "A tunnel", 3).contains("The others are the location and the props"));
-      let alone = still_prompt(&design, "A tunnel", 0);
+      assert!(still_prompt(&design, "A tunnel", 1, false).contains("The attached picture is the performer's reference sheet"));
+      assert!(still_prompt(&design, "A tunnel", 3, false).contains("The others are the location and the props"));
+      let alone = still_prompt(&design, "A tunnel", 0, false);
       assert!(alone.contains("A tunnel. The performer: a dancer in a lanyard. The video's look"));
-      assert_eq!(clip_prompt("grainy", "She runs"), "She runs. Keep the look of the opening frame: grainy. No text or captions appear.");
+      assert_eq!(clip_prompt("grainy", "She runs", false), "She runs. Keep the look of the opening frame: grainy. No text or captions appear.");
+    }
+
+    #[test]
+    fn the_final_pass_recreates_the_approved_frame() {
+      let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
+      let guided = still_prompt(&design, "A tunnel", 2, true);
+      assert!(guided.contains("The first attached picture is the approved draft of this exact frame. Recreate it faithfully"));
+      assert!(guided.contains("The other pictures are references"), "the references follow the draft frame");
+      assert!(still_prompt(&design, "A tunnel", 1, true).contains("The second picture is the performer's reference sheet"));
+      assert!(!still_prompt(&design, "A tunnel", 2, false).contains("approved draft"));
+    }
+
+    #[test]
+    fn sung_scenes_are_filmed_ready_for_lip_sync() {
+      let sung = clip_prompt("grainy", "She leans in", true);
+      assert!(sung.starts_with("She leans in. The performer sings to the camera throughout, mouth moving and clearly visible"));
+      assert!(!clip_prompt("grainy", "She leans in", false).contains("sings"));
     }
 
     #[test]
@@ -833,7 +979,14 @@ mod tests {
       assert_eq!(engine.estimate_song(&SongEstimate::Song { clip: false }), 0.08);
       assert_eq!(engine.estimate_song(&SongEstimate::Song { clip: true }), 0.04);
       // 1,120 image tokens a still at $60 a million.
-      assert!((engine.estimate_song(&SongEstimate::Stills { count: 10, pro: false }) - 10.0 * 1120.0 * 60.0 / 1e6).abs() < 1e-9);
+      assert!((engine.estimate_song(&SongEstimate::Stills { count: 10, pro: false, large: false }) - 10.0 * 1120.0 * 60.0 / 1e6).abs() < 1e-9);
+      let final_stills = engine.estimate_song(&SongEstimate::Stills { count: 10, pro: true, large: true });
+      // Nano Banana Pro at $120 a million image tokens: twice the draft's price.
+      assert!((final_stills - 10.0 * 1120.0 * 120.0 / 1e6).abs() < 1e-9, "{final_stills}");
+      // A minute of lip sync at $3, plus separating a three-minute track.
+      let sync = engine.estimate_song(&SongEstimate::LipSync { seconds: 60.0, pro: false, separate_seconds: 180.0 });
+      assert!((sync - (3.0 + 180.0 * 0.0007)).abs() < 1e-9);
+      assert!((engine.estimate_song(&SongEstimate::LipSync { seconds: 60.0, pro: true, separate_seconds: 0.0 }) - 5.0).abs() < 1e-9);
       let clips = |tier, resolution: &str| engine.estimate_song(&SongEstimate::Clips { seconds: 100, tier, resolution: resolution.to_owned() });
       assert!((clips(VeoTier::Fast, "720p") - 8.0).abs() < 1e-9);
       assert!((clips(VeoTier::Lite, "720p") - 3.0).abs() < 1e-9);

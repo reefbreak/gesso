@@ -114,6 +114,8 @@ pub struct PlannedShot {
   pub motion: String,
   /// The scene's feeling in a few words ("confrontational and manic").
   pub beat: String,
+  /// The performer sings the scene's line to the camera.
+  pub sing: bool,
 }
 
 pub const SONGWRITER: &str = "You are a songwriter and music producer. You write wholly original songs. \
@@ -203,8 +205,14 @@ pub fn brief_prompt(idea: &str, draft: &Draft, read: &Read, style: &Style) -> St
   )
 }
 
-/// Asks for a picture and a movement for each slot.
-pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot]) -> String {
+/// What the writer is told about singing when clips can't be lip-synced.
+const NO_SINGING: &str = "The clips are silent and can't lip-sync, so avoid close-ups of the performer singing; prefer movement, gesture, glances at the lens and cutaways.";
+/// What it's told when they can: which scenes to sing, and how to frame them so the sync holds.
+const SINGING: &str = "Some scenes are lip-synced to the vocal afterwards. Mark a scene \"sing\": true when the performer should sing its line to the camera: about a third to a half of the scenes that have something sung over them, favouring choruses and the lines that matter most, and never a scene with nothing sung. Frame a sung scene as a close-up or medium close-up with the performer's face towards the lens, the mouth clearly visible, well lit and not covered by hands, hair or props, and keep the head fairly steady: the sync breaks when the face turns away or moves fast. Every other scene is \"sing\": false and shows movement, gesture and cutaways, with no one mouthing words.";
+
+/// Asks for a picture and a movement for each slot. With `lip_sync`, the writer also marks the
+/// scenes the performer sings to the camera.
+pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot], lip_sync: bool) -> String {
   let mut list = String::new();
   for slot in slots {
     list.push_str(&format!("{}. {} \u{b7} {:.1}s long \u{b7} energy {}", slot.index, slot.section, slot.seconds(), energy_word(slot.energy)));
@@ -222,11 +230,10 @@ pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot]) -> String {
      - \"index\": the scene's number from the list.\n\
      - \"image\": the opening frame in one or two sentences: who or what is in it, the framing (wide, medium, close-up, detail), where in the venue, and the light. Don't restate the overall look; it is added to every scene.\n\
      - \"motion\": what happens over the scene in one sentence: the performer's movement and the camera's.\n\
-     - \"beat\": the scene's feeling in two to four words.\n\n\
+     - \"beat\": the scene's feeling in two to four words.{}\n\n\
      Follow the arc from the first scene to the last. Vary the framing from scene to scene, keep the performer in most of them, and bring the motifs and props back. \
      Match the energy: low is stillness and slow moves, high is fast, abrupt movement. \
-     Illustrate what is sung where it helps, without showing words on screen. The clips are silent and can't lip-sync, so avoid close-ups of the performer singing; \
-     prefer movement, gesture, glances at the lens and cutaways.",
+     Illustrate what is sung where it helps, without showing words on screen. {}",
     brief.title.trim(),
     brief.logline.trim(),
     brief.drive.trim(),
@@ -239,7 +246,9 @@ pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot]) -> String {
     brief.venue.description.trim(),
     if props.is_empty() { "none".to_owned() } else { props.join("; ") },
     style.block.trim(),
-    slots.len()
+    slots.len(),
+    if lip_sync { "\n- \"sing\": true or false, as described below." } else { "" },
+    if lip_sync { SINGING } else { NO_SINGING }
   )
 }
 
@@ -297,7 +306,7 @@ pub fn parse_scenes(reply: &str) -> Vec<PlannedShot> {
     .filter_map(|(position, item)| {
       let index = item["index"].as_u64().map_or(position, |i| i as usize);
       let image = text(&item["image"]);
-      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]) })
+      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]), sing: item["sing"].as_bool().unwrap_or(false) })
     })
     .collect()
 }
@@ -309,7 +318,7 @@ pub fn fallback_scene(slot: &Slot) -> PlannedShot {
     Energy::Medium => ("A medium shot of the performer moving through the venue", "The performer walks toward the camera, which tracks backward.", "Driving forward"),
     Energy::High => ("A close, low-angle shot of the performer mid-movement", "The performer lunges at the lens with fast, abrupt movement; the handheld camera shakes.", "Confrontational"),
   };
-  PlannedShot { index: slot.index, image: format!("{framing}."), motion: motion.to_owned(), beat: beat.to_owned() }
+  PlannedShot { index: slot.index, image: format!("{framing}."), motion: motion.to_owned(), beat: beat.to_owned(), sing: false }
 }
 
 /// The JSON value in a reply: the whole reply, a fenced block, or the outermost braces or brackets.
@@ -445,9 +454,9 @@ mod tests {
 
     #[test]
     fn scenes_are_matched_by_index() {
-      let reply = r#"{"scenes":[{"index":2,"image":"A","motion":"m","beat":"manic"},{"image":"B"},{"index":5,"image":""}]}"#;
+      let reply = r#"{"scenes":[{"index":2,"image":"A","motion":"m","beat":"manic","sing":true},{"image":"B"},{"index":5,"image":""}]}"#;
       let scenes = parse_scenes(reply);
-      assert_eq!(scenes.iter().map(|s| (s.index, s.image.as_str(), s.beat.as_str())).collect::<Vec<_>>(), [(2, "A", "manic"), (1, "B", "")]);
+      assert_eq!(scenes.iter().map(|s| (s.index, s.image.as_str(), s.beat.as_str(), s.sing)).collect::<Vec<_>>(), [(2, "A", "manic", true), (1, "B", "", false)]);
     }
   }
 
@@ -476,7 +485,11 @@ mod tests {
     fn the_scene_list_names_every_slot() {
       let slots = [Slot { index: 0, start: 0.0, end: 3.4, section: "Intro".into(), energy: Energy::Low, lyric: String::new() }, Slot { index: 1, start: 3.4, end: 5.1, section: "Chorus".into(), energy: Energy::High, lyric: "a / b".into() }];
       let brief = Brief { title: "Runtime".into(), props: vec![Subject { name: "Lanyard".into(), role: String::new(), description: "a cracked badge".into() }], ..Default::default() };
-      let prompt = scenes_prompt(&brief, &Style { block: "grainy".into(), ..Default::default() }, &slots);
+      let style = Style { block: "grainy".into(), ..Default::default() };
+      let prompt = scenes_prompt(&brief, &style, &slots, false);
+      assert!(prompt.contains("can't lip-sync") && !prompt.contains("\"sing\""));
+      let singing = scenes_prompt(&brief, &style, &slots, true);
+      assert!(singing.contains("- \"sing\": true or false") && singing.contains("the mouth clearly visible") && !singing.contains("can't lip-sync"));
       assert!(prompt.contains("0. Intro \u{b7} 3.4s long \u{b7} energy low\n"));
       assert!(prompt.contains("1. Chorus \u{b7} 1.7s long \u{b7} energy high \u{b7} sung: a / b\n"));
       assert!(prompt.contains("cut into 2 scenes") && prompt.contains("Props: Lanyard (a cracked badge)") && prompt.contains("The look: grainy"));

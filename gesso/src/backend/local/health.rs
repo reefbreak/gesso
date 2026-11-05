@@ -18,6 +18,7 @@ use futures::future::join_all;
 
 use super::LocalEngine;
 use super::bedrock::{DEFAULT_CLAUDE_MODEL, ModelAccess};
+use super::fal::{LIP_SYNC_MODEL, VOCALS_MODEL};
 use super::vertex::{OMNI_MODELS, ProbeCall, SONG_CLIP_MODEL, SONG_MODELS, TEXT_MODELS};
 use crate::backend::video;
 
@@ -147,6 +148,7 @@ impl LocalEngine {
     let mut checks = google;
     checks.extend(aws);
     checks.extend(self.check_local());
+    checks.extend(self.check_fal());
     checks.push(self.check_jev());
     HealthReport { checked_at: Local::now(), checks, accounts: self.account_lines() }
   }
@@ -240,6 +242,14 @@ impl LocalEngine {
     let ffmpeg = video::ffmpeg_available();
     let isnet = !self.remover.needs_download();
     vec![Check { provider: Provider::Local, name: "FFmpeg".to_owned(), used_for: "Video previews, Edit Video, Frame Extract, Music Video".to_owned(), upstream: "ffmpeg, ffprobe".to_owned(), state: if ffmpeg { State::Ready } else { State::NotFound }, detail: if ffmpeg { "Installed.".to_owned() } else { "Install it with `brew install ffmpeg`, then restart Gesso.".to_owned() } }, Check { provider: Provider::Local, name: "Background removal model".to_owned(), used_for: "BG Remove".to_owned(), upstream: "isnet-general-use".to_owned(), state: if isnet { State::Ready } else { State::NotSetUp }, detail: if isnet { "Downloaded.".to_owned() } else { "Downloads itself (179 MB) the first time BG Remove runs on your Mac.".to_owned() } }]
+  }
+
+  /// fal isn't called: it has no free request, so the rows say only whether a key is saved.
+  fn check_fal(&self) -> Vec<Check> {
+    let connected = self.fal_connected();
+    let (state, detail) = if connected { (State::Listed, "A key is saved. It isn't tested here, because fal has no free call; the first lip sync shows whether it works.") } else { (State::NotSetUp, "Optional: needed only for lip sync. Add your fal API key in Settings.") };
+    let row = |name: &str, used_for: &str, upstream: &str| Check { provider: Provider::Other, name: name.to_owned(), used_for: used_for.to_owned(), upstream: upstream.to_owned(), state, detail: detail.to_owned() };
+    vec![row("fal lip sync", "Music Video: sung scenes", LIP_SYNC_MODEL), row("fal vocal separation", "Music Video: the vocal stem lip sync follows", VOCALS_MODEL)]
   }
 
   /// Jev isn't called: a routing call is billed, and a missing key only means Auto uses rules.
@@ -359,8 +369,14 @@ mod tests {
       assert!(report.checks.iter().filter(|c| c.provider == Provider::Aws).all(|c| c.state == State::NotSetUp));
       assert_eq!(report.needing_attention(), usize::from(!video::ffmpeg_available()));
       assert_eq!(report.accounts[0], (Provider::GoogleCloud, "No project set".to_owned()));
-      let jev = report.checks.iter().find(|c| c.provider == Provider::Other).unwrap();
-      assert_eq!(jev.state, State::NotSetUp);
+      let other: Vec<&Check> = report.checks.iter().filter(|c| c.provider == Provider::Other).collect();
+      assert_eq!(other.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["fal lip sync", "fal vocal separation", "Jev routing"]);
+      assert!(other.iter().all(|c| c.state == State::NotSetUp));
+      // With a key saved, fal's rows say so (and that it isn't tested).
+      std::fs::create_dir_all(dir.join("credentials")).unwrap();
+      std::fs::write(dir.join("credentials").join("fal.api_key.txt"), "key-123\n").unwrap();
+      let fal = engine.check_fal();
+      assert!(fal.iter().all(|c| c.state == State::Listed && c.detail.contains("isn't tested")));
       let _ = std::fs::remove_dir_all(dir);
     }
 

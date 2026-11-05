@@ -310,6 +310,11 @@ impl Backend {
     self.local.as_ref().map(|l| (l.spend_summary(), l.spend_breakdown()))
   }
 
+  /// Whether a fal key is saved (lip sync needs one).
+  pub fn fal_connected(&self) -> bool {
+    self.accounts.fal_key().is_some()
+  }
+
   /// In local mode, the library's folder (Music Video projects are kept under it).
   pub fn library_dir(&self) -> Option<PathBuf> {
     self.local.as_ref().map(|l| l.library().dir().to_path_buf())
