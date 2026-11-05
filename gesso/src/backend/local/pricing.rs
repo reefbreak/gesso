@@ -46,7 +46,9 @@ pub struct GeminiUsage {
 /// `gemini-3-pro-image.input` / `.text_out` / `.image_out` (per million tokens),
 /// `veo-3.1-fast-generate-001.audio.1080p` (per second; `silent` for no audio),
 /// `stability.stable-image-ultra-v1:1` (per image), `jev.input` (per million tokens),
-/// `gemini-omni-flash.input` / `.text_out` / `.video_out` (per million tokens).
+/// `gemini-omni-flash.input` / `.text_out` / `.video_out` (per million tokens),
+/// `lyria-3.5` (per song), `gemini-3.8-flash.input` / `.text_out` and `claude.input` /
+/// `.text_out` (the Music Video page's writer, per million tokens).
 #[derive(Clone, Debug, Default)]
 pub struct PriceBook {
   overrides: HashMap<String, f64>,
@@ -134,6 +136,35 @@ impl PriceBook {
       _ => return None,
     };
     Some(self.get(model, base))
+  }
+
+  /// A Lyria 3 song or 30-second clip, per generation (key: the model id).
+  pub fn lyria_song(&self, model: &str) -> f64 {
+    let base = match model {
+      "lyria-3-clip-preview" => 0.04,
+      _ => 0.08,
+    };
+    self.get(model, base)
+  }
+
+  /// A text model's token rates, per million tokens: `(input, output)`. Keys are the model id
+  /// with `.input` / `.text_out`; Claude's are `claude.input` / `claude.text_out`.
+  pub fn text_rates(&self, model: &str) -> (f64, f64) {
+    let (key, input, output) = if model.contains("claude") {
+      // Sonnet's list price; Opus and Haiku differ, hence the override.
+      ("claude", 3.00, 15.00)
+    } else if model.contains("argon") || model.contains("pro") {
+      (model, 2.00, 12.00)
+    } else {
+      (model, 0.50, 3.00)
+    };
+    (self.get(&format!("{key}.input"), input), self.get(&format!("{key}.text_out"), output))
+  }
+
+  /// A text call from the tokens it reported.
+  pub fn text_call(&self, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    let (input, output) = self.text_rates(model);
+    (input_tokens as f64 * input + output_tokens as f64 * output) / MILLION
   }
 
   /// Gemini Omni Flash (both 1.1 and the preview) token rates, per million tokens: video counts

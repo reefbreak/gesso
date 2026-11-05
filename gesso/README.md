@@ -115,7 +115,53 @@ Gesso tries the model id `gemini-omni-1.1-flash-preview`, then `gemini-omni-1.1-
 (set `"omni_model"` to pick one). If a result is too big to come back inline, set
 `"omni_output_gcs_uri": "gs://your-bucket/omni/"` and Gesso downloads it from there.
 
-FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract and Edit Video. 3D Object
+## Music Video (idea to finished film)
+
+**Music Video** (Studio) is one staged workflow: describe a song, and end with a music video cut to
+its beat. Each stage opens once the one before it has what it needs, shows its cost before it
+runs, and leaves everything it made editable before the next stage uses it.
+
+| Stage            | What you get                                                      | Runs on                                      |
+|------------------|-------------------------------------------------------------------|----------------------------------------------|
+| Idea             | Lyrics and a music direction from a description (or your own)     | Writer: Gemini (Vertex) or Claude (Bedrock)  |
+| Lyrics           | The words and direction, edited by hand or rewritten from notes   | Writer                                       |
+| Song             | A sung song or 30-second clip, or a track you import              | Vertex (Lyria 3)                             |
+| Music Analysis   | Tempo and beats; mood, sections and timed lyrics                  | Your Mac (FFmpeg); Vertex (Gemini listening) |
+| Visual Style     | A look statement, palette, lighting and the common style block    | Writer                                       |
+| Creative Brief   | Logline, arc, editing strategy, motifs, performer, venue, props   | Writer                                       |
+| Reference Images | The performer's three-view sheet, the venue and each prop         | Vertex (Nano Banana 2 or Pro)                |
+| Scenes           | The song cut into scenes on its beats, each with an opening frame | Your Mac (timing); writer; Vertex (stills)   |
+| Shots            | A silent clip per scene, animated from its still                  | Vertex (Veo 3.1 Lite, Fast or standard)      |
+| Final Video      | Every clip trimmed to its scene and laid under the song           | Your Mac (FFmpeg)                            |
+
+- **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
+  envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
+  tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The
+  final cut counts frames from the song's start, so the picture can't drift over a whole song.
+- **Consistency comes from the reference images.** Every still is drawn with the performer's sheet,
+  the venue and the props attached, plus the common style block. Edit a description and draw it
+  again before spending on scenes.
+- **Cost.** The writer's calls are under a cent each and a song is about $0.08. Stills are about
+  $0.07 each. Clips are the expensive stage: Veo is billed by the second, each scene is generated
+  at 4, 6 or 8 seconds (the shortest that covers it; 1080p is always 8), so a three-minute song at
+  the Steady pace is roughly 60 to 90 clips. Make one scene's clip first to check the look. Stop
+  halts a run before its next picture or clip.
+- **Lyrics are written new.** The writer is told to carry over an idea's energy and structure, not
+  the words of an existing song, and to describe music without artist or song names (Lyria refuses
+  them).
+- **Lip sync.** Veo's clips are silent and aren't synced to the vocal, so the writer steers scenes
+  toward movement and cutaways, not close-ups of singing.
+- **Projects.** Each video is a folder in `~/Artcraft/local/songs/` with `project.json`, the song,
+  reference images, stills, clips and cuts. The song, the reference images and the finished film
+  also go into the library; the dozens of stills and clips don't.
+
+Optional settings in `local_providers.json`: `song_text_model` (default: `gemini-3.8-flash`, then
+`gemini-3.5-flash`), `song_music_model` (default: `lyria-3.5`, then `lyria-3-pro-preview`) and
+`song_claude_model` (default: `global.anthropic.claude-sonnet-4-6`). Lyria 3 and the listening
+call run on the global endpoint.
+
+FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract, Edit Video and Music
+Video. 3D Object
 and 3D World still say "coming soon": they need a 3D generation provider.
 
 Not in local mode yet: characters, and Bedrock video (Amazon Nova
@@ -233,7 +279,8 @@ Feed and lightbox:
 ## Diagnostics
 
 Set `ARTCRAFT_SCREENSHOT=<file.png>` to save a screenshot once the window has settled.
-`ARTCRAFT_PAGE` (`home`, `create-image`, `create-video`, `create-audio` or `library`) picks the page,
+`ARTCRAFT_PAGE` (`home`, `create-image`, `create-video`, `create-audio`, `music-video` or `library`)
+picks the page, `ARTCRAFT_MUSIC_VIDEO=<project id>` opens that saved Music Video project,
 `ARTCRAFT_OPEN` (`settings` or `midjourney-login`) opens a dialog, and `ARTCRAFT_SCREENSHOT_EXIT=1`
 closes the app afterwards. The screenshot shows egui only, not the sign-in webview.
 

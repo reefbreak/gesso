@@ -244,7 +244,11 @@ impl AudioPlayer {
   }
 }
 
+/// A track's bytes: read from disk for local-mode `file://` links, downloaded otherwise.
 async fn download(http: &reqwest::Client, url: &str) -> Result<Arc<[u8]>, String> {
+  if let Some(path) = crate::backend::local::library::file_path(url) {
+    return tokio::fs::read(&path).await.map(Arc::from).map_err(|e| e.to_string());
+  }
   let response = http.get(url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
   response.bytes().await.map(|b| Arc::from(b.as_ref())).map_err(|e| e.to_string())
 }

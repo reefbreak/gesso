@@ -1,0 +1,932 @@
+//! What each stage of the Music Video page shows: its work in the middle column, and its
+//! settings, run button and cost in the options panel.
+
+use std::path::Path;
+
+use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
+
+use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
+use crate::backend::local::library::file_url;
+use crate::backend::local::song::cut::{Aspect, Grade};
+use crate::backend::local::song::plan::{self, Energy, Pace};
+use crate::backend::local::song::project::{ReferenceKind, Stage};
+use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
+use crate::backend::media_cache::{Lookup, MediaCache};
+use crate::backend::video::VideoPlayer;
+use crate::overlays::lightbox::fit_inside;
+use crate::pages::common::{Env, pick_files};
+use crate::pages::tools::{field, panel, prompt_field, segmented};
+use crate::prompt_box::refs::RefKind;
+use crate::shell::usd;
+use crate::theme;
+use crate::ui::icons::{self, Icon};
+use crate::ui::waveform::{self, format_time};
+use crate::ui::widgets;
+
+const CARD_GAP: f32 = 12.0;
+/// Scene and reference cards are at least this wide; the grid fits as many columns as it can.
+const CARD_MIN_WIDTH: f32 = 210.0;
+const CARD_TEXT_HEIGHT: f32 = 54.0;
+const TIMELINE_HEIGHT: f32 = 28.0;
+/// Reference cards are bigger: there are only a handful, and they're looked at closely.
+const REFERENCE_MIN_WIDTH: f32 = 240.0;
+/// What the writer's calls cost, near enough: a few thousand tokens each.
+const CENTS: &str = "< 1\u{a2}";
+const A_CENT: &str = "\u{2248} 1\u{a2}";
+/// Lyrics and briefs read best in a column, not the full width of a wide window.
+const TEXT_COLUMN: f32 = 760.0;
+
+pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  ui.painter().rect(stage, theme::RADIUS, theme::fade(theme::INK, 0.012), theme::hairline(), egui::StrokeKind::Inside);
+  match page.stage {
+    Stage::Idea => idea(page, ui, stage, panel_rect, actions),
+    Stage::Lyrics => lyrics(page, ui, stage, panel_rect, actions),
+    Stage::Song => song(page, ui, env, stage, panel_rect, actions),
+    Stage::Analysis => analysis(page, ui, env, stage, panel_rect, actions),
+    Stage::Style => style(page, ui, stage, panel_rect, actions),
+    Stage::Brief => brief(page, ui, stage, panel_rect, actions),
+    Stage::References => references(page, ui, env, stage, panel_rect, actions),
+    Stage::Scenes => scenes(page, ui, env, stage, panel_rect, actions),
+    Stage::Shots => shots(page, ui, env, stage, panel_rect, actions),
+    Stage::Final => final_video(page, ui, env, stage, panel_rect, actions),
+  }
+}
+
+// --- Idea ------------------------------------------------------------------------------------
+
+fn idea(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  let mut changed = false;
+  column(ui, stage, "idea", |ui| {
+    heading(ui, Stage::Idea, "What's the song?", "Describe the song you want: what it's about, how it should feel, the kind of music. The writer turns it into lyrics and a music direction you can edit.");
+    changed |= text_box(ui, "mv-idea", &mut page.project.idea, "A snarling big-beat anthem about the people who write prompts and wrangle agents all day\u{2026}", 6);
+    ui.add_space(18.0);
+    widgets::hud(ui, "Your videos", theme::FAINT);
+    ui.add_space(6.0);
+    let others: Vec<_> = page.recent.iter().flatten().filter(|s| s.id != page.project.id).cloned().collect();
+    if others.is_empty() {
+      ui.label(egui::RichText::new("Videos you start are saved as you go, and your other ones are listed here to come back to.").size(13.0).color(theme::FAINT));
+    }
+    for summary in &others {
+      let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), if busy { Sense::hover() } else { Sense::click() });
+      ui.painter().rect(row, theme::RADIUS, if resp.hovered() && !busy { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+      ui.painter().text(pos2(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, &summary.title, FontId::new(14.0, theme::medium()), theme::INK);
+      let detail = format!("{} \u{b7} {}", summary.stage.label(), day(&summary.updated_at));
+      ui.painter().text(pos2(row.right() - 14.0, row.center().y), Align2::RIGHT_CENTER, detail, FontId::new(11.5, theme::mono()), theme::MUTED);
+      if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !busy {
+        actions.push(Action::Open(summary.id.clone()));
+      }
+      ui.add_space(6.0);
+    }
+  });
+  if changed {
+    page.touch(ui);
+  }
+  let has_idea = !page.project.idea.trim().is_empty();
+  let has_lyrics = !page.project.lyrics.trim().is_empty();
+  let line = page.progress_line().filter(|_| page.running_here());
+  panel(ui, panel_rect, "Idea", "Start from an idea, or bring your own lyrics.", |ui| {
+    writer_choice(ui, &mut page.writer);
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Sparkles, if has_lyrics { "Write it again" } else { "Write the song" }, Some(CENTS.to_owned()), has_idea && !busy, line.as_deref()) {
+      actions.push(Action::Write { rewrite: false });
+    }
+    ui.add_space(10.0);
+    if secondary(ui, Icon::Pencil, if has_lyrics { "Go to the lyrics" } else { "Write my own lyrics" }, !busy) {
+      actions.push(Action::OwnLyrics);
+    }
+  });
+}
+
+// --- Lyrics ----------------------------------------------------------------------------------
+
+fn lyrics(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  let mut changed = false;
+  column(ui, stage, "lyrics", |ui| {
+    heading(ui, Stage::Lyrics, "Lyrics", "Edit anything. Section tags in square brackets, like [Verse 1] and [Chorus], tell the music model the song's shape; a tag with no lines under it is instrumental.");
+    ui.label(label("Title"));
+    changed |= ui.add(egui::TextEdit::singleline(&mut page.project.title).desired_width(f32::INFINITY).font(FontId::new(20.0, theme::display())).margin(egui::Margin::symmetric(10, 8))).changed();
+    ui.add_space(12.0);
+    ui.label(label("Lyrics"));
+    let rows = page.project.lyrics.lines().count().max(16) + 2;
+    changed |= text_box(ui, "mv-lyrics", &mut page.project.lyrics, "[Verse 1]\n\u{2026}", rows);
+  });
+  let has_lyrics = !page.project.lyrics.trim().is_empty();
+  let line = page.progress_line().filter(|_| page.running_here());
+  panel(ui, panel_rect, "Lyrics", "The words and the music direction the song is made from.", |ui| {
+    field(ui, "Music direction");
+    let before = page.project.style.clone();
+    prompt_field(ui, "mv-style", &mut page.project.style, "Genre and era, tempo, instruments, how the vocal is delivered. No artist or song names: the music model refuses them.");
+    changed |= before != page.project.style;
+    field(ui, "Change something");
+    prompt_field(ui, "mv-notes", &mut page.notes, "Make the chorus shorter and angrier\u{2026}");
+    writer_choice(ui, &mut page.writer);
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::RotateCw, "Rewrite", Some(CENTS.to_owned()), has_lyrics && !page.notes.trim().is_empty() && !busy, line.as_deref()) {
+      actions.push(Action::Write { rewrite: true });
+    }
+    next_button(ui, Stage::Song, has_lyrics, actions);
+  });
+  if changed {
+    page.touch(ui);
+  }
+}
+
+// --- Song ------------------------------------------------------------------------------------
+
+fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  column(ui, stage, "song", |ui| {
+    heading(ui, Stage::Song, "Song", "Lyria sings the lyrics to your music direction. Or bring a track you made elsewhere: the video stages work the same either way.");
+    match &page.project.track {
+      Some(track) => {
+        card(ui, if track.model.is_empty() { "Your track".to_owned() } else { format!("Made by {}", track.model) }, |ui| {
+          waveform::player(ui, ui.id().with("mv-song"), env.audio, &file_url(&track.path), None, false);
+        });
+        if !track.sung.trim().is_empty() {
+          text_card(ui, "What the model says it sang", &track.sung);
+        }
+      },
+      None => empty(ui, Icon::Music, "No song yet", "Generate one, or import a track."),
+    }
+  });
+  let cost = env.backend.estimate_song(&SongEstimate::Song { clip: page.short_song });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let has_track = page.project.track.is_some();
+  panel(ui, panel_rect, "Song", "Each generation is a new take; the latest one is kept.", |ui| {
+    field(ui, "Length");
+    if let Some(i) = segmented(ui, &["Full song", "30 s clip"], usize::from(page.short_song)) {
+      page.short_song = i == 1;
+    }
+    ui.add_space(6.0);
+    ui.checkbox(&mut page.instrumental, "Instrumental (no vocals)");
+    ui.label(small("Lyria 3 on your Vertex AI account. A new song clears the scenes, which are timed to the old one."));
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Sparkles, if has_track { "Make another take" } else { "Make the song" }, cost.map(estimate), !busy, line.as_deref()) {
+      actions.push(Action::Compose);
+    }
+    ui.add_space(10.0);
+    if secondary(ui, Icon::Upload, "Import a track", !busy) {
+      if let Some(file) = pick_files(&[RefKind::Audio], false).into_iter().next() {
+        actions.push(Action::Import(file));
+      }
+    }
+    next_button(ui, Stage::Analysis, has_track, actions);
+  });
+}
+
+// --- Music Analysis --------------------------------------------------------------------------
+
+fn analysis(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  column(ui, stage, "analysis", |ui| {
+    heading(ui, Stage::Analysis, "Your track", "Where the video should breathe, build and hit.");
+    let (Some(track), Some(grid)) = (&page.project.track, &page.project.grid) else {
+      empty(ui, Icon::Drum, "Not analysed yet", "Analysing finds the beat on your Mac and has Gemini listen for the sections.");
+      return;
+    };
+    let read = &page.project.read;
+    card(ui, "Creative read".to_owned(), |ui| {
+      if !read.mood.is_empty() {
+        ui.label(widgets::heading(&read.mood, 24.0));
+        ui.add_space(4.0);
+      }
+      ui.horizontal_wrapped(|ui| {
+        chip(ui, &format!("{:.0} BPM", grid.bpm));
+        chip(ui, &format!("{} sections", page.project.sections.len()));
+        chip(ui, &format!("{} beats", grid.beats.len()));
+        chip(ui, &format_time(grid.duration as f32));
+        if !read.genre.is_empty() {
+          chip(ui, &read.genre);
+        }
+      });
+      if !read.summary.is_empty() {
+        ui.add_space(8.0);
+        ui.label(body(&read.summary));
+      }
+      ui.add_space(10.0);
+      waveform::player(ui, ui.id().with("mv-analysis"), env.audio, &file_url(&track.path), Some(grid.duration as f32), false);
+    });
+    card(ui, "Song structure".to_owned(), |ui| {
+      let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), TIMELINE_HEIGHT + 18.0), Sense::hover());
+      let lane = Rect::from_min_size(bar.min + vec2(0.0, 18.0), vec2(bar.width(), TIMELINE_HEIGHT));
+      let x = |t: f64| lane.left() + lane.width() * (t / grid.duration.max(0.001)).clamp(0.0, 1.0) as f32;
+      for section in &page.project.sections {
+        let block = Rect::from_min_max(pos2(x(section.start) + 1.0, lane.top()), pos2(x(section.end) - 1.0, lane.bottom()));
+        ui.painter().rect_filled(block, theme::RADIUS, energy_colour(section.energy));
+        if block.width() > 44.0 {
+          ui.painter().with_clip_rect(block).text(block.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &section.name, FontId::new(11.5, theme::semibold()), theme::INVERT_FG);
+        }
+        ui.painter().text(pos2(block.left(), bar.top()), Align2::LEFT_TOP, format_time(section.start as f32), FontId::new(10.0, theme::mono()), theme::FAINT);
+      }
+      // Bar lines under the sections.
+      for beat in grid.beats.iter().skip(grid.downbeat % 4).step_by(4) {
+        ui.painter().vline(x(*beat), lane.bottom()..=lane.bottom() + 4.0, egui::Stroke::new(1.0, theme::LINE));
+      }
+      ui.add_space(8.0);
+      ui.label(small("Brighter blocks are higher energy and cut faster. The ticks are bar lines; every cut lands on a beat."));
+    });
+    if !page.project.lines.is_empty() {
+      card(ui, "Lyrics, as sung".to_owned(), |ui| {
+        for line in &page.project.lines {
+          ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format_time(line.time as f32)).size(12.0).family(theme::mono()).color(theme::FAINT));
+            ui.label(body(&line.text));
+          });
+        }
+      });
+    }
+    if let Some(note) = &page.analysis_note {
+      ui.label(small(note));
+    }
+  });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let analysed = page.project.grid.is_some();
+  panel(ui, panel_rect, "Music Analysis", "The beat is found on your Mac, free. Gemini listens to the track for its mood, sections and timed lyrics.", |ui| {
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Drum, if analysed { "Analyse again" } else { "Analyse the track" }, Some(A_CENT.to_owned()), page.project.track.is_some() && !busy, line.as_deref()) {
+      actions.push(Action::Analyse);
+    }
+    next_button(ui, Stage::Style, analysed, actions);
+  });
+}
+
+// --- Visual Style ----------------------------------------------------------------------------
+
+fn style(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  let mut changed = false;
+  column(ui, stage, "style", |ui| {
+    heading(ui, Stage::Style, "Visual style", "The look guiding every picture in the film.");
+    let Some(visual) = &mut page.project.visual else {
+      empty(ui, Icon::Wand, "No style yet", "Say how you want it to look in the panel, or leave that blank and let the writer decide from the track.");
+      return;
+    };
+    if !visual.statement.is_empty() {
+      ui.label(widgets::heading(&visual.statement, 20.0));
+      ui.add_space(10.0);
+    }
+    if !visual.palette.is_empty() {
+      card(ui, "Colour palette".to_owned(), |ui| {
+        ui.horizontal_wrapped(|ui| {
+          for swatch in &visual.palette {
+            let (dot, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            ui.painter().rect(dot, theme::RADIUS, colour(&swatch.hex), theme::hairline(), egui::StrokeKind::Inside);
+            ui.label(body(&swatch.name));
+            ui.add_space(12.0);
+          }
+        });
+      });
+    }
+    text_card(ui, "Lighting", &visual.lighting);
+    text_card(ui, "Texture", &visual.texture);
+    card(ui, "Common style block \u{b7} added to every image and clip".to_owned(), |ui| {
+      changed |= ui.add(egui::TextEdit::multiline(&mut visual.block).desired_rows(3).desired_width(f32::INFINITY).frame(egui::Frame::NONE)).changed();
+    });
+  });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let styled = page.project.visual.is_some();
+  panel(ui, panel_rect, "Visual Style", "Edit the common style block to steer every picture at once.", |ui| {
+    field(ui, "Your direction (optional)");
+    let before = page.project.direction.clone();
+    prompt_field(ui, "mv-direction", &mut page.project.direction, "Gritty black-and-white 1990s rave video in a derelict rail tunnel, harsh single light, heavy grain\u{2026}");
+    changed |= before != page.project.direction;
+    field(ui, "Frame");
+    if let Some(i) = segmented(ui, &["16:9 wide", "9:16 tall"], usize::from(page.project.aspect == Aspect::Tall)) {
+      page.project.aspect = if i == 0 { Aspect::Wide } else { Aspect::Tall };
+      changed = true;
+    }
+    writer_choice(ui, &mut page.writer);
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Wand, if styled { "Design it again" } else { "Design the style" }, Some(CENTS.to_owned()), !busy, line.as_deref()) {
+      actions.push(Action::Style);
+    }
+    next_button(ui, Stage::Brief, styled, actions);
+  });
+  if changed {
+    page.touch(ui);
+  }
+}
+
+// --- Creative Brief --------------------------------------------------------------------------
+
+fn brief(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  column(ui, stage, "brief", |ui| {
+    heading(ui, Stage::Brief, "Creative brief", "The idea connecting your track, the performer and the visual world.");
+    let Some(brief) = &page.project.brief else {
+      empty(ui, Icon::Pencil, "No brief yet", "The writer invents the film's idea, an original performer, a venue and a few signature props.");
+      return;
+    };
+    if !brief.title.is_empty() {
+      ui.label(widgets::heading(&brief.title, 22.0));
+      ui.add_space(10.0);
+    }
+    text_card(ui, "Logline", &brief.logline);
+    text_card(ui, "Core drive", &brief.drive);
+    text_card(ui, "Director's vision", &brief.vision);
+    text_card(ui, "Editing strategy", &brief.editing);
+    if !brief.motifs.is_empty() {
+      card(ui, "Visual motifs".to_owned(), |ui| {
+        for motif in &brief.motifs {
+          ui.label(body(&format!("\u{b7} {motif}")));
+        }
+      });
+    }
+    for (title, subject) in [("Character", &brief.character), ("Venue", &brief.venue)].into_iter().chain(brief.props.iter().map(|prop| ("Prop", prop))) {
+      card(ui, title.to_owned(), |ui| {
+        let name = if subject.role.is_empty() { subject.name.clone() } else { format!("{} \u{b7} {}", subject.name, subject.role) };
+        ui.label(egui::RichText::new(name).size(14.0).family(theme::semibold()).color(theme::INK));
+        ui.add_space(2.0);
+        ui.label(body(&subject.description));
+      });
+    }
+  });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let briefed = page.project.brief.is_some();
+  panel(ui, panel_rect, "Creative Brief", "The performer, venue and props here become the reference images, where you can edit how each is described.", |ui| {
+    writer_choice(ui, &mut page.writer);
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Pencil, if briefed { "Write it again" } else { "Write the brief" }, Some(CENTS.to_owned()), page.project.visual.is_some() && !busy, line.as_deref()) {
+      actions.push(Action::Brief);
+    }
+    next_button(ui, Stage::References, briefed, actions);
+  });
+}
+
+// --- Reference Images ------------------------------------------------------------------------
+
+fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  let mut changed = false;
+  let mut redraw = None;
+  column_wide(ui, stage, "references", |ui| {
+    heading(ui, Stage::References, "Reference images", "The performer, the location and the signature details. Every scene is drawn from these, so they stay the same from shot to shot.");
+    if page.project.references.is_empty() {
+      empty(ui, Icon::Image, "Nothing to draw yet", "Write the creative brief first.");
+      return;
+    }
+    let (columns, width) = grid_columns(ui.available_width(), REFERENCE_MIN_WIDTH);
+    let height = width * 0.62;
+    for row in 0..page.project.references.len().div_ceil(columns) {
+      ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = CARD_GAP;
+        for index in row * columns..((row + 1) * columns).min(page.project.references.len()) {
+          let reference = &mut page.project.references[index];
+          ui.vertical(|ui| {
+            ui.set_width(width);
+            let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            thumbnail(ui, rect, env.cache, reference.image.as_deref(), Icon::Image);
+            if let Some(error) = &reference.error {
+              failed_badge(ui, rect, error);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+              ui.label(egui::RichText::new(&reference.name).size(14.0).family(theme::semibold()).color(theme::INK));
+              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
+              ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(!busy, |ui| {
+                  if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again", false).clicked() {
+                    redraw = Some(index);
+                  }
+                });
+              });
+            });
+            changed |= ui.add(egui::TextEdit::multiline(&mut reference.description).desired_rows(3).desired_width(width).font(FontId::new(12.5, egui::FontFamily::Proportional))).changed();
+          });
+        }
+      });
+      ui.add_space(CARD_GAP);
+    }
+  });
+  if changed {
+    // The brief's performer and venue follow their reference's wording: scenes are drawn from both.
+    let edited: Vec<(ReferenceKind, String)> = page.project.references.iter().map(|r| (r.kind, r.description.clone())).collect();
+    if let Some(brief) = &mut page.project.brief {
+      for (kind, description) in edited {
+        match kind {
+          ReferenceKind::Look => brief.character.description = description,
+          ReferenceKind::Location => brief.venue.description = description,
+          ReferenceKind::Prop => {},
+        }
+      }
+    }
+    page.touch(ui);
+  }
+  if let Some(index) = redraw {
+    actions.push(Action::References(vec![index]));
+  }
+  let missing: Vec<usize> = page.project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = (0..page.project.references.len()).collect();
+  let targets = if missing.is_empty() { all } else { missing };
+  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let any = page.project.references.iter().any(|r| r.image.is_some());
+  panel(ui, panel_rect, "Reference Images", "Edit a description under its picture, then draw it again.", |ui| {
+    picture_model(ui, &mut page.pro);
+    error_line(ui, page.error.as_deref());
+    let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };
+    if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
+      actions.push(Action::References(targets.clone()));
+    }
+    stop_button(ui, page.running_here(), actions);
+    ui.label(small("Scenes can be drawn without reference images, from the descriptions alone, but the performer will drift from shot to shot."));
+    next_button(ui, Stage::Scenes, page.project.brief.is_some(), actions);
+  });
+}
+
+// --- Scenes ----------------------------------------------------------------------------------
+
+fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  column_wide(ui, stage, "scenes", |ui| {
+    heading(ui, Stage::Scenes, "Scene planning", "The film cut into scenes on the beat, each with its opening frame. Pick one to edit it.");
+    if page.project.shots.is_empty() {
+      empty(ui, Icon::Film, "No scenes yet", "Planning cuts the song into scenes on its beats and has the writer describe each one.");
+      return;
+    }
+    scene_grid(page, ui, env.cache, false);
+  });
+  let slots = page.project.grid.as_ref().map_or(0, |grid| plan::slots(grid, &page.project.sections, page.project.pace).len());
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_none()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = (0..page.project.shots.len()).collect();
+  let targets = if missing.is_empty() { all } else { missing };
+  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro });
+  let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro: page.pro });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let planned = !page.project.shots.is_empty();
+  let drawn = page.project.shots.iter().any(|s| s.still.is_some());
+  let mut changed = false;
+  panel(ui, panel_rect, "Scenes", "Planning again replaces the scenes and their stills.", |ui| {
+    field(ui, "Pace");
+    if let Some(i) = segmented(ui, &Pace::ALL.map(Pace::label), Pace::ALL.iter().position(|p| *p == page.project.pace).unwrap_or(1)) {
+      page.project.pace = Pace::ALL[i];
+      changed = true;
+    }
+    ui.label(small(&format!("{slots} scenes at this pace. Faster pacing means more scenes, so more stills and clips to pay for.")));
+    writer_choice(ui, &mut page.writer);
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::List, if planned { "Plan again" } else { "Plan the scenes" }, Some(A_CENT.to_owned()), page.project.brief.is_some() && page.project.grid.is_some() && !busy, None) {
+      actions.push(Action::Plan);
+    }
+    if planned {
+      field(ui, "Stills");
+      picture_model(ui, &mut page.pro);
+      let label = if drawn && targets.len() == page.project.shots.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} still{}", targets.len(), plural(targets.len())) };
+      if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
+        actions.push(Action::Stills(targets.clone()));
+      }
+      stop_button(ui, page.running_here(), actions);
+    }
+    if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
+      let shot = &mut page.project.shots[index];
+      field(ui, &format!("Scene {} \u{b7} {}", index + 1, shot.slot.section));
+      if !shot.slot.lyric.is_empty() {
+        ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
+      }
+      ui.label(label("Opening frame"));
+      let before = (shot.image.clone(), shot.motion.clone());
+      prompt_field(ui, "mv-scene-image", &mut shot.image, "Who or what is in the frame, the framing, the place and the light");
+      ui.add_space(6.0);
+      ui.label(label("What moves"));
+      prompt_field(ui, "mv-scene-motion", &mut shot.motion, "The performer's movement and the camera's");
+      changed |= before != (shot.image.clone(), shot.motion.clone());
+      if let Some(error) = &shot.error {
+        error_line(ui, Some(error));
+      }
+      if run_button(ui, Icon::RotateCw, "Draw this still", one.map(estimate), !busy && !shot.image.trim().is_empty(), None) {
+        actions.push(Action::Stills(vec![index]));
+      }
+    }
+    next_button(ui, Stage::Shots, drawn, actions);
+  });
+  if changed {
+    page.touch(ui);
+  }
+}
+
+// --- Shots -----------------------------------------------------------------------------------
+
+fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  let selected_clip = page.selected.and_then(|i| page.project.shots.get(i)).and_then(|s| s.clip.clone());
+  let mut grid_area = stage;
+  if let Some(clip) = &selected_clip {
+    // The picked scene's clip plays above the grid.
+    let screen = Rect::from_min_max(stage.min, pos2(stage.right(), stage.top() + (stage.height() * 0.45).min(360.0))).shrink(12.0);
+    play(page, ui, screen, clip);
+    grid_area = Rect::from_min_max(pos2(stage.left(), screen.bottom()), stage.max);
+  }
+  column_wide(ui, grid_area, "shots", |ui| {
+    heading(ui, Stage::Shots, "Video clips", "Veo animates each scene from its still, silent, a little longer than its slot; the final cut trims it to the beat.");
+    scene_grid(page, ui, env.cache, true);
+  });
+  let whole = page.whole_clips_of();
+  let with_still = page.project.shots.iter().filter(|s| s.still.is_some()).count();
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_some() && s.clip.is_none()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.still.is_some()).map(|(i, _)| i).collect();
+  let only_missing = !missing.is_empty();
+  let targets = if only_missing { missing } else { all };
+  let resolution = RESOLUTIONS[page.resolution].to_owned();
+  let seconds = page.project.seconds_to_generate(only_missing, whole);
+  let cost = env.backend.estimate_song(&SongEstimate::Clips { seconds, tier: TIERS[page.tier], resolution: resolution.clone() });
+  let line = page.progress_line().filter(|_| page.running_here());
+  let made = page.project.shots.iter().filter(|s| s.clip.is_some()).count();
+  panel(ui, panel_rect, "Shots", "The most expensive stage: check the estimate before you run it. Try a few scenes first by picking one and making just its clip.", |ui| {
+    field(ui, "Model");
+    if let Some(i) = segmented(ui, &TIERS.map(|tier| tier.label()), page.tier) {
+      page.tier = i;
+    }
+    field(ui, "Resolution");
+    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution) {
+      page.resolution = i;
+    }
+    ui.label(small(if whole.is_some() { "Veo makes 1080p only as 8-second clips, so every scene costs 8 seconds whatever its length." } else { "Clips are 4, 6 or 8 seconds: the shortest that covers the scene." }));
+    ui.add_space(4.0);
+    ui.label(small(&format!("{made} of {with_still} clips made \u{b7} {seconds} s of video to generate")));
+    error_line(ui, page.error.as_deref());
+    let label = if only_missing { format!("Make {} clip{}", targets.len(), plural(targets.len())) } else { format!("Make all {} again", targets.len()) };
+    if run_button(ui, Icon::Video, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
+      actions.push(Action::Clips(targets.clone()));
+    }
+    stop_button(ui, page.running_here(), actions);
+    if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
+      let shot = &page.project.shots[index];
+      field(ui, &format!("Scene {} \u{b7} {:.1} s", index + 1, shot.slot.seconds()));
+      ui.label(body(&shot.motion));
+      if let Some(error) = &shot.error {
+        error_line(ui, Some(error));
+      }
+      let clip_seconds = u32::from(whole.unwrap_or_else(|| plan::clip_seconds(shot.slot.seconds())));
+      let one = env.backend.estimate_song(&SongEstimate::Clips { seconds: clip_seconds, tier: TIERS[page.tier], resolution: resolution.clone() });
+      if run_button(ui, Icon::RotateCw, if shot.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), !busy && shot.still.is_some(), None) {
+        actions.push(Action::Clips(vec![index]));
+      }
+    }
+    next_button(ui, Stage::Final, made > 0, actions);
+  });
+}
+
+// --- Final Video -----------------------------------------------------------------------------
+
+fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+  let busy = page.busy();
+  match page.project.cut.clone() {
+    Some(cut) => play(page, ui, stage.shrink(12.0), &cut),
+    None => column(ui, stage, "final", |ui| {
+      heading(ui, Stage::Final, "Final video", "Every clip trimmed to its scene, joined in order and laid under the song.");
+      empty(ui, Icon::Film, "Not cut yet", "Cutting runs on your Mac with FFmpeg and costs nothing, so cut as often as you like.");
+    }),
+  }
+  let stills_held = page.project.shots.iter().filter(|s| s.clip.is_none() && s.still.is_some()).count();
+  let blank = page.project.shots.iter().filter(|s| s.clip.is_none() && s.still.is_none()).count();
+  let line = page.progress_line().filter(|_| page.running_here());
+  let mut changed = false;
+  let _ = env;
+  panel(ui, panel_rect, "Final Video", "The film is saved to your library, where it can go on to FilmCraft or Edit Video.", |ui| {
+    field(ui, "Finish");
+    if let Some(i) = segmented(ui, &Grade::ALL.map(Grade::label), Grade::ALL.iter().position(|g| *g == page.project.grade).unwrap_or(0)) {
+      page.project.grade = Grade::ALL[i];
+      changed = true;
+    }
+    ui.label(small("Applied to every shot when the film is cut, so clips from different generations sit together."));
+    field(ui, "Resolution");
+    if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution) {
+      page.resolution = i;
+    }
+    if blank > 0 {
+      ui.add_space(6.0);
+      ui.label(egui::RichText::new(format!("{blank} scene{} no still or clip yet. Draw {} on the Scenes stage first.", if blank == 1 { " has" } else { "s have" }, if blank == 1 { "it" } else { "them" })).size(12.0).color(theme::BAD));
+    } else if stills_held > 0 {
+      ui.add_space(6.0);
+      ui.label(small(&format!("{stills_held} scene{} without a clip will hold on {} still.", plural(stills_held), if stills_held == 1 { "its" } else { "their" })));
+    }
+    error_line(ui, page.error.as_deref());
+    if run_button(ui, Icon::Film, if page.project.cut.is_some() { "Cut it again" } else { "Cut the film" }, Some("Free".to_owned()), blank == 0 && page.project.cut_shots().is_some() && !busy, line.as_deref()) {
+      actions.push(Action::Cut);
+    }
+    if let Some(cut) = &page.project.cut {
+      ui.add_space(10.0);
+      if secondary(ui, Icon::Folder, "Show the file", true) {
+        actions.push(Action::Reveal(cut.clone()));
+      }
+    }
+  });
+  if changed {
+    page.touch(ui);
+  }
+}
+
+// --- Shared pieces ---------------------------------------------------------------------------
+
+/// The scenes as a grid of cards: the still (or a placeholder), the scene's number, time and
+/// section, and its beat. With `clips`, a badge says whether the clip has been made.
+fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, clips: bool) {
+  let (columns, width) = grid_columns(ui.available_width(), CARD_MIN_WIDTH);
+  let picture = match page.project.aspect {
+    Aspect::Wide => vec2(width, width * 9.0 / 16.0),
+    Aspect::Tall => vec2(width, width * 1.2),
+  };
+  let mut picked = None;
+  for row in 0..page.project.shots.len().div_ceil(columns) {
+    ui.horizontal_top(|ui| {
+      ui.spacing_mut().item_spacing.x = CARD_GAP;
+      for index in row * columns..((row + 1) * columns).min(page.project.shots.len()) {
+        let shot = &page.project.shots[index];
+        let (rect, resp) = ui.allocate_exact_size(picture + vec2(0.0, CARD_TEXT_HEIGHT), Sense::click());
+        if !ui.is_rect_visible(rect) {
+          continue;
+        }
+        let image = Rect::from_min_size(rect.min, picture);
+        thumbnail(ui, image, cache, shot.still.as_deref(), Icon::Image);
+        let selected = page.selected == Some(index);
+        if selected || resp.hovered() {
+          ui.painter().rect_stroke(image, theme::RADIUS, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { theme::ACCENT } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
+        }
+        if let Some(error) = &shot.error {
+          failed_badge(ui, image, error);
+        } else if clips && shot.clip.is_some() {
+          badge(ui, image, Icon::Play, theme::ACCENT);
+        }
+        let text = Rect::from_min_max(pos2(rect.left(), image.bottom() + 6.0), rect.max);
+        let caption = format!("{} \u{b7} {} \u{b7} {:.1}s", index + 1, format_time(shot.slot.start as f32), shot.slot.seconds());
+        ui.painter().text(text.left_top(), Align2::LEFT_TOP, caption, FontId::new(11.0, theme::mono()), theme::MUTED);
+        ui.painter().text(text.right_top(), Align2::RIGHT_TOP, &shot.slot.section, FontId::new(11.0, theme::mono()), theme::FAINT);
+        let line = if shot.beat.is_empty() { &shot.image } else { &shot.beat };
+        let galley = ui.painter().layout(line.clone(), FontId::new(12.5, egui::FontFamily::Proportional), theme::INK, text.width());
+        ui.painter().with_clip_rect(text).galley(text.left_top() + vec2(0.0, 16.0), galley, theme::INK);
+        if resp.on_hover_text(&shot.image).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+          picked = Some(index);
+        }
+      }
+    });
+    ui.add_space(CARD_GAP);
+  }
+  if let Some(index) = picked {
+    if page.selected != Some(index) {
+      page.player = None;
+    }
+    page.selected = Some(index);
+  }
+}
+
+/// Plays the file at `path` in `rect`, keeping one player for the page.
+fn play(page: &mut MusicVideoPage, ui: &mut Ui, rect: Rect, path: &Path) {
+  let url = file_url(path);
+  if page.player.as_ref().is_none_or(|player| player.url() != url) {
+    page.player = Some(VideoPlayer::new(&url));
+  }
+  if let Some(player) = &mut page.player {
+    player.ui(ui, rect, None);
+  }
+}
+
+/// A picture's small copy fitted into `rect`, or a placeholder icon while there's none.
+fn thumbnail(ui: &mut Ui, rect: Rect, cache: &mut MediaCache, picture: Option<&Path>, placeholder: Icon) {
+  ui.painter().rect(rect, theme::RADIUS, theme::SUNKEN, theme::hairline(), egui::StrokeKind::Inside);
+  let Some(path) = picture else {
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(22.0, 22.0)), placeholder, theme::FAINT);
+    return;
+  };
+  let small = thumb_path(path);
+  let url = file_url(if small.exists() { &small } else { path });
+  match cache.get(ui.ctx(), &url) {
+    Lookup::Ready(texture) => {
+      let size = fit_inside(texture.size_vec2(), rect.shrink(1.0).size());
+      egui::Image::new(&texture).paint_at(ui, Rect::from_center_size(rect.center(), size));
+    },
+    Lookup::Loading => icons::paint_spinner(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), theme::MUTED),
+    Lookup::Failed => icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(22.0, 22.0)), Icon::AlertCircle, theme::BAD),
+  }
+}
+
+fn badge(ui: &Ui, picture: Rect, icon: Icon, fill: Color32) {
+  let dot = Rect::from_center_size(picture.right_top() + vec2(-16.0, 16.0), vec2(22.0, 22.0));
+  ui.painter().circle_filled(dot.center(), 11.0, fill);
+  icons::paint(ui.painter(), dot.shrink(6.0), icon, Color32::WHITE);
+}
+
+fn failed_badge(ui: &mut Ui, picture: Rect, error: &str) {
+  badge(ui, picture, Icon::AlertCircle, theme::DANGER);
+  let dot = Rect::from_center_size(picture.right_top() + vec2(-16.0, 16.0), vec2(22.0, 22.0));
+  ui.interact(dot, ui.id().with(("mv-failed", picture.min.x as i32, picture.min.y as i32)), Sense::hover()).on_hover_text(error);
+}
+
+/// How many cards fit across `available`, and how wide each is.
+fn grid_columns(available: f32, min_width: f32) -> (usize, f32) {
+  let columns = (((available + CARD_GAP) / (min_width + CARD_GAP)).floor() as usize).max(1);
+  (columns, (available - CARD_GAP * (columns - 1) as f32) / columns as f32)
+}
+
+/// The middle column, scrolling, at a comfortable reading width.
+fn column(ui: &mut Ui, rect: Rect, id: &str, body_ui: impl FnOnce(&mut Ui)) {
+  scroll(ui, rect, id, TEXT_COLUMN, body_ui);
+}
+
+/// The middle column at full width, for grids.
+fn column_wide(ui: &mut Ui, rect: Rect, id: &str, body_ui: impl FnOnce(&mut Ui)) {
+  scroll(ui, rect, id, f32::INFINITY, body_ui);
+}
+
+fn scroll(ui: &mut Ui, rect: Rect, id: &str, max_width: f32, body_ui: impl FnOnce(&mut Ui)) {
+  let inner = rect.shrink2(vec2(24.0, 20.0));
+  let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+  egui::ScrollArea::vertical().id_salt(("mv-stage", id)).auto_shrink([false, false]).show(&mut child, |ui| {
+    ui.set_width((inner.width() - 12.0).min(max_width));
+    body_ui(ui);
+    ui.add_space(12.0);
+  });
+}
+
+/// A stage's number, title and one-line explanation.
+fn heading(ui: &mut Ui, stage: Stage, title: &str, blurb: &str) {
+  widgets::hud(ui, &format!("{:02} / {}", stage.number(), stage.label()), theme::FAINT);
+  ui.add_space(6.0);
+  ui.label(widgets::heading(title, 30.0));
+  ui.add_space(4.0);
+  ui.label(egui::RichText::new(blurb).size(13.5).color(theme::MUTED));
+  ui.add_space(16.0);
+}
+
+/// A bordered block with a small label over its content.
+fn card(ui: &mut Ui, title: String, content: impl FnOnce(&mut Ui)) {
+  egui::Frame::new().fill(theme::WASH).stroke(theme::hairline()).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
+    ui.set_width(ui.available_width());
+    widgets::hud(ui, &title, theme::FAINT);
+    ui.add_space(6.0);
+    content(ui);
+  });
+  ui.add_space(CARD_GAP);
+}
+
+fn text_card(ui: &mut Ui, title: &str, text: &str) {
+  if !text.trim().is_empty() {
+    card(ui, title.to_owned(), |ui| {
+      ui.label(body(text));
+    });
+  }
+}
+
+/// The splash a stage shows before it has anything.
+fn empty(ui: &mut Ui, icon: Icon, title: &str, text: &str) {
+  let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 170.0), Sense::hover());
+  ui.painter().rect(rect, theme::RADIUS, theme::fade(theme::INK, 0.015), egui::Stroke::new(1.0, theme::LINE_DASHED), egui::StrokeKind::Inside);
+  widgets::corner_marks(ui.painter(), rect);
+  icons::paint(ui.painter(), Rect::from_center_size(rect.center() - vec2(0.0, 40.0), vec2(24.0, 24.0)), icon, theme::MUTED);
+  ui.painter().text(rect.center() - vec2(0.0, 4.0), Align2::CENTER_CENTER, title, FontId::new(20.0, theme::display()), theme::INK);
+  let galley = ui.painter().layout(text.to_owned(), FontId::new(13.0, egui::FontFamily::Proportional), theme::MUTED, (rect.width() - 80.0).min(460.0));
+  ui.painter().galley(pos2(rect.center().x - galley.size().x / 2.0, rect.center().y + 16.0), galley, theme::MUTED);
+}
+
+/// A multi-line editor in a sunken box; returns whether the text changed.
+fn text_box(ui: &mut Ui, id: &str, text: &mut String, hint: &str, rows: usize) -> bool {
+  let mut changed = false;
+  egui::Frame::new().fill(theme::SUNKEN).stroke(theme::hairline()).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+    changed = ui.add(egui::TextEdit::multiline(text).id_salt(id).frame(egui::Frame::NONE).desired_rows(rows).desired_width(f32::INFINITY).font(FontId::new(14.5, egui::FontFamily::Proportional)).hint_text(egui::RichText::new(hint).color(theme::FAINT))).changed();
+  });
+  changed
+}
+
+fn writer_choice(ui: &mut Ui, writer: &mut Writer) {
+  field(ui, "Writer");
+  if let Some(i) = segmented(ui, &Writer::ALL.map(Writer::label), Writer::ALL.iter().position(|w| w == writer).unwrap_or(0)) {
+    *writer = Writer::ALL[i];
+  }
+}
+
+fn picture_model(ui: &mut Ui, pro: &mut bool) {
+  field(ui, "Image model");
+  if let Some(i) = segmented(ui, &["Nano Banana 2", "Nano Banana Pro"], usize::from(*pro)) {
+    *pro = i == 1;
+  }
+  ui.label(small(if *pro { "Pro holds a face and outfit better across many pictures, at about twice the price." } else { "Fast and cheap. Switch to Pro if the performer drifts between pictures." }));
+}
+
+/// A stage's main button with what it costs beside it, and the run's progress line while it's
+/// working. Returns `true` when clicked.
+fn run_button(ui: &mut Ui, icon: Icon, text: &str, cost: Option<String>, enabled: bool, progress: Option<&str>) -> bool {
+  ui.add_space(12.0);
+  let mut clicked = false;
+  // Wrapped, so a long label's cost drops to the next line instead of running off the panel.
+  ui.horizontal_wrapped(|ui| {
+    let working = progress.is_some();
+    clicked = ui.add_enabled_ui(enabled && !working, |ui| widgets::button(ui, Some(icon), if working { "Working\u{2026}" } else { text }, widgets::Kind::Accent, 0.0, theme::CONTROL_H)).inner.clicked();
+    if working {
+      let (spinner, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+      icons::paint_spinner(ui, spinner, theme::MUTED);
+    } else if let Some(cost) = cost {
+      ui.add_space(6.0);
+      ui.label(egui::RichText::new(cost).size(12.5).family(theme::mono()).color(theme::MUTED)).on_hover_text("Estimated at list prices; billed to your own account");
+    }
+  });
+  if let Some(line) = progress {
+    ui.add_space(4.0);
+    ui.label(small(line));
+  }
+  clicked
+}
+
+fn secondary(ui: &mut Ui, icon: Icon, text: &str, enabled: bool) -> bool {
+  ui.add_enabled_ui(enabled, |ui| widgets::button(ui, Some(icon), text, widgets::Kind::Secondary, 0.0, 30.0)).inner.clicked()
+}
+
+fn stop_button(ui: &mut Ui, running: bool, actions: &mut Vec<Action>) {
+  if running {
+    ui.add_space(8.0);
+    if widgets::button(ui, Some(Icon::X), "Stop", widgets::Kind::Secondary, 0.0, 30.0).on_hover_text("Stops before the next one starts; the ones in flight finish and are billed").clicked() {
+      actions.push(Action::Stop);
+    }
+  }
+}
+
+fn next_button(ui: &mut Ui, next: Stage, enabled: bool, actions: &mut Vec<Action>) {
+  ui.add_space(18.0);
+  ui.separator();
+  ui.add_space(10.0);
+  let clicked = ui.add_enabled_ui(enabled, |ui| widgets::button(ui, Some(Icon::ChevronRight), &format!("Next: {}", next.label()), widgets::Kind::Primary, 0.0, theme::CONTROL_H)).inner.clicked();
+  if clicked {
+    actions.push(Action::Go(next));
+  }
+}
+
+fn error_line(ui: &mut Ui, error: Option<&str>) {
+  if let Some(error) = error {
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new(error).size(12.0).color(theme::BAD));
+  }
+}
+
+fn chip(ui: &mut Ui, text: &str) {
+  let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::new(11.5, theme::mono()), theme::MUTED);
+  let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(16.0, 8.0), Sense::hover());
+  ui.painter().rect(rect, 99.0, theme::WASH, theme::hairline(), egui::StrokeKind::Inside);
+  ui.painter().galley(rect.center() - galley.size() / 2.0, galley, theme::MUTED);
+}
+
+fn label(text: &str) -> egui::RichText {
+  egui::RichText::new(text).size(12.0).family(theme::medium()).color(theme::MUTED)
+}
+
+fn body(text: &str) -> egui::RichText {
+  egui::RichText::new(text).size(13.5).color(theme::INK)
+}
+
+fn small(text: &str) -> egui::RichText {
+  egui::RichText::new(text).size(12.0).color(theme::FAINT)
+}
+
+fn estimate(cost: f64) -> String {
+  format!("\u{2248} {}", usd(cost))
+}
+
+fn plural(n: usize) -> &'static str {
+  if n == 1 {
+    ""
+  } else {
+    "s"
+  }
+}
+
+fn energy_colour(energy: Energy) -> Color32 {
+  match energy {
+    Energy::Low => theme::fade(theme::ACCENT_400, 0.45),
+    Energy::Medium => theme::fade(theme::ACCENT_400, 0.75),
+    Energy::High => theme::ACCENT_INK,
+  }
+}
+
+/// A `#rrggbb` swatch as a colour (mid-grey when it isn't one).
+fn colour(hex: &str) -> Color32 {
+  let digits = hex.trim_start_matches('#');
+  match (digits.len(), u32::from_str_radix(digits, 16)) {
+    (6, Ok(rgb)) => Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8),
+    _ => Color32::GRAY,
+  }
+}
+
+/// The date of an RFC 3339 timestamp (`2026-11-05`).
+fn day(timestamp: &str) -> &str {
+  timestamp.get(..10).unwrap_or(timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn cards_fill_the_width_evenly() {
+    let (columns, width) = grid_columns(900.0, 210.0);
+    assert_eq!(columns, 4);
+    assert!((width * 4.0 + CARD_GAP * 3.0 - 900.0).abs() < 0.01);
+    assert_eq!(grid_columns(100.0, 210.0).0, 1);
+  }
+
+  #[test]
+  fn swatches_and_dates_read_what_theyre_given() {
+    assert_eq!(colour("#0a0b0c"), Color32::from_rgb(10, 11, 12));
+    assert_eq!(colour("nonsense"), Color32::GRAY);
+    assert_eq!(day("2026-11-05T19:04:00+00:00"), "2026-11-05");
+    assert_eq!(day("soon"), "soon");
+  }
+}

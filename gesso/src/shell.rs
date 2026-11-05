@@ -37,6 +37,7 @@ pub enum Page {
   VideoEditor,
   RemoveBackground,
   FrameExtractor,
+  MusicVideo,
   Library,
 }
 
@@ -54,6 +55,7 @@ impl Page {
       Page::VideoEditor => "Edit Video",
       Page::RemoveBackground => "BG Remove",
       Page::FrameExtractor => "Frame Extract",
+      Page::MusicVideo => "Music Video",
       Page::Library => "Library",
     }
   }
@@ -69,6 +71,7 @@ impl Page {
       Page::EditImage => Icon::Pencil,
       Page::VideoEditor | Page::FrameExtractor => Icon::Film,
       Page::RemoveBackground => Icon::Wand,
+      Page::MusicVideo => Icon::Drum,
       Page::Library => Icon::Library,
     }
   }
@@ -96,6 +99,7 @@ impl Page {
       "remove-background" | "bg-remove" => Page::RemoveBackground,
       "frame-extractor" | "frames" => Page::FrameExtractor,
       "3d-stage" | "stage" => Page::Stage3d,
+      "music-video" | "song-video" => Page::MusicVideo,
       _ => return None,
     })
   }
@@ -103,7 +107,7 @@ impl Page {
   /// Pages the native app has; the rest open a "coming soon" page.
   pub fn is_ready(self) -> bool {
     // The tool pages run on the local engine (this fork's default mode).
-    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor | Page::Stage3d)
+    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor | Page::Stage3d | Page::MusicVideo)
   }
 
   /// The same tool in the web app.
@@ -124,7 +128,7 @@ impl Page {
   }
 }
 
-const SECTIONS: [(&str, &[Page]); 3] = [("Create", &[Page::CreateImage, Page::CreateVideo, Page::CreateAudio, Page::Object3d, Page::World3d]), ("Studio", &[Page::EditImage, Page::Stage3d, Page::VideoEditor, Page::RemoveBackground, Page::FrameExtractor]), ("Assets", &[Page::Library])];
+const SECTIONS: [(&str, &[Page]); 3] = [("Create", &[Page::CreateImage, Page::CreateVideo, Page::CreateAudio, Page::Object3d, Page::World3d]), ("Studio", &[Page::EditImage, Page::Stage3d, Page::VideoEditor, Page::RemoveBackground, Page::FrameExtractor, Page::MusicVideo]), ("Assets", &[Page::Library])];
 
 /// Who's signed in, for the sidebar and top bar.
 pub struct Account<'a> {

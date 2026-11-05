@@ -14,12 +14,15 @@ pub mod jev;
 pub mod library;
 pub mod pricing;
 pub mod router;
+pub mod song;
 pub mod spend;
 pub mod suite;
 pub mod tools;
 pub mod vertex;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -91,6 +94,8 @@ pub struct LocalEngine {
   suite: SuiteLocator,
   /// `~/Artcraft`: the inbox and PhotoCraft's control token live under it.
   data_root: PathBuf,
+  /// Music Video runs in flight, each with the flag that stops it.
+  song_runs: Mutex<HashMap<u64, Arc<AtomicBool>>>,
 }
 
 impl LocalEngine {
@@ -106,7 +111,7 @@ impl LocalEngine {
     let spend = SpendLedger::load(library.dir());
     let remover = BackgroundRemover::new(data_root, http.clone());
     let suite = SuiteLocator::new(config.suite_dir.as_deref(), &config.suite_apps);
-    Self { suite, data_root: data_root.to_path_buf(), remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
+    Self { song_runs: Mutex::new(HashMap::new()), suite, data_root: data_root.to_path_buf(), remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
   }
 
   /// Who the app shows as signed in.

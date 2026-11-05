@@ -108,6 +108,11 @@ pub enum Event {
     tool_id: u64,
     result: Result<Vec<MediaFile>, String>,
   },
+  /// Local mode: news from a Music Video run (a stage's result, a finished still, the end).
+  Song {
+    run_id: u64,
+    update: local::song::SongUpdate,
+  },
   /// Local mode: files another Craft app sent arrived in the library.
   InboxImported {
     count: usize,
@@ -263,6 +268,33 @@ impl Backend {
     };
     let _guard = self.rt.enter();
     local.start_tool(tool_id, request, self.tx.clone(), self.ctx.clone());
+  }
+
+  /// Runs a Music Video stage on the local engine; the page hears back by `run_id`.
+  pub fn run_song(&self, run_id: u64, request: local::song::SongRequest) {
+    let Some(local) = &self.local else {
+      let _ = self.tx.send(Event::Song { run_id, update: local::song::SongUpdate::Done(Err("Music Video runs in local mode only.".to_owned())) });
+      return;
+    };
+    let _guard = self.rt.enter();
+    local.start_song(run_id, request, self.tx.clone(), self.ctx.clone());
+  }
+
+  /// Stops a Music Video run before its next still or clip.
+  pub fn cancel_song(&self, run_id: u64) {
+    if let Some(local) = &self.local {
+      local.cancel_song(run_id);
+    }
+  }
+
+  /// What a Music Video stage would cost at list prices (local mode).
+  pub fn estimate_song(&self, estimate: &local::song::SongEstimate) -> Option<f64> {
+    self.local.as_ref().map(|l| l.estimate_song(estimate))
+  }
+
+  /// In local mode, the library's folder (Music Video projects are kept under it).
+  pub fn library_dir(&self) -> Option<PathBuf> {
+    self.local.as_ref().map(|l| l.library().dir().to_path_buf())
   }
 
   /// Sends library files to another Craft app; the outcome comes back as a toast.

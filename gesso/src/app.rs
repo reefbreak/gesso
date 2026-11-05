@@ -25,6 +25,7 @@ use crate::pages::tools::bg_remove::BgRemovePage;
 use crate::pages::tools::edit_image::EditImagePage;
 use crate::pages::tools::edit_video::EditVideoPage;
 use crate::pages::tools::frames::FrameExtractPage;
+use crate::pages::tools::music_video::MusicVideoPage;
 use crate::pages::tools::stage::StagePage;
 use crate::overlays::lightbox::{Lightbox, LightboxAction, fit_inside};
 use crate::overlays::providers::{AccountAction, AccountsView, LoginEvent, MidjourneyLogin, SetupAction, setup_dialog};
@@ -92,6 +93,7 @@ pub struct ArtcraftApp {
   edit_image: EditImagePage,
   edit_video: EditVideoPage,
   stage: StagePage,
+  music_video: MusicVideoPage,
   page: Page,
   enter_to_generate: bool,
   view_mode: ViewMode,
@@ -159,6 +161,7 @@ impl ArtcraftApp {
       edit_image: EditImagePage::default(),
       edit_video: EditVideoPage::default(),
       stage: StagePage::default(),
+      music_video: MusicVideoPage::from_env(),
       page: saved.page,
       enter_to_generate: saved.enter_to_generate,
       view_mode: saved.view_mode,
@@ -254,6 +257,19 @@ impl ArtcraftApp {
           None => format!("{what} added to your library from the inbox"),
         });
         self.library.reset();
+      },
+      Event::Song { run_id, update } => {
+        if let Some(notice) = self.music_video.on_update(&self.backend, run_id, update) {
+          if notice.error {
+            self.toasts.error(notice.message);
+          } else if !notice.message.is_empty() {
+            self.toasts.success(notice.message);
+          }
+          if notice.library_changed {
+            // The library feed shows the new file next time it loads.
+            self.library.reset();
+          }
+        }
       },
       Event::ToolFinished { tool_id, result } => {
         if let Err(message) = &result {
@@ -732,6 +748,7 @@ impl ArtcraftApp {
             Page::EditImage if env.backend.is_local() => self.edit_image.ui(ui, &mut env),
             Page::VideoEditor if env.backend.is_local() => self.edit_video.ui(ui, &mut env),
             Page::Stage3d if env.backend.is_local() => self.stage.ui(ui, &mut env),
+            Page::MusicVideo if env.backend.is_local() => self.music_video.ui(ui, &mut env),
             page => other::coming_soon(ui, page),
           }
         });

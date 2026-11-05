@@ -1,4 +1,5 @@
-//! AWS Bedrock, with the user's own account: the Stability image models through `InvokeModel`.
+//! AWS Bedrock, with the user's own account: the Stability image models through `InvokeModel`,
+//! and Claude through `Converse` (the Music Video page's writer).
 //!
 //! Credentials come from the AWS SDK's usual chain (environment, `~/.aws` profiles and SSO,
 //! instance roles) or a Bedrock API key in `AWS_BEARER_TOKEN_BEDROCK`. Amazon's Nova Canvas and
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::primitives::Blob;
+use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, InferenceConfiguration, Message, SystemContentBlock};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
@@ -19,6 +21,10 @@ use super::config::LocalConfig;
 
 /// How strongly an image-to-image result departs from its reference (0 keeps it, 1 ignores it).
 const IMAGE_TO_IMAGE_STRENGTH: f32 = 0.65;
+/// Claude on Bedrock, through the global inference profile. `song_claude_model` overrides it.
+pub const DEFAULT_CLAUDE_MODEL: &str = "global.anthropic.claude-sonnet-4-6";
+/// A shot list for a whole song fits in this many tokens.
+const CONVERSE_MAX_TOKENS: i32 = 16_000;
 
 /// One Stability request (one image comes back per call).
 pub struct StabilityRequest<'a> {
@@ -27,6 +33,14 @@ pub struct StabilityRequest<'a> {
   /// `16:9` etc.; ignored with a reference image.
   pub aspect_ratio: Option<&'a str>,
   pub image: Option<&'a RefImage>,
+}
+
+/// A Claude reply and the tokens Bedrock billed for it.
+#[derive(Debug)]
+pub struct ConverseReply {
+  pub text: String,
+  pub input_tokens: u64,
+  pub output_tokens: u64,
 }
 
 #[derive(Clone)]
@@ -56,6 +70,19 @@ impl BedrockClient {
     let output = client.invoke_model().model_id(model_id).content_type("application/json").accept("application/json").body(Blob::new(serde_json::to_vec(&body)?)).send().await.map_err(|err| anyhow::anyhow!("Bedrock error: {}", aws_sdk_bedrockruntime::error::DisplayErrorContext(err)))?;
     let response: Value = serde_json::from_slice(output.body.as_ref())?;
     first_image(&response)
+  }
+
+  /// Asks a text model (Claude) through the Converse API.
+  pub async fn converse(&self, model: &str, system: &str, prompt: &str, temperature: f32) -> anyhow::Result<ConverseReply> {
+    let client = self.client().await;
+    let message = Message::builder().role(ConversationRole::User).content(ContentBlock::Text(prompt.to_owned())).build()?;
+    let inference = InferenceConfiguration::builder().temperature(temperature).max_tokens(CONVERSE_MAX_TOKENS).build();
+    let output = client.converse().model_id(model).system(SystemContentBlock::Text(system.to_owned())).messages(message).inference_config(inference).send().await.map_err(|err| anyhow::anyhow!("Bedrock error: {}", aws_sdk_bedrockruntime::error::DisplayErrorContext(err)))?;
+    let text: String = output.output().and_then(|o| o.as_message().ok()).map(|m| m.content().iter().filter_map(|block| block.as_text().ok()).map(String::as_str).collect()).unwrap_or_default();
+    anyhow::ensure!(!text.trim().is_empty(), "{model} returned no text ({})", output.stop_reason().as_str());
+    let count = |n: i32| u64::try_from(n).unwrap_or(0);
+    let (input_tokens, output_tokens) = output.usage().map_or((0, 0), |u| (count(u.input_tokens()), count(u.output_tokens())));
+    Ok(ConverseReply { text, input_tokens, output_tokens })
   }
 
   async fn client(&self) -> &Client {

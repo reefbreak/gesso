@@ -1,6 +1,6 @@
-//! Google Vertex AI, with the user's own project: Gemini image models (`generateContent`), Veo
-//! (`predictLongRunning` + `fetchPredictOperation`), and Gemini Omni Flash video edits (the
-//! Interactions API, `v1beta1/.../interactions`).
+//! Google Vertex AI, with the user's own project: Gemini image and text models
+//! (`generateContent`), Veo (`predictLongRunning` + `fetchPredictOperation`), and Gemini Omni
+//! Flash video edits and Lyria 3 songs (the Interactions API, `v1beta1/.../interactions`).
 //!
 //! Auth is Application Default Credentials (`gcloud auth application-default login`, a service
 //! account in `GOOGLE_APPLICATION_CREDENTIALS`, or the metadata server). With no project set, an
@@ -26,10 +26,22 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
 const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Veo jobs not done by then are given up on.
 const VIDEO_GIVE_UP: Duration = Duration::from_secs(20 * 60);
+/// A song made without polling comes back on the request itself.
+const SONG_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Omni Flash's id on Vertex (the preview the Vertex samples use), then the Gemini API's GA id.
 pub const OMNI_MODELS: [&str; 2] = ["gemini-omni-1.1-flash-preview", "gemini-omni-1.1-flash"];
 /// Omni Flash is served from the global endpoint.
 const OMNI_LOCATION: &str = "global";
+/// Gemini's text models, newest first; the next is tried while Vertex says one isn't found.
+pub const TEXT_MODELS: [&str; 2] = ["gemini-3.8-flash", "gemini-3.5-flash"];
+/// Lyria's full-song models (songs with vocals, a couple of minutes long), newest first.
+pub const SONG_MODELS: [&str; 2] = ["lyria-3.5", "lyria-3-pro-preview"];
+/// Lyria's 30-second model.
+pub const SONG_CLIP_MODEL: &str = "lyria-3-clip-preview";
+/// A long reply (a shot list for a whole song) fits in this many tokens.
+const TEXT_MAX_OUTPUT_TOKENS: u32 = 32_768;
+/// A whole song inline, with the prompt, stays under `generateContent`'s request limit.
+const TEXT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One Gemini image request (one image comes back per call).
 pub struct GeminiImageRequest<'a> {
@@ -40,6 +52,36 @@ pub struct GeminiImageRequest<'a> {
   pub aspect_ratio: Option<&'a str>,
   /// `1K`, `2K`, `4K`, `512`.
   pub image_size: Option<&'a str>,
+}
+
+/// One request to a Gemini text model.
+pub struct TextRequest<'a> {
+  /// Tried in order while Vertex says a model isn't found.
+  pub models: &'a [&'a str],
+  pub system: &'a str,
+  pub prompt: &'a str,
+  /// A track for the model to listen to: its MIME type and bytes.
+  pub audio: Option<(&'a str, &'a [u8])>,
+  /// Ask for a JSON reply.
+  pub json: bool,
+  pub temperature: f32,
+}
+
+/// A text model's reply, the model that wrote it, and the tokens it reported.
+#[derive(Debug)]
+pub struct TextReply {
+  pub text: String,
+  pub model: String,
+  pub usage: Option<GeminiUsage>,
+}
+
+/// A Lyria 3 song: the audio, whatever text came with it (the lyrics as sung and the song's
+/// structure), and the model that made it.
+#[derive(Debug)]
+pub struct Song {
+  pub file: GeneratedFile,
+  pub text: String,
+  pub model: String,
 }
 
 /// One Omni Flash edit of a clip (at most 10 s).
@@ -91,21 +133,78 @@ impl VertexClient {
 
   /// Makes one image; an error explains a missing one (usually a safety block).
   pub async fn generate_image(&self, request: GeminiImageRequest<'_>) -> anyhow::Result<GeneratedFile> {
-    let body = gemini_image_body(&request);
-    let response = match (&self.config.gcp_project, &self.config.gcp_api_key) {
-      (Some(project), _) => {
-        let url = format!("{}v1/projects/{project}/locations/{}/publishers/google/models/{}:generateContent", self.host(&self.config.gcp_location), self.config.gcp_location, request.model);
-        self.post_with_token(&url, &body, IMAGE_TIMEOUT).await?
-      },
-      (None, Some(key)) => {
-        let url = format!("{}v1beta1/publishers/google/models/{}:generateContent", self.host("global"), request.model);
-        read_json(self.http.post(url).header("x-goog-api-key", key).json(&body).timeout(IMAGE_TIMEOUT).send().await?).await?
-      },
-      (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
-    };
+    let response = self.generate_content(request.model, &gemini_image_body(&request), IMAGE_TIMEOUT).await?;
     let mut file = first_image(&response)?;
     file.usage = usage(&response);
     Ok(file)
+  }
+
+  /// Asks a Gemini text model, which can also be given a track to listen to.
+  pub async fn generate_text(&self, request: TextRequest<'_>) -> anyhow::Result<TextReply> {
+    let body = text_body(&request);
+    let mut last_error = None;
+    for model in request.models {
+      match self.generate_content(model, &body, TEXT_TIMEOUT).await {
+        Ok(response) => return Ok(TextReply { text: reply_text(&response)?, model: (*model).to_owned(), usage: usage(&response) }),
+        Err(err) if is_not_found(&err) => {
+          info!("Text model {model} not found on Vertex; trying the next id");
+          last_error = Some(err);
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Gemini text model configured")))
+  }
+
+  /// Makes a song with Lyria 3 from a prompt that carries the music direction and the lyrics.
+  pub async fn generate_song(&self, models: &[&str], prompt: &str) -> anyhow::Result<Song> {
+    let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Lyria needs a Google Cloud project in local_providers.json"))?;
+    let base = format!("{}v1beta1/projects/{project}/locations/{OMNI_LOCATION}/interactions", self.host(OMNI_LOCATION));
+    let mut last_error = None;
+    for model in models {
+      // In the background and stored, like Omni Flash: Vertex only lets stored interactions be polled.
+      let mut sent = self.post_with_token(&base, &song_body(model, prompt, true), IMAGE_TIMEOUT).await;
+      if sent.as_ref().is_err_and(refuses_background) {
+        info!("{model} won't run in the background; waiting on the request instead");
+        sent = self.post_with_token(&base, &song_body(model, prompt, false), SONG_TIMEOUT).await;
+      }
+      match sent {
+        Ok(started) => {
+          let id = started.get("id").and_then(Value::as_str).map(str::to_owned);
+          let result = async {
+            let finished = self.wait_for_interaction(&base, started).await?;
+            let file = song_audio(&finished)?;
+            Ok(Song { file, text: interaction_text(&finished), model: (*model).to_owned() })
+          }
+          .await;
+          if let Some(id) = id {
+            self.delete_interaction(&base, &id).await;
+          }
+          return result;
+        },
+        Err(err) if is_not_found(&err) => {
+          info!("Music model {model} not found on Vertex; trying the next id");
+          last_error = Some(err);
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Lyria model configured")))
+  }
+
+  /// One `generateContent` call, with the project's credentials or an express-mode key.
+  async fn generate_content(&self, model: &str, body: &Value, timeout: Duration) -> anyhow::Result<Value> {
+    match (&self.config.gcp_project, &self.config.gcp_api_key) {
+      (Some(project), _) => {
+        let url = format!("{}v1/projects/{project}/locations/{}/publishers/google/models/{model}:generateContent", self.host(&self.config.gcp_location), self.config.gcp_location);
+        self.post_with_token(&url, body, timeout).await
+      },
+      (None, Some(key)) => {
+        let url = format!("{}v1beta1/publishers/google/models/{model}:generateContent", self.host("global"));
+        read_json(self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
+      },
+      (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
+    }
   }
 
   /// Starts a Veo job and waits for it, returning every video it made.
@@ -329,6 +428,76 @@ fn omni_body(model: &str, request: &OmniEditRequest<'_>) -> Value {
   })
 }
 
+/// A `generateContent` request for text: an optional track first, then the prompt.
+fn text_body(request: &TextRequest<'_>) -> Value {
+  let mut parts: Vec<Value> = Vec::new();
+  if let Some((mime_type, bytes)) = request.audio {
+    parts.push(json!({ "inlineData": { "mimeType": mime_type, "data": BASE64.encode(bytes) } }));
+  }
+  parts.push(json!({ "text": request.prompt }));
+  let mut generation = serde_json::Map::new();
+  generation.insert("temperature".into(), json!(request.temperature));
+  generation.insert("maxOutputTokens".into(), json!(TEXT_MAX_OUTPUT_TOKENS));
+  if request.json {
+    generation.insert("responseMimeType".into(), json!("application/json"));
+  }
+  json!({
+    "systemInstruction": { "parts": [{ "text": request.system }] },
+    "contents": [{ "role": "user", "parts": parts }],
+    "generationConfig": generation,
+  })
+}
+
+/// The text of a `generateContent` reply, without the model's thoughts.
+fn reply_text(response: &Value) -> anyhow::Result<String> {
+  let candidates = response.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+  let text: String = candidates.first().and_then(|c| c.pointer("/content/parts")).and_then(Value::as_array).into_iter().flatten().filter(|p| !p.get("thought").and_then(Value::as_bool).unwrap_or(false)).filter_map(|p| p.get("text").and_then(Value::as_str)).collect();
+  if !text.trim().is_empty() {
+    return Ok(text);
+  }
+  let reason = candidates.first().and_then(|c| c.get("finishReason")).and_then(Value::as_str).or_else(|| response.pointer("/promptFeedback/blockReason").and_then(Value::as_str));
+  anyhow::bail!("The model returned no text{}", reason.map(|r| format!(" ({r})")).unwrap_or_default())
+}
+
+/// The Interactions API request for a Lyria song.
+fn song_body(model: &str, prompt: &str, background: bool) -> Value {
+  let mut body = json!({ "model": model, "input": prompt });
+  if background {
+    body["background"] = json!(true);
+    body["store"] = json!(true);
+  }
+  body
+}
+
+/// Whether Vertex refused the request for asking to run in the background.
+fn refuses_background(err: &anyhow::Error) -> bool {
+  let text = err.to_string().to_ascii_lowercase();
+  text.contains("error 400") && text.contains("background")
+}
+
+/// Content blocks of `kind` (`audio`, `video`, `text`) in an interaction's model output.
+fn output_blocks<'a>(interaction: &'a Value, kind: &'a str) -> impl Iterator<Item = &'a Value> {
+  let steps = interaction.get("steps").and_then(Value::as_array).into_iter().flatten();
+  steps.filter(|s| s.get("type").and_then(Value::as_str).is_none_or(|t| t == "model_output")).flat_map(|s| s.get("content").and_then(Value::as_array).into_iter().flatten()).filter(move |c| c.get("type").and_then(Value::as_str) == Some(kind))
+}
+
+/// The song in a finished interaction (the last audio block, as the SDK's `output_audio` is).
+fn song_audio(interaction: &Value) -> anyhow::Result<GeneratedFile> {
+  let block = output_blocks(interaction, "audio").last().or_else(|| interaction.get("output_audio"));
+  let Some(data) = block.and_then(|b| b.get("data")).and_then(Value::as_str) else {
+    anyhow::bail!("Lyria returned no audio{}", interaction_error(interaction).map(|e| format!(": {e}")).unwrap_or_else(|| " (the prompt or lyrics may have been blocked)".to_owned()));
+  };
+  let bytes = BASE64.decode(data)?;
+  let mime = block.and_then(|b| b.get("mime_type")).and_then(Value::as_str).unwrap_or_default();
+  let extension = if mime.contains("wav") || bytes.starts_with(b"RIFF") { "wav" } else { "mp3" };
+  Ok(GeneratedFile { bytes, extension, usage: None })
+}
+
+/// The text that came with an interaction's output, blocks joined by blank lines.
+fn interaction_text(interaction: &Value) -> String {
+  output_blocks(interaction, "text").filter_map(|b| b.get("text").and_then(Value::as_str)).map(str::trim).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n")
+}
+
 enum VideoOut {
   Inline(String),
   Uri(String),
@@ -480,6 +649,51 @@ async fn read_json(response: reqwest::Response) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod text_and_songs {
+    use super::*;
+
+    #[test]
+    fn text_requests_put_the_track_before_the_prompt() {
+      let body = text_body(&TextRequest { models: &TEXT_MODELS, system: "You mark up songs.", prompt: "Where are the sections?", audio: Some(("audio/aac", &[1, 2, 3])), json: true, temperature: 0.2 });
+      assert_eq!(body["systemInstruction"]["parts"][0]["text"], "You mark up songs.");
+      assert_eq!(body["contents"][0]["parts"][0]["inlineData"], json!({ "mimeType": "audio/aac", "data": "AQID" }));
+      assert_eq!(body["contents"][0]["parts"][1]["text"], "Where are the sections?");
+      assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
+      let plain = text_body(&TextRequest { models: &TEXT_MODELS, system: "s", prompt: "p", audio: None, json: false, temperature: 1.0 });
+      assert!(plain["generationConfig"].get("responseMimeType").is_none());
+      assert_eq!(plain["contents"][0]["parts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replies_leave_out_the_models_thoughts() {
+      let reply = json!({ "candidates": [{ "content": { "parts": [{ "text": "hmm", "thought": true }, { "text": "{\"a\":" }, { "text": "1}" }] } }] });
+      assert_eq!(reply_text(&reply).unwrap(), "{\"a\":1}");
+      let blocked = reply_text(&json!({ "candidates": [{ "finishReason": "SAFETY" }] }));
+      assert!(blocked.unwrap_err().to_string().contains("SAFETY"));
+    }
+
+    #[test]
+    fn songs_run_in_the_background_and_stored() {
+      assert_eq!(song_body("lyria-3.5", "a song", true), json!({ "model": "lyria-3.5", "input": "a song", "background": true, "store": true }));
+      assert_eq!(song_body("lyria-3.5", "a song", false), json!({ "model": "lyria-3.5", "input": "a song" }));
+      assert!(refuses_background(&anyhow::anyhow!("Vertex AI error 400 Bad Request: background is not supported for this model")));
+      assert!(!refuses_background(&anyhow::anyhow!("Vertex AI error 403 Forbidden: permission denied")));
+    }
+
+    #[test]
+    fn a_song_is_the_last_audio_block_with_its_text() {
+      let finished = json!({ "status": "completed", "steps": [
+        { "type": "model_output", "content": [{ "type": "text", "text": "[Verse]\nla" }, { "type": "audio", "mime_type": "audio/mpeg", "data": "AQID" }] },
+        { "type": "model_output", "content": [{ "type": "text", "text": " structure " }, { "type": "audio", "data": BASE64.encode(b"RIFFxxxx") }] },
+      ] });
+      let file = song_audio(&finished).unwrap();
+      assert_eq!((file.extension, file.bytes.as_slice()), ("wav", b"RIFFxxxx".as_slice()));
+      assert_eq!(interaction_text(&finished), "[Verse]\nla\n\nstructure");
+      let empty = song_audio(&json!({ "status": "completed", "created": "2026-11-05T07:22:31Z" }));
+      assert!(empty.unwrap_err().to_string().contains("no audio"));
+    }
+  }
 
   #[test]
   fn hosts_follow_the_location() {
