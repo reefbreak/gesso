@@ -691,9 +691,10 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   // The final pass redraws the stills the draft settled on; the draft draws whatever is missing.
   let drawable = |shot: &&crate::backend::local::song::project::Shot| !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
   // Due: no still yet, or (in the final pass) one redrawn from a draft that has changed since.
-  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s) && s.still_due(quality)).map(|(i, _)| i).collect();
-  let stale_stills = page.project.lineage(quality).stills_stale;
   let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s)).map(|(i, _)| i).collect();
+  let mut missing: Vec<usize> = super::plan_frames(&page.project.shots, &all, quality, Frames::Due).iter().map(|frame| frame.index).collect();
+  missing.dedup();
+  let stale_stills = page.project.lineage(quality).stills_stale;
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
   let (pro, large) = (page.pro(), quality == Quality::Final);
@@ -776,19 +777,57 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       if chosen.len() < page.picked.len() {
         ui.label(small("Some of the selected scenes have no draft still or no description yet, so they are left out."));
       }
+      // The transition, for several scenes at once: a run of selected scenes becomes one take.
+      ui.horizontal(|ui| {
+        if secondary(ui, Icon::Link, "Flow together", true) {
+          let picked = page.picked.clone();
+          for index in picked.iter().filter(|index| **index > 0 && picked.contains(&(**index - 1))) {
+            if let Some(shot) = page.project.shots.get_mut(*index) {
+              shot.flows = true;
+              changed = true;
+            }
+          }
+        }
+        if secondary(ui, Icon::X, "Cut between", true) {
+          for index in &page.picked {
+            if let Some(shot) = page.project.shots.get_mut(*index) {
+              shot.flows = false;
+              changed = true;
+            }
+          }
+        }
+      });
+      ui.label(small("Flow together joins each selected scene to the selected scene before it: it opens on that scene's ending frame, as one continuous take."));
       if secondary(ui, Icon::X, "Clear the selection", true) {
         clear_picked = true;
       }
     }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
       let lip_sync = page.project.lip_sync;
+      // A scene can flow on from the one before only if that one has an ending frame to hand on.
+      let can_flow = index > 0 && page.project.shots[index - 1].wants_ending();
       let shot = &mut page.project.shots[index];
       field(ui, &format!("Scene {} \u{b7} {}", index + 1, shot.slot.section));
       if !shot.slot.lyric.is_empty() {
         ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
       }
-      ui.label(label("Opening frame"));
-      let before = (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending);
+      let before = (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending, shot.flows);
+      if index > 0 {
+        ui.label(label("Transition into this scene")).on_hover_text("Cut: the scene starts on its own opening frame. Flow: it carries on from the scene before as one continuous take, opening on that scene's ending frame, so several scenes can run together as a longer sequence. The writer suggests which scenes flow; change any of them here.");
+        ui.horizontal(|ui| {
+          ui.radio_value(&mut shot.flows, false, "Cut");
+          ui.add_enabled_ui(can_flow || shot.flows, |ui| ui.radio_value(&mut shot.flows, true, format!("Flow on from scene {index}")));
+        });
+        if shot.flows && can_flow {
+          ui.label(small(&format!("Opens on scene {index}'s ending frame, so no opening frame is drawn for this one. Redrawing that ending redraws this scene's start.")));
+        } else if shot.flows {
+          ui.label(small(&format!("Scene {index} has its ending frame switched off, so there is nothing to flow on from: this scene cuts until it is switched back on.")));
+        } else if !can_flow {
+          ui.label(small(&format!("To flow, scene {index} needs its ending frame switched on.")));
+        }
+        ui.add_space(6.0);
+      }
+      ui.label(label(if shot.flows && can_flow { "Opening frame (the ending of the scene before; kept for when the scene cuts)" } else { "Opening frame" }));
       prompt_field(ui, "mv-scene-image", &mut shot.image, "Who or what is in the frame, the framing, the place and the light");
       ui.add_space(6.0);
       ui.label(label("What moves"));
@@ -803,7 +842,8 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         ui.add_space(6.0);
         ui.checkbox(&mut shot.sing, "The performer sings this scene (lip-synced)").on_hover_text("Works best as a close-up with the face towards the camera and the mouth in view");
       }
-      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending);
+      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending, shot.flows);
+      let flowing = shot.flows && can_flow;
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
       }
@@ -823,7 +863,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       if let Some(downstream) = downstream {
         ui.label(small(&format!("Redrawing this still puts {downstream} out of date. They stay until you make them again, and the left rail keeps count.")));
       }
-      let can_draw = !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
+      let can_draw = !flowing && !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
       if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
         actions.push(Action::Stills(vec![index], better, Frames::Opening));
       }
@@ -833,6 +873,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         let take = shot.take(quality);
         let (has_opening, has_draft) = (take.still.is_some(), quality == Quality::Draft || shot.draft.end_still.is_some());
         let state = match (take.end_still.is_some(), shot.end_stale(quality), has_opening, has_draft) {
+          (_, _, false, _) if flowing => "Draw the ending frame of the scene before first: this scene opens on it.",
           (_, _, false, _) => "Draw the opening still first: the ending frame is drawn to match it.",
           (_, _, _, false) => "The final pass redraws the draft's ending frame. Draw it in the Draft pass first.",
           (true, true, ..) => "The ending frame is out of date: the opening still, or its draft, was redrawn since.",
@@ -1258,7 +1299,8 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
           let galley = ui.painter().layout_no_wrap(format!("\u{201c}{words}\u{201d}"), FontId::new(12.0, egui::FontFamily::Proportional), colour);
           ui.painter().with_clip_rect(lyric).galley(lyric.left_top() + vec2(0.0, 2.0), galley, colour);
         }
-        let caption = format!("{} \u{b7} {} \u{b7} {:.1}s", index + 1, format_time(shot.slot.start as f32), shot.slot.seconds());
+        // A flowing scene says so: it is the same take as the one before it.
+        let caption = format!("{} \u{b7} {} \u{b7} {:.1}s{}", index + 1, format_time(shot.slot.start as f32), shot.slot.seconds(), if page.project.flows_from(index) { " \u{b7} flows on" } else { "" });
         ui.painter().text(text.left_top(), Align2::LEFT_TOP, caption, FontId::new(11.0, theme::mono()), theme::MUTED);
         ui.painter().text(text.right_top(), Align2::RIGHT_TOP, &shot.slot.section, FontId::new(11.0, theme::mono()), theme::FAINT);
         let line = if shot.beat.is_empty() { &shot.image } else { &shot.beat };

@@ -142,6 +142,9 @@ pub struct StillJob {
   /// For an ending frame: the scene's opening still, so the two are one place, light and outfit.
   /// `None` when the same run draws that opening first; the run then fills it in.
   pub opening: Option<PathBuf>,
+  /// The frame of this run (a scene and whether it is its ending) that this one is matched to
+  /// and so waits for. An ending with no opening named waits for its own scene's opening.
+  pub after: Option<(usize, bool)>,
 }
 
 /// A clip to make from a still.
@@ -565,9 +568,11 @@ impl SongRun<'_> {
       SongRequest::Stills { dir, design, references, aspect, quality, better, shots } => {
         let references: Vec<(ReferenceKind, RefImage)> = references.iter().take(REFERENCES_PER_STILL).map(|(kind, path)| Ok((*kind, self.engine.load_path(path)?))).collect::<anyhow::Result<_>>()?;
         let (dir, design, references) = (&dir.join("shots"), &design, &references);
-        // Opening frames first: an ending frame is drawn to match its scene's opening still, and
-        // one without an opening named waits for the one this run draws.
-        let (endings, openings): (Vec<StillJob>, Vec<StillJob>) = shots.into_iter().partition(|job| job.ending);
+        // A frame that is matched to another frame of this run waits for it: an ending for its
+        // scene's opening, and in a flowing sequence for the ending of the scene before, which
+        // is its opening. So the run goes in waves, each drawing what the last made possible.
+        let mut waiting: Vec<StillJob> = shots.into_iter().map(|job| if job.ending && job.opening.is_none() && job.after.is_none() { StillJob { after: Some((job.index, false)), ..job } } else { job }).collect();
+        let mut drawn: Vec<((usize, bool), PathBuf)> = Vec::new();
         let draw = |job: StillJob| async move {
           if self.stopped() {
             return None;
@@ -576,7 +581,7 @@ impl SongRun<'_> {
           match self.still(dir, design, references, aspect, quality, better, job).await {
             Ok(path) => {
               self.send(SongUpdate::Still { index, path: path.clone(), ending });
-              Some((index, path))
+              Some(((index, ending), path))
             },
             Err(err) => {
               self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") });
@@ -584,14 +589,19 @@ impl SongRun<'_> {
             },
           }
         };
-        let drawn: Vec<(usize, PathBuf)> = stream::iter(openings.into_iter().map(draw)).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<_>>().await.into_iter().flatten().collect();
-        let endings = endings.into_iter().filter_map(|job| match (&job.opening, drawn.iter().find(|(index, _)| *index == job.index)) {
-          (Some(_), _) => Some(job),
-          (None, Some((_, opening))) => Some(StillJob { opening: Some(opening.clone()), ..job }),
-          // Its opening frame failed or the run was stopped: there is nothing to match it to.
-          (None, None) => None,
-        });
-        stream::iter(endings.map(draw)).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<_>>().await;
+        loop {
+          let (ready, rest): (Vec<StillJob>, Vec<StillJob>) = waiting.into_iter().partition(|job| job.after.is_none_or(|frame| drawn.iter().any(|(made, _)| *made == frame)));
+          // What is left waits on a frame that failed or was stopped: nothing to match it to.
+          if ready.is_empty() {
+            break;
+          }
+          waiting = rest;
+          let ready: Vec<StillJob> = ready.into_iter().map(|job| match job.after.and_then(|frame| drawn.iter().find(|(made, _)| *made == frame)) {
+            Some((_, path)) => StillJob { opening: Some(path.clone()), after: None, ..job },
+            None => job,
+          }).collect();
+          drawn.extend(stream::iter(ready.into_iter().map(draw)).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<_>>().await.into_iter().flatten());
+        }
       },
       SongRequest::Clips { dir, look, aspect, tier, resolution, quality, shots } => {
         let (dir, look, resolution) = (&dir.join("clips"), look.as_str(), resolution.as_str());
@@ -1488,7 +1498,7 @@ mod tests {
       let (engine, dir) = engine(base_url);
       let project = dir.join("project");
       let portrait = save(&project, "portrait_v1.png", &tiny_png()).unwrap();
-      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None, ending: false, opening: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None, ending: false, opening: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None, ending: false, opening: None, after: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None, ending: false, opening: None, after: None }];
       let (tx, rx) = std::sync::mpsc::channel();
       engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![(ReferenceKind::Look, portrait)], aspect: Aspect::Tall, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
 
@@ -1533,7 +1543,7 @@ mod tests {
       let opening = save(&project.join("shots"), "shot_001_draft_v1.png", &tiny_png()).unwrap();
       let sheet = save(&project.join("references"), "look_01_v1.png", &tiny_png()).unwrap();
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 0, version: 2, image: "The performer's face fills the frame".into(), guide: None, ending: true, opening: Some(opening) }];
+      let shots = vec![StillJob { index: 0, version: 2, image: "The performer's face fills the frame".into(), guide: None, ending: true, opening: Some(opening), after: None }];
       engine.start_song(16, SongRequest::Stills { dir: project, design: Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() }, references: vec![(ReferenceKind::Look, sheet)], aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 16).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, path, ending: true }) if path.ends_with("shots/shot_001_draft_end_v2.png")), "{updates:?}");
@@ -1553,8 +1563,8 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply()]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      let ending = StillJob { index: 0, version: 2, image: "A face fills the frame".into(), guide: None, ending: true, opening: None };
-      let shots = vec![ending.clone(), StillJob { index: 0, version: 1, image: "A dock, far off".into(), guide: None, ending: false, opening: None }, StillJob { index: 5, ..ending }];
+      let ending = StillJob { index: 0, version: 2, image: "A face fills the frame".into(), guide: None, ending: true, opening: None, after: None };
+      let shots = vec![ending.clone(), StillJob { index: 0, version: 1, image: "A dock, far off".into(), guide: None, ending: false, opening: None, after: None }, StillJob { index: 5, ..ending }];
       engine.start_song(21, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 21).await;
       let stills: Vec<(usize, bool)> = updates.iter().filter_map(|u| if let SongUpdate::Still { index, ending, .. } = u { Some((*index, *ending)) } else { None }).collect();
@@ -1566,13 +1576,34 @@ mod tests {
       let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// In a flowing sequence a scene opens on the ending frame of the one before, so each
+    /// ending waits for the one it continues from and is drawn with it attached.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flowing_scene_is_drawn_from_the_ending_before_it() {
+      let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply(), image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let (tx, rx) = std::sync::mpsc::channel();
+      let frame = |index, image: &str, ending, after| StillJob { index, version: if ending { 2 } else { 1 }, image: image.into(), guide: None, ending, opening: None, after };
+      // Scene 2 has no opening of its own: its ending follows scene 1's ending.
+      let shots = vec![frame(1, "The quay, from the water", true, Some((0, true))), frame(0, "The deck at the rail", true, None), frame(0, "A dock, far off", false, None)];
+      engine.start_song(22, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
+      let updates = finished(&rx, 22).await;
+      let stills: Vec<(usize, bool)> = updates.iter().filter_map(|u| if let SongUpdate::Still { index, ending, .. } = u { Some((*index, *ending)) } else { None }).collect();
+      assert_eq!(stills, [(0, false), (0, true), (1, true)], "{updates:?}");
+      let requests = requests.lock().unwrap();
+      let text = |n: usize| serde_json::from_str::<Value>(&requests[n].1).unwrap()["contents"][0]["parts"].as_array().unwrap().iter().filter_map(|part| part["text"].as_str().map(str::to_owned)).collect::<String>();
+      assert!(text(1).contains("The deck at the rail") && text(2).contains("The quay, from the water"));
+      assert!(serde_json::from_str::<Value>(&requests[2].1).unwrap()["contents"][0]["parts"][0]["inlineData"]["data"].is_string(), "scene 1's ending is attached as scene 2's opening");
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A draft still can be redrawn with the better model: Pro, still at the draft's size and name.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_draft_still_can_be_redrawn_with_the_better_model() {
       let (base_url, requests) = fake_vertex(vec![image_reply()]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 4, version: 2, image: "A wide shot".into(), guide: None, ending: false, opening: None }];
+      let shots = vec![StillJob { index: 4, version: 2, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None }];
       engine.start_song(12, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: true, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 12).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 4, path, ending: false }) if path.ends_with("shots/shot_005_draft_v2.png")), "{updates:?}");
@@ -1593,7 +1624,7 @@ mod tests {
       let config = LocalConfig { gcp_api_key: Some("test-key".into()), vertex_base_url: Some(vertex_url), gemini_api_key: Some("gm-key".into()), gemini_base_url: Some(gemini_url), bedrock_enabled: Some(false), ..Default::default() };
       let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None, ending: false, opening: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None }];
       engine.start_song(11, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 11).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, .. })), "{updates:?}");
@@ -1688,7 +1719,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(Vec::new());
       let (engine, dir) = engine(base_url);
       let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO), project: None, part: COST_PARTS[0] };
-      let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None, ending: false, opening: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None, ending: false, opening: None, after: None }];
       run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());
       let _ = std::fs::remove_dir_all(dir);

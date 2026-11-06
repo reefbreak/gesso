@@ -17,7 +17,7 @@ use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
-use crate::backend::local::song::project::{CutOf, Made, Quality, Share, Shot, ReferenceKind, SongProject, Stage, Summary, Track};
+use crate::backend::local::song::project::{CutOf, Made, Quality, Share, Shot, flows_from, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{COST_PARTS, ClipJob, ReferenceJob, SongEstimate, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
 use crate::backend::local::song::cut::ShotMedia;
@@ -153,31 +153,63 @@ pub fn video_costs(backend: &Backend) -> Vec<(String, f64)> {
     .collect()
 }
 
-/// Which of a scene's frames a run asked for `frames` draws in a pass: its opening still and
-/// its ending frame. The final pass redraws drafts, so each needs its draft. An ending frame is
-/// drawn to match the opening still, so it needs one (on file, or drawn first in the same run)
-/// and is drawn again whenever its opening is.
-pub(super) fn frames_for(shot: &Shot, quality: Quality, frames: Frames) -> (bool, bool) {
-  if shot.image.trim().is_empty() {
-    return (false, false);
-  }
-  let opening = match frames {
-    Frames::Due => shot.opening_due(quality),
-    Frames::Both | Frames::Opening => true,
-    Frames::Ending => false,
-  } && (quality == Quality::Draft || shot.draft.still.is_some());
-  let asked = match frames {
-    Frames::Due => opening || shot.end_due(quality),
-    Frames::Both | Frames::Ending => true,
-    Frames::Opening => false,
-  };
-  let drawable = (opening || shot.take(quality).still.is_some()) && (quality == Quality::Draft || shot.draft.end_still.is_some());
-  (opening, asked && shot.wants_ending() && drawable)
+/// A picture a still run is to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PlannedFrame {
+  pub index: usize,
+  pub ending: bool,
+  /// The frame of the same run it is matched to, and so drawn after.
+  pub after: Option<(usize, bool)>,
 }
 
-/// How many pictures a run asked for `frames` of these scenes draws.
+/// The pictures a run asked for `frames` of these scenes draws in a pass, in scene order.
+///
+/// A scene is an opening still and an ending frame. The final pass redraws drafts, so each needs
+/// its draft. An ending is drawn to match its opening, so it needs one (on file, or drawn first
+/// in the same run) and is drawn again whenever its opening is. A flowing scene has no opening of
+/// its own: it opens on the ending of the scene before, so its ending follows that one.
+pub(super) fn plan_frames(shots: &[Shot], indices: &[usize], quality: Quality, frames: Frames) -> Vec<PlannedFrame> {
+  let mut indices = indices.to_vec();
+  indices.sort_unstable();
+  indices.dedup();
+  let mut plan: Vec<PlannedFrame> = Vec::new();
+  for index in indices {
+    let Some(shot) = shots.get(index).filter(|shot| !shot.image.trim().is_empty()) else {
+      continue;
+    };
+    // Where its opening comes from: a frame of this run, or one on file.
+    let (matched, on_file) = if flows_from(shots, index) {
+      let before = (index - 1, true);
+      (plan.iter().any(|frame| (frame.index, frame.ending) == before).then_some(before), shots[index - 1].take(quality).end_still.is_some())
+    } else {
+      let opening = match frames {
+        Frames::Due => shot.opening_due(quality),
+        Frames::Both | Frames::Opening => true,
+        Frames::Ending => false,
+      } && (quality == Quality::Draft || shot.draft.still.is_some());
+      if opening {
+        plan.push(PlannedFrame { index, ending: false, after: None });
+      }
+      (opening.then_some((index, false)), shot.take(quality).still.is_some())
+    };
+    let asked = match frames {
+      Frames::Due => matched.is_some() || shot.end_due(quality),
+      Frames::Both | Frames::Ending => true,
+      Frames::Opening => false,
+    };
+    let drawable = (matched.is_some() || on_file) && (quality == Quality::Draft || shot.draft.end_still.is_some());
+    if asked && shot.wants_ending() && drawable {
+      plan.push(PlannedFrame { index, ending: true, after: matched });
+    }
+  }
+  plan
+}
+
+/// How many pictures a run asked for `frames` of these scenes draws: openings, then endings.
 pub(super) fn frame_count(shots: &[Shot], indices: &[usize], quality: Quality, frames: Frames) -> (usize, usize) {
-  indices.iter().filter_map(|index| shots.get(*index)).map(|shot| frames_for(shot, quality, frames)).fold((0, 0), |(openings, endings), (opening, ending)| (openings + usize::from(opening), endings + usize::from(ending)))
+  let plan = plan_frames(shots, indices, quality, frames);
+  let endings = plan.iter().filter(|frame| frame.ending).count();
+  (plan.len() - endings, endings)
 }
 
 /// The price, part by part, of what a video's folder holds: the estimate for work done before
@@ -294,6 +326,10 @@ impl MusicVideoPage {
       self.apply(env, Action::Open(id));
     }
     self.count_costs(ui, env.backend);
+    // A flowing scene opens on the ending frame before it, whenever that frame is new.
+    if self.project.follow_flow() {
+      self.dirty_since.get_or_insert(ui.input(|i| i.time));
+    }
     let mut actions = Vec::new();
     // Every scene has an ending frame: ones planned before that was so are given theirs when
     // the storyboard is next opened.
@@ -931,27 +967,24 @@ impl MusicVideoPage {
       Action::Stills(indices, better, frames) => {
         let quality = self.quality();
         let mut shots = Vec::new();
-        for index in indices {
-          let Some(shot) = self.project.shots.get_mut(index).filter(|s| !s.image.trim().is_empty()) else {
-            continue;
+        for frame in plan_frames(&self.project.shots, &indices, quality, frames) {
+          // An ending frame is drawn to match its opening: the one on file, unless the run
+          // draws it first (`after`), and for a flowing scene that is the ending before it.
+          let on_file = if frame.after.is_some() {
+            None
+          } else if self.project.flows_from(frame.index) {
+            self.project.shots[frame.index - 1].take(quality).end_still.clone()
+          } else {
+            self.project.shots[frame.index].take(quality).still.clone()
           };
-          let (opening, ending) = frames_for(shot, quality, frames);
-          if opening {
-            shot.still_version += 1;
-            shot.error = None;
-            // The final pass recreates the approved draft frame, when there is one.
-            let guide = if quality == Quality::Final { shot.draft.still.clone() } else { None };
-            shots.push(StillJob { index, version: shot.still_version, image: shot.image.clone(), guide, ending: false, opening: None });
-          }
-          if ending {
-            shot.still_version += 1;
-            shot.error = None;
-            let guide = if quality == Quality::Final { shot.draft.end_still.clone() } else { None };
-            // The ending frame is drawn to match the opening still: the one on file, or the one
-            // this same run draws first (`None`: the run fills it in).
-            let matched = shot.take(quality).still.clone().filter(|_| !opening);
-            shots.push(StillJob { index, version: shot.still_version, image: shot.ending.clone(), guide, ending: true, opening: matched });
-          }
+          let shot = &mut self.project.shots[frame.index];
+          shot.still_version += 1;
+          shot.error = None;
+          // The final pass recreates the approved draft frame, when there is one.
+          let draft = if frame.ending { &shot.draft.end_still } else { &shot.draft.still };
+          let guide = if quality == Quality::Final { draft.clone() } else { None };
+          let image = if frame.ending { shot.ending.clone() } else { shot.image.clone() };
+          shots.push(StillJob { index: frame.index, version: shot.still_version, image, guide, ending: frame.ending, opening: on_file.filter(|_| frame.ending), after: frame.after });
         }
         if !shots.is_empty() {
           let note = if quality == Quality::Final { "Redrawing stills in final quality\u{2026}" } else { "Drawing stills\u{2026}" };
@@ -1177,12 +1210,34 @@ mod tests {
     assert_eq!(frame_count(&shots, &all, Quality::Draft, Frames::Due), (3, 1), "nothing drawn yet: three openings and the one ending that is wanted");
     // With its opening on file, only the ending is left to draw.
     shots[0].set_still(Quality::Draft, PathBuf::from("a.png"));
-    assert_eq!(frames_for(&shots[0], Quality::Draft, Frames::Due), (false, true));
+    assert_eq!(plan_frames(&shots, &[0], Quality::Draft, Frames::Due), [PlannedFrame { index: 0, ending: true, after: None }]);
     shots[0].set_end_still(Quality::Draft, PathBuf::from("a_end.png"));
-    assert_eq!(frames_for(&shots[0], Quality::Draft, Frames::Due), (false, false));
+    assert_eq!(frame_count(&shots, &[0], Quality::Draft, Frames::Due), (0, 0));
     assert_eq!(frame_count(&shots, &all, Quality::Draft, Frames::Both), (3, 1));
-    assert_eq!((frames_for(&shots[0], Quality::Draft, Frames::Opening), frames_for(&shots[0], Quality::Draft, Frames::Ending)), ((true, false), (false, true)));
+    assert_eq!((frame_count(&shots, &[0], Quality::Draft, Frames::Opening), frame_count(&shots, &[0], Quality::Draft, Frames::Ending)), ((1, 0), (0, 1)));
     // The final pass redraws drafts: scene 1 has both, the others have none to redraw.
     assert_eq!(frame_count(&shots, &all, Quality::Final, Frames::Due), (1, 1));
+  }
+
+  /// A flowing scene has no opening to draw: it opens on the ending before it, and its own
+  /// ending waits for that one when the same run draws it.
+  #[test]
+  fn a_flowing_scene_draws_only_its_ending() {
+    let scene = |flows: bool| {
+      let mut shot = Shot::default();
+      shot.image = "A dock".into();
+      shot.ending = "A face".into();
+      shot.flows = flows;
+      shot
+    };
+    let mut shots = vec![scene(false), scene(true), scene(true)];
+    let frame = |index, ending, after| PlannedFrame { index, ending, after };
+    assert_eq!(plan_frames(&shots, &[2, 0, 1], Quality::Draft, Frames::Due), [frame(0, false, None), frame(0, true, Some((0, false))), frame(1, true, Some((0, true))), frame(2, true, Some((1, true)))]);
+    assert_eq!(frame_count(&shots, &[0, 1, 2], Quality::Draft, Frames::Both), (1, 3));
+    // On its own, a flowing scene can be drawn once the ending before it is on file.
+    assert_eq!(plan_frames(&shots, &[1], Quality::Draft, Frames::Both), []);
+    shots[0].set_end_still(Quality::Draft, PathBuf::from("a_end.png"));
+    assert_eq!(plan_frames(&shots, &[1], Quality::Draft, Frames::Both), [frame(1, true, None)]);
+    assert_eq!(plan_frames(&shots, &[1], Quality::Draft, Frames::Opening), []);
   }
 }

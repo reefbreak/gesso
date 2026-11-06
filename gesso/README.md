@@ -221,6 +221,15 @@ runs, and leaves everything it made editable before the next stage uses it.
   encoded at half its own rate, so the copy is always well under the size of the cut. It keeps the cut's shape,
   so choose Reel, Feed or Square under Format first for a tall or square one. A newer cut marks
   the copy out of date.
+- **Flowing scenes.** The transition into a scene is a cut or a flow. A flowing scene carries on
+  from the one before as one continuous take: it has no opening frame of its own and opens on
+  that scene's ending frame, so its clip starts on the exact picture the last one ended on, and
+  runs of flowing scenes make longer sequences than one clip allows. The planner suggests which
+  scenes flow (about a third, in runs of two to four where the music holds one feeling); change
+  any of them under "Transition into this scene", or select several and use "Flow together" or
+  "Cut between". It is part of the lineage: a redrawn ending is a new opening for the scene that
+  flows from it, which puts that scene's ending and clip out of date, and one still run draws a
+  whole chain in order. A scene can only flow from one whose ending frame is switched on.
 - **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric
   writer is told how many verses and choruses to write for it, and Lyria how long to run. The
   length is asked for, not enforced: Lyria lands near it, and what is written decides most of it.

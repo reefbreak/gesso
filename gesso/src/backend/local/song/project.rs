@@ -191,6 +191,9 @@ pub struct Shot {
   /// drawn from the references, it is given both ends and fills in the move between.
   #[serde(default)]
   pub ending: String,
+  /// The transition into the scene: instead of a cut to a new opening frame, it carries on from
+  /// the scene before, opening on that scene's ending frame.
+  pub flows: bool,
   /// Leave the ending frame undrawn and let the video model end the shot where it likes.
   /// Drawing is on unless this is set.
   pub skip_ending: bool,
@@ -351,6 +354,7 @@ impl Shot {
 
   /// Whether a pass's still needs (re)drawing: the final pass redraws drafts, so its still is also
   /// due when the draft it came from has changed.
+  #[cfg(test)]
   pub fn still_due(&self, quality: Quality) -> bool {
     self.opening_due(quality) || self.end_due(quality)
   }
@@ -938,10 +942,36 @@ impl SongProject {
       .map(|slot| {
         let scene = planned.iter().find(|p| p.index == slot.index);
         let (still_version, clip_version) = self.shots.get(slot.index).map_or((0, 0), |old| (old.still_version, old.clip_version));
-        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), ending: scene.map(|p| p.ending.clone()).unwrap_or_default(), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
+        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), ending: scene.map(|p| p.ending.clone()).unwrap_or_default(), flows: scene.is_some_and(|p| p.flows), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
       })
       .collect();
     self.cut = None;
+  }
+
+  /// Whether a scene carries on from the one before it: it is set to flow, and that scene has an
+  /// ending frame to open on.
+  pub fn flows_from(&self, index: usize) -> bool {
+    flows_from(&self.shots, index)
+  }
+
+  /// Gives each flowing scene its opening still: the ending frame of the scene before, in both
+  /// passes, whenever that frame is new. The scene's clip and ending then show as out of date
+  /// the way they do after any redrawn opening. Returns whether anything changed.
+  pub fn follow_flow(&mut self) -> bool {
+    let mut changed = false;
+    for index in 1..self.shots.len() {
+      if !self.flows_from(index) {
+        continue;
+      }
+      for quality in [Quality::Draft, Quality::Final] {
+        let opening = self.shots[index - 1].take(quality).end_still.clone();
+        if opening.is_some() && self.shots[index].take(quality).still != opening {
+          self.shots[index].set_still(quality, opening.unwrap_or_default());
+          changed = true;
+        }
+      }
+    }
+    changed
   }
 
   /// The described scenes that have no ending frame described yet.
@@ -980,11 +1010,14 @@ impl SongProject {
   /// What in `quality` is waiting or out of date, stage by stage.
   pub fn lineage(&self, quality: Quality) -> Lineage {
     let mut lineage = Lineage { film_current: self.cut_is_current(quality), ..Default::default() };
-    for shot in self.shots.iter().filter(|shot| !shot.image.trim().is_empty()) {
+    for (index, shot) in self.shots.iter().enumerate().filter(|(_, shot)| !shot.image.trim().is_empty()) {
       let take = shot.take(quality);
       // The final pass redraws drafts, so a scene with no draft still has nothing waiting there.
       let drawable = quality == Quality::Draft || shot.draft.still.is_some();
+      // A flowing scene has no opening of its own to draw: it is the ending before it.
+      let flows = self.flows_from(index);
       match (take.still.is_some(), quality == Quality::Final && shot.still_stale()) {
+        _ if flows => {},
         (false, _) if drawable => lineage.stills_missing += 1,
         (true, true) => lineage.stills_stale += 1,
         _ => {},
@@ -1065,6 +1098,11 @@ impl SongProject {
     let seconds = scenes.iter().map(|i| self.shots[*i].slot.seconds()).sum();
     (scenes, seconds)
   }
+}
+
+/// Whether the scene at `index` carries on from the one before it.
+pub fn flows_from(shots: &[Shot], index: usize) -> bool {
+  index > 0 && shots.get(index).is_some_and(|shot| shot.flows) && shots[index - 1].wants_ending()
 }
 
 /// Which pass a file's name says it belongs to: 0 for the draft, 1 for the final.
@@ -1491,13 +1529,46 @@ mod tests {
     let _ = std::fs::remove_dir_all(dir);
   }
 
+  /// A flowing scene opens on the ending frame of the scene before it, in step with it: a new
+  /// ending there is a new opening here, and what was made from the old one goes out of date.
+  #[test]
+  fn a_flowing_scene_opens_on_the_ending_before_it() {
+    let scene = |ending: &str| Shot { image: "A place".into(), ending: ending.into(), ..Default::default() };
+    let mut project = SongProject::new();
+    project.shots = vec![scene("The deck"), scene("The quay"), scene("")];
+    project.shots[1].flows = true;
+    project.shots[2].flows = true;
+    assert!(project.flows_from(1) && !project.flows_from(0));
+    project.shots[0].set_still(Quality::Draft, PathBuf::from("a.png"));
+    assert!(!project.follow_flow(), "nothing to open on until the ending before is drawn");
+    // Two pictures are waiting, the endings of scenes 1 and 2: flowing scenes have no opening
+    // of their own to draw.
+    assert_eq!(project.lineage(Quality::Draft).stills_missing, 2);
+    project.shots[0].set_end_still(Quality::Draft, PathBuf::from("a_end.png"));
+    assert!(project.follow_flow() && !project.follow_flow());
+    assert_eq!(project.shots[1].draft.still, Some(PathBuf::from("a_end.png")));
+    assert!(project.shots[1].end_due(Quality::Draft));
+    project.shots[1].set_end_still(Quality::Draft, PathBuf::from("b_end.png"));
+    project.shots[1].set_clip(Quality::Draft, PathBuf::from("b.mp4"));
+    project.follow_flow();
+    assert_eq!(project.shots[2].draft.still, Some(PathBuf::from("b_end.png")));
+    // Scene 1's ending is redrawn: scene 2 opens on the new one, and its ending and clip are stale.
+    project.shots[0].set_end_still(Quality::Draft, PathBuf::from("a_end_v2.png"));
+    assert!(project.follow_flow());
+    assert_eq!(project.shots[1].draft.still, Some(PathBuf::from("a_end_v2.png")));
+    assert!(project.shots[1].end_stale(Quality::Draft) && project.shots[1].clip_stale(Quality::Draft));
+    // With its ending frame switched off, the scene before has nothing to hand on: a cut again.
+    project.shots[0].skip_ending = true;
+    assert!(!project.flows_from(1));
+  }
+
   #[test]
   fn a_new_plan_keeps_version_counters_and_drops_old_media() {
     let mut project = SongProject::new();
     project.shots = vec![Shot { draft: Take { still: Some(PathBuf::from("old.png")), clip: Some(PathBuf::from("old.mp4")), synced: None, ..Default::default() }, still_version: 3, clip_version: 2, ..Default::default() }];
     project.cut = Some(PathBuf::from("cut.mp4"));
     let slots = [slot(0, 0.0, 2.0), slot(1, 2.0, 4.0)];
-    let scene = PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into(), sing: true, ending: "B, closer".into() };
+    let scene = PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into(), sing: true, ending: "B, closer".into(), flows: true };
     project.set_plan(&slots, std::slice::from_ref(&scene));
     assert_eq!(project.shots.len(), 2);
     assert_eq!((project.shots[0].draft.clone(), project.shots[0].still_version, project.shots[0].clip_version), (Take::default(), 3, 2));

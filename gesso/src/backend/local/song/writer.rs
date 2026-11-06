@@ -133,6 +133,8 @@ pub struct PlannedShot {
   pub sing: bool,
   /// The frame the scene ends on, for the image model.
   pub ending: String,
+  /// The writer's suggestion that the scene carry on from the one before without a cut.
+  pub flows: bool,
 }
 
 pub const SONGWRITER: &str = "You are a songwriter and music producer. You write wholly original songs. \
@@ -284,6 +286,9 @@ pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot], lip_sync: boo
      - \"image\": the opening frame in one or two sentences: who or what is in it, the framing (wide, medium, close-up, detail), where in the venue, and the light. Don't restate the overall look; it is added to every scene. Call the performer \"the performer\" and say what they are doing and where; never describe their face, hair, build or clothes, which come from their reference picture.\n\
      - \"motion\": what happens over the scene in one sentence: the performer's movement and the camera's.\n\
      - \"ending\": {ENDING_RULES}\n\
+     - \"flows\": true when the scene carries on from the scene before it without a cut, as one continuous take: its opening frame is then exactly that scene's ending frame, so write its \"image\" as that same frame, in the same place and moment. \
+     Use it to build longer passages of two to four scenes where the music holds one feeling or one movement carries through, such as a verse, a build or a walk through the venue; about a third of the scenes, never the first one. \
+     false for a cut: at a change of section, place or time, on a hit, and wherever the film needs a new angle.\n\
      - \"beat\": the scene's feeling in two to four words.{}\n\n\
      Follow the arc from the first scene to the last. Vary the framing from scene to scene, keep the performer in most of them, and bring the motifs and props back. \
      Match the energy: low is stillness and slow moves, high is fast, abrupt movement. \
@@ -360,7 +365,7 @@ pub fn parse_scenes(reply: &str) -> Vec<PlannedShot> {
     .filter_map(|(position, item)| {
       let index = item["index"].as_u64().map_or(position, |i| i as usize);
       let image = text(&item["image"]);
-      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]), sing: item["sing"].as_bool().unwrap_or(false), ending: text(&item["ending"]) })
+      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]), sing: item["sing"].as_bool().unwrap_or(false), ending: text(&item["ending"]), flows: item["flows"].as_bool().unwrap_or(false) })
     })
     .collect()
 }
@@ -410,7 +415,7 @@ pub fn fallback_scene(slot: &Slot) -> PlannedShot {
     Energy::High => ("A close, low-angle shot of the performer mid-movement", "The performer lunges at the lens with fast, abrupt movement; the handheld camera shakes.", "Confrontational"),
   };
   let image = format!("{framing}.");
-  PlannedShot { index: slot.index, ending: fallback_ending(&image, motion), image, motion: motion.to_owned(), beat: beat.to_owned(), sing: false }
+  PlannedShot { index: slot.index, ending: fallback_ending(&image, motion), image, motion: motion.to_owned(), beat: beat.to_owned(), sing: false, flows: false }
 }
 
 /// The writer's reply about a section. A field it left out, emptied or sent as something other
@@ -597,8 +602,12 @@ mod tests {
     fn every_scene_gets_an_ending_frame() {
       let scenes = parse_scenes(r#"{"scenes":[{"index":0,"image":"A","motion":"m","ending":"A, closer"}]}"#);
       assert_eq!(scenes[0].ending, "A, closer");
+      // The writer suggests which scenes flow on from the one before; a cut unless it says so.
+      let flowing = parse_scenes(r#"{"scenes":[{"index":0,"image":"A","flows":false},{"index":1,"image":"A, closer","flows":true},{"index":2,"image":"B"}]}"#);
+      assert_eq!(flowing.iter().map(|s| s.flows).collect::<Vec<_>>(), [false, true, false]);
       let slot = Slot { index: 3, section: "Verse 1".into(), ..Default::default() };
       assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"ending\": the last frame of the scene"));
+      assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"flows\": true when the scene carries on from the scene before it without a cut"));
       assert!(!fallback_scene(&slot).ending.is_empty());
       let prompt = endings_prompt(&Brief::default(), &[(3, "Verse 1".into(), 4.0, "A dock, far off.".into(), "The camera pushes in.".into())]);
       assert!(prompt.contains("3. Verse 1 \u{b7} 4.0s long\n   Opening frame: A dock, far off.\n   What moves: The camera pushes in.") && prompt.contains("- \"ending\": the last frame of the scene"), "{prompt}");
