@@ -225,6 +225,11 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **Lyrics are written new.** The writer is told to carry over an idea's energy and structure, not
   the words of an existing song, and to describe music without artist or song names (Lyria refuses
   them).
+- **Directions in the lyrics aren't sung.** Notes written among the words
+  (`[Intro: guitar loop, drums kick in]`, `Outro [repeat to fade]`, `(Short Intro: ...)`) are taken
+  out before the song is made and sent to Lyria as arrangement notes; the lyrics go as plain
+  section tags (`[Intro]`, `[Verse 1]`) and sung lines. The Lyrics box keeps what you typed. Lines
+  in round brackets with no section name are still sung, as backing vocals.
 - **Draft, then final.** The Quality switch in the left rail picks the pass. **Draft** uses the
   cheap, fast models (Nano Banana 2 at 1K, Veo 3.1 Lite) to settle the direction. **Final** runs
   the same scenes again with the best ones: each still is redrawn by Nano Banana Pro at 2K with

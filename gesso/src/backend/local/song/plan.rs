@@ -237,6 +237,137 @@ pub fn place_lines(slots: &mut [Slot], lines: &[TimedLine]) {
   }
 }
 
+/// The names a section of a song goes by, longest first so "pre-chorus" isn't read as "chorus".
+const SECTION_WORDS: [&str; 17] = ["instrumental", "pre-chorus", "prechorus", "breakdown", "interlude", "refrain", "bridge", "chorus", "intro", "outro", "verse", "break", "build", "drop", "hook", "solo", "coda"];
+/// Words that mark a bracketed line as a direction to the band, not something to sing.
+const DIRECTION_WORDS: [&str; 18] = ["repeat", "fade", "instrumental", "guitar", "drum", "bass", "synth", "loop", "beat", "tempo", "bpm", "riff", "kick", "strings", "piano", "silence", "x2", "x3"];
+
+/// Lyrics sorted into what is sung and what is a direction. People write lyrics with notes mixed
+/// in ("[Intro: guitar loop, drums kick in]", "Outro [repeat to fade]"), and a music model given
+/// them to sing will sing the notes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tidied {
+  /// The lyrics with each section headed by a bare tag (`[Verse 1]`) and only sung lines under it.
+  pub lyrics: String,
+  /// The directions that were taken out, each with the section it belongs to.
+  pub directions: Vec<String>,
+}
+
+/// Sorts lyrics into sung lines under plain section tags, and directions.
+pub fn tidy_lyrics(lyrics: &str) -> Tidied {
+  let mut out = Tidied::default();
+  let mut lines: Vec<String> = Vec::new();
+  let mut section = String::new();
+  let mut head = |tag: String, lines: &mut Vec<String>| {
+    if !lines.is_empty() {
+      lines.push(String::new());
+    }
+    lines.push(format!("[{tag}]"));
+    tag
+  };
+  for line in lyrics.lines().map(without_markers).filter(|line| !line.is_empty()) {
+    let line = line.as_str();
+    let bracketed = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')).or_else(|| line.strip_prefix('(').and_then(|l| l.strip_suffix(')')).filter(|inner| inner.contains(':') && section_tag(inner.split(':').next().unwrap_or_default()).is_some()));
+    if let Some(inner) = bracketed.map(str::trim) {
+      let (label, direction) = inner.split_once(':').map_or((inner, ""), |(label, direction)| (label.trim(), direction.trim()));
+      match section_tag(label) {
+        // A section label, with or without a note after it ("Intro: guitar loop").
+        Some(tag) => {
+          let note = if direction.is_empty() && label.eq_ignore_ascii_case(&tag) { String::new() } else if direction.is_empty() { label.to_owned() } else if label.eq_ignore_ascii_case(&tag) { direction.to_owned() } else { format!("{label}, {direction}") };
+          section = head(tag, &mut lines);
+          if !note.is_empty() {
+            out.directions.push(format!("{section}: {note}"));
+          }
+        },
+        // Not a section: a direction if it reads like one, else something shouted or sung.
+        None if is_direction(inner) => out.directions.push(if section.is_empty() { inner.to_owned() } else { format!("{section}: {inner}") }),
+        None => lines.push(inner.to_owned()),
+      }
+      continue;
+    }
+    // A heading without brackets, alone ("Verse 1") or with a note ("Outro [repeat to fade]").
+    let (before, note) = match line.find(['[', '(']) {
+      Some(at) if line.ends_with([']', ')']) => (line[..at].trim(), line[at + 1..line.len() - 1].trim()),
+      _ => (line, ""),
+    };
+    if before.split_whitespace().count() <= 3 && !before.is_empty() {
+      if let Some(tag) = section_tag(before).filter(|tag| heading_only(before, tag)) {
+        section = head(tag, &mut lines);
+        if !note.is_empty() {
+          out.directions.push(format!("{section}: {note}"));
+        }
+        continue;
+      }
+    }
+    // A sung line: a bracketed aside inside it is a direction ("…all day [shouted]").
+    let mut sung = String::new();
+    let mut rest = line;
+    while let Some((start, end)) = rest.find('[').and_then(|start| rest[start..].find(']').map(|len| (start, start + len))) {
+      sung.push_str(&rest[..start]);
+      let aside = rest[start + 1..end].trim();
+      if !aside.is_empty() {
+        out.directions.push(if section.is_empty() { aside.to_owned() } else { format!("{section}: {aside}") });
+      }
+      rest = &rest[end + 1..];
+    }
+    sung.push_str(rest);
+    let sung = sung.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !sung.is_empty() {
+      lines.push(sung);
+    }
+  }
+  out.lyrics = lines.join("\n");
+  out
+}
+
+/// A line without the timing marks a music model puts in its own lyric sheets (`[[A0]]`, `[:]`),
+/// which mean nothing to a singer and are sometimes pasted back in with the words.
+fn without_markers(line: &str) -> String {
+  let mut kept = String::new();
+  let mut rest = line.trim();
+  while let Some(start) = rest.find('[') {
+    let doubled = rest[start..].starts_with("[[");
+    let Some(len) = rest[start..].find(if doubled { "]]" } else { "]" }) else { break };
+    let end = start + len + if doubled { 2 } else { 1 };
+    let inner = rest[start..end].trim_matches(['[', ']']).trim();
+    let mark = doubled || !inner.chars().any(char::is_alphabetic);
+    kept.push_str(&rest[..if mark { start } else { end }]);
+    rest = &rest[end..];
+  }
+  kept.push_str(rest);
+  kept.trim().to_owned()
+}
+
+/// The plain tag for a section label: "Short Intro" is `Intro`, "verse 2" is `Verse 2`. `None`
+/// when the label names no section.
+fn section_tag(label: &str) -> Option<String> {
+  let lower = label.to_lowercase();
+  let word = SECTION_WORDS.iter().find(|word| lower.split(|c: char| !c.is_alphanumeric() && c != '-').any(|part| part == **word))?;
+  let name = match *word {
+    "prechorus" | "pre-chorus" => "Pre-Chorus".to_owned(),
+    word => format!("{}{}", word[..1].to_uppercase(), &word[1..]),
+  };
+  let number: String = lower.split_whitespace().find(|part| part.chars().all(|c| c.is_ascii_digit())).unwrap_or_default().to_owned();
+  Some(if number.is_empty() { name } else { format!("{name} {number}") })
+}
+
+/// Whether an unbracketed line is nothing but a section heading ("Verse 1", "Final chorus"),
+/// not a sung line that happens to contain the word.
+fn heading_only(line: &str, tag: &str) -> bool {
+  let extra = ["final", "last", "first", "second", "third", "short", "long", "big", "double"];
+  let tag_words: Vec<String> = tag.to_lowercase().split_whitespace().map(str::to_owned).collect();
+  line.to_lowercase().split_whitespace().all(|word| {
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
+    tag_words.iter().any(|t| t == word) || extra.contains(&word) || word == "prechorus"
+  })
+}
+
+/// Whether a bracketed line that isn't a section label reads as a direction to the band.
+fn is_direction(inner: &str) -> bool {
+  let lower = inner.to_lowercase();
+  inner.contains(':') || DIRECTION_WORDS.iter().any(|word| lower.contains(word))
+}
+
 /// Sections guessed from the lyrics' `[Verse]`-style tags, sized by how many lines each has. Used
 /// when no model has listened to the track.
 pub fn sections_from_lyrics(lyrics: &str, duration: f64) -> Vec<Section> {
@@ -445,6 +576,32 @@ mod tests {
       assert!((sections[1].end - sections[1].start - 40.0).abs() < 1e-9);
       assert_eq!(sections[1].lyrics, "a\nb\nc\nd");
       assert!((sections[2].end - 80.0).abs() < 1e-9);
+    }
+
+    /// Lyrics as people write them, with notes to the band mixed in: the notes come out, the
+    /// headings become plain tags, and what is left is what gets sung.
+    #[test]
+    fn directions_are_taken_out_of_the_lyrics() {
+      let written = "Night Bus\n[Intro: guitar loop, drums kick in]\nVerse 1\nFirst sung line\nSecond sung line [shouted]\nHook\nThe hook line\n[Hey! Hey! Hey!]\n[Long instrumental: the loop, drums drop out]\nOutro [repeat to fade]\nThe last line\n(Short Intro: a reprise)";
+      let tidied = tidy_lyrics(written);
+      assert_eq!(tidied.lyrics, "Night Bus\n\n[Intro]\n\n[Verse 1]\nFirst sung line\nSecond sung line\n\n[Hook]\nThe hook line\nHey! Hey! Hey!\n\n[Instrumental]\n\n[Outro]\nThe last line\n\n[Intro]");
+      assert_eq!(tidied.directions, ["Intro: guitar loop, drums kick in", "Verse 1: shouted", "Instrumental: Long instrumental, the loop, drums drop out", "Outro: repeat to fade", "Intro: Short Intro, a reprise"]);
+      // Nothing in brackets is left for a singer but the bare tags.
+      assert!(tidied.lyrics.lines().filter(|line| line.starts_with('[')).all(|line| !line.contains(':') && line.split_whitespace().count() <= 2));
+    }
+
+    #[test]
+    fn clean_lyrics_and_sung_lines_are_left_alone() {
+      let clean = "[Verse 1]\nA line\n(a backing vocal)\n\n[Pre-Chorus]\nBreak it down for me\n[Chorus]\nThe verse was long";
+      let tidied = tidy_lyrics(clean);
+      assert_eq!(tidied.lyrics, "[Verse 1]\nA line\n(a backing vocal)\n\n[Pre-Chorus]\nBreak it down for me\n\n[Chorus]\nThe verse was long");
+      assert!(tidied.directions.is_empty(), "{:?}", tidied.directions);
+      assert_eq!((section_tag("verse 2"), section_tag("Final Chorus"), section_tag("prechorus"), section_tag("Hey! Hey!")), (Some("Verse 2".into()), Some("Chorus".into()), Some("Pre-Chorus".into()), None));
+      assert_eq!(tidy_lyrics("[fade out slowly]\n[Whoa]").directions, ["fade out slowly"]);
+      // A line copied back from a music model's own lyric sheet, timing marks and all.
+      let pasted = tidy_lyrics("[[A0]] [:] (Short Intro: guitar squall loop, breakbeat kicks in)\n[[A1]] [0:12] The first line");
+      assert_eq!((pasted.lyrics.as_str(), pasted.directions.as_slice()), ("[Intro]\nThe first line", ["Intro: Short Intro, guitar squall loop, breakbeat kicks in".to_owned()].as_slice()));
+      assert_eq!(tidy_lyrics("").lyrics, "");
     }
 
     #[test]

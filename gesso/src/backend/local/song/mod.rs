@@ -603,6 +603,9 @@ impl SongRun<'_> {
       notes.push("No steady beat was found, so cuts fall on an even 120 BPM grid.".to_owned());
       BeatGrid::steady(120.0, duration)
     });
+    // Sections are named from the tags, so a direction written into one mustn't become its name.
+    let lyrics = plan::tidy_lyrics(lyrics).lyrics;
+    let lyrics = lyrics.as_str();
     let heard = match copy {
       Ok((bytes, mime)) if self.engine.config.vertex_enabled() => {
         self.send(SongUpdate::Note("Gemini is listening to the track\u{2026}".to_owned()));
@@ -809,7 +812,13 @@ fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool) -> String
   if instrumental || draft.lyrics.trim().is_empty() {
     prompt.push_str("\nInstrumental only, no vocals.");
   } else {
-    prompt.push_str(&format!("\n\nSing these lyrics as written, following their section tags:\n\n{}", draft.lyrics.trim()));
+    // Notes to the band that were written among the lyrics go with the direction, where they
+    // can't be mistaken for words; the lyrics are left as bare section tags and sung lines.
+    let tidied = plan::tidy_lyrics(&draft.lyrics);
+    if !tidied.directions.is_empty() {
+      prompt.push_str(&format!("\nArrangement notes, for the instruments and production only, never sung or spoken: {}.", tidied.directions.join("; ")));
+    }
+    prompt.push_str(&format!("\n\nSing these lyrics as written. A line in square brackets is a section label only: follow it, and never sing, speak or read it out.\n\n{}", tidied.lyrics));
   }
   prompt
 }
@@ -1450,6 +1459,12 @@ mod tests {
       let full = music_prompt(&draft, SongLength::TwoMinutes, false);
       assert!(full.starts_with("Fast breakbeat, 140 BPM\nA complete song about two minutes long"));
       assert!(full.ends_with("[Verse]\nla"));
+      // Directions written among the lyrics go to the band, not the singer.
+      let noted = Draft { lyrics: "[Intro: guitar loop, drums kick in]\nVerse 1\nla\nOutro [repeat to fade]".into(), ..draft.clone() };
+      let sent = music_prompt(&noted, SongLength::Minute, false);
+      assert!(sent.contains("Arrangement notes, for the instruments and production only, never sung or spoken: Intro: guitar loop, drums kick in; Outro: repeat to fade."), "{sent}");
+      assert!(sent.ends_with("never sing, speak or read it out.\n\n[Intro]\n\n[Verse 1]\nla\n\n[Outro]"), "{sent}");
+      assert!(!full.contains("Arrangement notes"));
       assert!(music_prompt(&draft, SongLength::Minute, false).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false).contains("about three minutes long"));
       let instrumental = music_prompt(&draft, SongLength::Clip, true);
       assert!(instrumental.contains("A 30-second piece.") && instrumental.ends_with("Instrumental only, no vocals."));
