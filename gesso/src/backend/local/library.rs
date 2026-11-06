@@ -66,6 +66,8 @@ pub struct NewFile<'a> {
   pub maybe_batch_token: Option<&'a str>,
   pub maybe_prompt_token: Option<&'a str>,
   pub maybe_model_id: Option<&'a str>,
+  /// What the file is, shown with it in the library.
+  pub maybe_title: Option<&'a str>,
 }
 
 /// The library, shared by the backend's tasks.
@@ -175,7 +177,7 @@ impl LocalLibrary {
       maybe_model_type: file.maybe_model_id.map(str::to_owned),
       maybe_origin_model_type: file.maybe_model_id.map(str::to_owned),
       maybe_duration_millis: None,
-      maybe_title: None,
+      maybe_title: file.maybe_title.map(str::to_owned),
       media_links: links,
       created_at: chrono::Utc::now().to_rfc3339(),
     };
@@ -348,6 +350,6 @@ mod tests {
   }
 
   fn new_file<'a>(bytes: &'a [u8], class: MediaClass, batch: Option<&'a str>) -> NewFile<'a> {
-    NewFile { bytes, extension: if class == MediaClass::Video { "mp4" } else { "png" }, class, origin: Origin::Generated, maybe_batch_token: batch, maybe_prompt_token: None, maybe_model_id: Some("nano_banana_2_vertex") }
+    NewFile { bytes, extension: if class == MediaClass::Video { "mp4" } else { "png" }, class, origin: Origin::Generated, maybe_batch_token: batch, maybe_prompt_token: None, maybe_model_id: Some("nano_banana_2_vertex"), maybe_title: None }
   }
 }

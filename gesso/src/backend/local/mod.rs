@@ -189,7 +189,7 @@ impl LocalEngine {
         if class == MediaClass::Image && image::guess_format(&bytes).is_err() {
           return Err("not a picture, video or sound".to_owned());
         }
-        self.library.add(NewFile { bytes: &bytes, extension: &file.extension, class, origin: Origin::Generated, maybe_batch_token: None, maybe_prompt_token: None, maybe_model_id: None }).map_err(|e| e.to_string())
+        self.library.add(NewFile { bytes: &bytes, extension: &file.extension, class, origin: Origin::Generated, maybe_batch_token: None, maybe_prompt_token: None, maybe_model_id: None, maybe_title: None }).map_err(|e| e.to_string())
       });
       match added {
         Ok(_) => {
@@ -285,7 +285,7 @@ impl LocalEngine {
     } else {
       (bytes, extension)
     };
-    let file = self.library.add(NewFile { bytes, extension, class, origin: Origin::Upload, maybe_batch_token: None, maybe_prompt_token: None, maybe_model_id: None }).map_err(|e| e.to_string())?;
+    let file = self.library.add(NewFile { bytes, extension, class, origin: Origin::Upload, maybe_batch_token: None, maybe_prompt_token: None, maybe_model_id: None, maybe_title: None }).map_err(|e| e.to_string())?;
     let thumbnail = file.thumbnail(THUMBNAIL_WIDTH);
     Ok(UploadedMedia { token: file.token, duration_secs: 0.0, thumbnail, full_url: Some(file.media_links.cdn_url) })
   }
@@ -355,7 +355,7 @@ impl LocalEngine {
       Modality::Image => MediaClass::Image,
     };
     // Saving writes files (and runs FFmpeg for video posters): keep it off the async workers.
-    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: prompt_token.as_deref(), maybe_model_id: Some(&model.info.id) })).collect::<anyhow::Result<_>>())?;
+    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: prompt_token.as_deref(), maybe_model_id: Some(&model.info.id), maybe_title: None })).collect::<anyhow::Result<_>>())?;
     let record = generation_record(&self.config, request, &decision, &batch, upstream, cost, routing_cost, basis, saved.len(), started);
     if let Err(err) = self.library.add_generation(record) {
       warn!("Couldn't save the routing record: {err}");
@@ -474,7 +474,7 @@ impl LocalEngine {
     if let Some(account) = route.account {
       self.charge(tx, vec![(account, cost, route.upstream.to_owned())], &batch);
     }
-    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: None, maybe_model_id: Some(route.id) })).collect::<anyhow::Result<_>>())?;
+    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: None, maybe_model_id: Some(route.id), maybe_title: None })).collect::<anyhow::Result<_>>())?;
     let record = GenerationRecord { batch_token: batch.clone(), requested_model: route.id.to_owned(), chosen_model: route.id.to_owned(), chosen_name: route.name.to_owned(), provider: route.provider.to_owned(), upstream_model: route.upstream.to_owned(), decided_by: "user".to_owned(), maybe_jev: None, candidates: vec![route.name.to_owned()], ruled_out: Vec::new(), cost_usd: cost, routing_cost_usd: 0.0, cost_basis: basis, outputs: saved.len() as u32, seconds: started.elapsed().as_secs_f32() };
     if let Err(err) = self.library.add_generation(record) {
       warn!("Couldn't save the tool record: {err}");

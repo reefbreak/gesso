@@ -2,6 +2,7 @@
 //! `project.json` in the project's own folder (`~/Artcraft/local/songs/<id>/`) next to its song,
 //! reference images, stills and clips, so the work can be picked up later.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -259,6 +260,33 @@ pub struct SongProject {
   /// before that are sorted out when they are opened.
   #[serde(default)]
   errors_split: bool,
+  /// What `cut` was made from (`None` for a film cut before this was recorded).
+  #[serde(default)]
+  pub cut_of: Option<CutOf>,
+  /// The video's files that are in the library already, so opening it adds only the rest.
+  #[serde(default)]
+  pub in_library: BTreeSet<PathBuf>,
+}
+
+/// What the film on file was cut from: the pass, and each scene's clip or still in order. A cut
+/// goes out of date without anyone seeing it, when clips are made after it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CutOf {
+  pub quality: Quality,
+  pub media: Vec<PathBuf>,
+}
+
+/// What a cut would be made of: how many scenes come from each kind of source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CutSources {
+  /// Clips of the pass being cut.
+  pub own_clips: usize,
+  /// Clips of the other pass, used where this pass has none.
+  pub borrowed_clips: usize,
+  /// Stills held on screen where a scene has no clip in either pass.
+  pub stills: usize,
+  pub missing: usize,
 }
 
 /// A saved project, for the list on the first stage.
@@ -529,6 +557,39 @@ impl SongProject {
       .collect()
   }
 
+  /// The clip or still each scene would contribute to a cut in `quality`, in order.
+  pub fn cut_media(&self, quality: Quality) -> Option<Vec<PathBuf>> {
+    Some(self.cut_shots(quality)?.into_iter().map(|shot| match shot.media {
+      ShotMedia::Clip(path) | ShotMedia::Still(path) => path,
+    }).collect())
+  }
+
+  /// Whether the film on file is what a cut in `quality` would make now: `None` when there is no
+  /// film, or it was cut before its sources were recorded.
+  pub fn cut_is_current(&self, quality: Quality) -> Option<bool> {
+    let made = self.cut.as_ref().and(self.cut_of.as_ref())?;
+    Some(made.quality == quality && Some(&made.media) == self.cut_media(quality).as_ref())
+  }
+
+  /// What a cut in `quality` would be made of, scene by scene: that pass's own clips, clips
+  /// borrowed from the other pass, stills standing in for clips, and scenes with nothing at all.
+  pub fn cut_sources(&self, quality: Quality) -> CutSources {
+    let other = if quality == Quality::Draft { Quality::Final } else { Quality::Draft };
+    let mut sources = CutSources::default();
+    for shot in &self.shots {
+      if shot.take(quality).best_clip().is_some() {
+        sources.own_clips += 1;
+      } else if shot.take(other).best_clip().is_some() {
+        sources.borrowed_clips += 1;
+      } else if shot.has_still() {
+        sources.stills += 1;
+      } else {
+        sources.missing += 1;
+      }
+    }
+    sources
+  }
+
   /// Seconds of video a pass's clips would take to generate, at the clip lengths Veo makes (or
   /// `whole_clips_of` seconds each, for resolutions that only come in one length).
   pub fn seconds_to_generate(&self, quality: Quality, only_missing: bool, whole_clips_of: Option<u16>) -> u32 {
@@ -703,6 +764,35 @@ mod tests {
     assert_eq!(opened.shots.iter().map(|s| s.slot.lyric.as_str()).collect::<Vec<_>>(), ["one", "two", ""]);
     assert!(opened.shots.iter().all(|s| s.draft.still.is_some()), "nothing but the words moves");
     let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn a_cut_says_what_it_is_made_of() {
+    let mut project = SongProject::new();
+    let clip = |path: &str| Some(PathBuf::from(path));
+    project.shots = vec![
+      Shot { draft: Take { clip: clip("d1.mp4"), ..Default::default() }, finished: Take { clip: clip("f1.mp4"), ..Default::default() }, ..Default::default() },
+      Shot { draft: Take { clip: clip("d2.mp4"), ..Default::default() }, ..Default::default() },
+      Shot { draft: Take { still: Some(PathBuf::from("d3.png")), ..Default::default() }, ..Default::default() },
+      Shot::default(),
+    ];
+    assert_eq!(project.cut_sources(Quality::Final), CutSources { own_clips: 1, borrowed_clips: 1, stills: 1, missing: 1 });
+    assert_eq!(project.cut_sources(Quality::Draft), CutSources { own_clips: 2, borrowed_clips: 0, stills: 1, missing: 1 });
+  }
+
+  /// A film cut from draft clips is out of date once final clips exist, or when the pass changes.
+  #[test]
+  fn a_cut_goes_out_of_date_when_its_clips_change() {
+    let mut project = SongProject::new();
+    project.shots = vec![Shot { slot: slot(0, 0.0, 4.0), draft: Take { clip: Some(PathBuf::from("d1.mp4")), ..Default::default() }, ..Default::default() }];
+    assert_eq!(project.cut_is_current(Quality::Draft), None, "nothing cut yet");
+    project.cut = Some(PathBuf::from("cut_v1.mp4"));
+    assert_eq!(project.cut_is_current(Quality::Draft), None, "a film from before its sources were recorded");
+    project.cut_of = Some(CutOf { quality: Quality::Draft, media: project.cut_media(Quality::Draft).unwrap() });
+    assert_eq!(project.cut_is_current(Quality::Draft), Some(true));
+    assert_eq!(project.cut_is_current(Quality::Final), Some(false), "it was cut in the other pass");
+    project.shots[0].draft.synced = Some(PathBuf::from("d1_synced.mp4"));
+    assert_eq!(project.cut_is_current(Quality::Draft), Some(false), "a lip sync has been made since");
   }
 
   #[test]

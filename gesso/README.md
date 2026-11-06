@@ -168,6 +168,15 @@ runs, and leaves everything it made editable before the next stage uses it.
   is the same person, and it goes with every still along with the sheet, the location and up to
   two props. It stays through edits to the brief and goes only when a rewritten brief replaces the
   performer. A picture of your own can be uploaded to the card instead.
+- **Everything a video makes is in the library.** Every version of every asset goes in as it is
+  made, draft and final alike: the song, the vocal stem, reference images, stills, clips,
+  lip-synced clips and each cut, plus tracks and pictures you bring in. Each is titled with the
+  video's name and what it is ("scene 12 still, final, v3"). Opening a video adds whatever in
+  its folder isn't there yet, so videos made earlier catch up.
+- **The film says what it was cut from.** A cut uses the pass's own clip for each scene and falls
+  back to the other pass's, then to a still. The Final Video stage says how many scenes would
+  fall back, which pass the film on screen was cut in, and when clips or lip syncs made since
+  have put it out of date.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

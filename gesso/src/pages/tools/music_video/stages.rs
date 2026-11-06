@@ -823,10 +823,12 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
     }),
   }
   let total = page.project.shots.len();
-  let own_clips = page.project.shots.iter().filter(|s| s.take(quality).clip.is_some()).count();
-  let any_clip = page.project.shots.iter().filter(|s| s.has_clip()).count();
-  let stills_held = page.project.shots.iter().filter(|s| !s.has_clip() && s.has_still()).count();
-  let blank = page.project.shots.iter().filter(|s| !s.has_clip() && !s.has_still()).count();
+  let sources = page.project.cut_sources(quality);
+  let (own_clips, borrowed, stills_held, blank) = (sources.own_clips, sources.borrowed_clips, sources.stills, sources.missing);
+  // Whether the film on screen is what this pass would cut now, and which pass it was cut in.
+  let current = page.project.cut_is_current(quality);
+  let cut_in = page.project.cut_of.as_ref().map(|made| made.quality);
+  let has_cut = page.project.cut.is_some();
   let unsynced = page.project.scenes_to_sync(quality, true).0.len();
   let line = page.progress_line().filter(|_| page.running_here());
   let mut changed = false;
@@ -834,13 +836,36 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
   let _ = env;
   panel(ui, panel_rect, "Final Video", "The film is saved to your library, where it can go on to FilmCraft or Edit Video.", |ui| {
     field(ui, &format!("{} pass", quality.label()));
-    let borrowed = any_clip - own_clips;
-    let pass_note = match (quality, borrowed) {
-      (_, 0) => format!("{own_clips} of {total} scenes have a clip from this pass."),
-      (Quality::Final, _) => format!("{own_clips} of {total} scenes have a final clip; {borrowed} will use their draft clip until the final one is made."),
-      (Quality::Draft, _) => format!("{own_clips} of {total} scenes have a draft clip; {borrowed} will use their final clip."),
-    };
-    ui.label(small(&pass_note));
+    let warn = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).size(12.0).color(theme::BADGE_BETA));
+    match (quality, borrowed) {
+      (_, 0) => {
+        ui.label(small(&format!("{own_clips} of {total} scenes have a clip from this pass.")));
+      },
+      // A final film that is partly draft clips looks like the draft, so it is said loudly.
+      (Quality::Final, _) => {
+        warn(ui, &format!("Only {own_clips} of {total} scenes have a final clip, and {borrowed} would use their draft clip instead, so the film would not be full quality. Make the final clips on the Shots stage first."));
+      },
+      (Quality::Draft, _) => {
+        ui.label(small(&format!("{own_clips} of {total} scenes have a draft clip; {borrowed} will use their final clip.")));
+      },
+    }
+    if has_cut {
+      ui.add_space(6.0);
+      match (current, cut_in) {
+        (Some(true), _) => {
+          ui.label(small(&format!("The film on screen is up to date: cut in the {} pass from what is here now.", quality.label().to_lowercase())));
+        },
+        (Some(false), Some(made_in)) if made_in != quality => {
+          warn(ui, &format!("The film on screen was cut in the {} pass. Cut it again to make it from the {} pass.", made_in.label().to_lowercase(), quality.label().to_lowercase()));
+        },
+        (Some(false), _) => {
+          warn(ui, "The film on screen is out of date: clips or lip syncs have been made since it was cut. Cut it again.");
+        },
+        (None, _) => {
+          warn(ui, "The film on screen was cut before Gesso kept track of what went into it. Cut it again to be sure it uses this pass.");
+        },
+      }
+    }
     field(ui, "Finish");
     if let Some(i) = segmented(ui, &Grade::ALL.map(Grade::label), Grade::ALL.iter().position(|g| *g == page.project.grade).unwrap_or(0)) {
       page.project.grade = Grade::ALL[i];

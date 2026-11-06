@@ -17,7 +17,7 @@ use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
-use crate::backend::local::song::project::{Quality, ReferenceKind, SongProject, Stage, Summary, Track};
+use crate::backend::local::song::project::{CutOf, Quality, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
 use crate::backend::local::tools::VeoTier;
@@ -160,6 +160,8 @@ pub struct MusicVideoPage {
   reference_changes: Vec<String>,
   /// The slots a plan in flight was asked for.
   pending_slots: Vec<Slot>,
+  /// What a cut in flight is being made from.
+  pending_cut: Option<CutOf>,
   /// When the project last changed without being saved.
   dirty_since: Option<f64>,
   /// A project to open on the first frame (`ARTCRAFT_MUSIC_VIDEO`, for screenshots).
@@ -168,7 +170,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None }
   }
 }
 
@@ -221,6 +223,7 @@ impl MusicVideoPage {
       SongUpdate::Track { path, model, sung } => {
         // A new track means new beats, so everything timed to the old one goes.
         let generated = !model.is_empty();
+        self.project.in_library.insert(path.clone());
         self.project.track = Some(Track { path, model, sung });
         self.project.grid = None;
         self.project.sections.clear();
@@ -248,6 +251,7 @@ impl MusicVideoPage {
         }
       },
       SongUpdate::Reference { index, path } => {
+        self.project.in_library.insert(path.clone());
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.image = Some(path);
           reference.error = None;
@@ -271,6 +275,7 @@ impl MusicVideoPage {
         if let Some(shot) = self.project.shots.get_mut(index) {
           // The clip (and its lip sync) was made from the old still.
           let take = shot.take_mut(quality);
+          self.project.in_library.insert(path.clone());
           take.still = Some(path);
           take.clip = None;
           take.synced = None;
@@ -283,6 +288,7 @@ impl MusicVideoPage {
         if let Some(shot) = self.project.shots.get_mut(index) {
           // A lip sync of the old clip no longer applies.
           let take = shot.take_mut(quality);
+          self.project.in_library.insert(path.clone());
           take.clip = Some(path);
           take.synced = None;
           shot.clip_error = None;
@@ -294,6 +300,7 @@ impl MusicVideoPage {
       },
       SongUpdate::Synced { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
+          self.project.in_library.insert(path.clone());
           shot.take_mut(quality).synced = Some(path);
           shot.clip_error = None;
         }
@@ -302,7 +309,10 @@ impl MusicVideoPage {
         }
         self.progress(sync);
       },
-      SongUpdate::Vocals(path) => self.project.vocals = Some(path),
+      SongUpdate::Vocals(path) => {
+        self.project.in_library.insert(path.clone());
+        self.project.vocals = Some(path);
+      },
       SongUpdate::ShotFailed { index, message } => {
         // A failed clip or lip sync belongs to the Shots stage; the scene's still is fine.
         let on_clip = self.slot(sync).as_ref().is_some_and(|run| run.stage == Stage::Shots);
@@ -315,7 +325,15 @@ impl MusicVideoPage {
         }
         self.progress(sync);
       },
+      SongUpdate::Catalogued(paths) => {
+        if !paths.is_empty() {
+          notice = library(&format!("{} file{} from this video added to your library", paths.len(), if paths.len() == 1 { "" } else { "s" }));
+        }
+        self.project.in_library.extend(paths);
+      },
       SongUpdate::Cut(path) => {
+        self.project.in_library.insert(path.clone());
+        self.project.cut_of = self.pending_cut.take();
         self.project.cut = Some(path);
         self.player = None;
         notice = library("The film is in your library");
@@ -502,6 +520,9 @@ impl MusicVideoPage {
         if let Some(project) = SongProject::load(&library_dir, &id) {
           let stage = if project.reachable(project.stage) { project.stage } else { project.furthest() };
           *self = Self { project, stage, writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
+          // Everything the video has made belongs in the library, whenever it was made.
+          let request = SongRequest::Catalogue { dir: self.project.dir(&library_dir), known: self.project.in_library.clone() };
+          self.start(backend, 0, "Checking this video's files are in the library\u{2026}", request);
         }
       },
       Action::Write { rewrite } => {
@@ -684,6 +705,7 @@ impl MusicVideoPage {
       Action::Cut => {
         if let (Some(track), Some(shots)) = (&self.project.track, self.project.cut_shots(self.quality())) {
           self.project.cut_version += 1;
+          self.pending_cut = self.project.cut_media(self.quality()).map(|media| CutOf { quality: self.quality(), media });
           let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, shots, version: self.project.cut_version };
           self.start(backend, 0, "Cutting the film on your Mac\u{2026}", request);
         }

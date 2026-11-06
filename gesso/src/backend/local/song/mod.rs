@@ -26,6 +26,7 @@ pub mod plan;
 pub mod project;
 pub mod writer;
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +37,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::stream;
 use log::{info, warn};
+use serde_json::Value;
 
 use super::bedrock::DEFAULT_CLAUDE_MODEL;
 use super::fal::{FalClient, VOCALS_MODEL};
@@ -251,6 +253,11 @@ pub enum SongRequest {
     turns: Vec<Turn>,
     writer: Writer,
   },
+  /// Adds to the library whatever in the video's folder isn't `known` to be there yet.
+  Catalogue {
+    dir: PathBuf,
+    known: BTreeSet<PathBuf>,
+  },
   /// The user's own picture for a reference, copied into the project.
   ImportReference {
     dir: PathBuf,
@@ -333,6 +340,8 @@ pub enum SongUpdate {
     message: String,
   },
   Cut(PathBuf),
+  /// The video's files that were just added to the library.
+  Catalogued(Vec<PathBuf>),
   /// A progress line for the page.
   Note(String),
   Done(Result<(), String>),
@@ -430,6 +439,7 @@ impl SongRun<'_> {
         let path = dir.join(format!("song_imported.{extension}"));
         std::fs::create_dir_all(&dir)?;
         std::fs::copy(&file, &path).map_err(|e| anyhow::anyhow!("Couldn't copy {}: {e}", file.display()))?;
+        self.add_to_library(&path, &std::fs::read(&path)?, MediaClass::Audio);
         self.send(SongUpdate::Track { path, model: String::new(), sung: String::new() });
       },
       SongRequest::Analyse { audio, lyrics } => self.analyse(&audio, &lyrics).await?,
@@ -498,6 +508,7 @@ impl SongRun<'_> {
         });
         stream::iter(jobs).buffer_unordered(CLIPS_AT_ONCE).collect::<Vec<()>>().await;
       },
+      SongRequest::Catalogue { dir, known } => self.catalogue(&dir, &known),
       SongRequest::ImportReference { dir, index, version, kind, file } => {
         let bytes = std::fs::read(&file).map_err(|e| anyhow::anyhow!("Couldn't read {}: {e}", file.display()))?;
         // Re-encoded as PNG: the image models take PNG, JPEG and WebP, and uploads come in more kinds.
@@ -508,6 +519,7 @@ impl SongRun<'_> {
           Ok(out)
         })?;
         let path = save_picture(&dir.join("references"), &format!("{}_{:02}_v{version}.png", kind.label(), index + 1), &png)?;
+        self.add_to_library(&path, &png, MediaClass::Image);
         self.send(SongUpdate::Reference { index, path });
       },
       SongRequest::ImportVocals { dir, file } => {
@@ -515,6 +527,7 @@ impl SongRun<'_> {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("vocals_imported.{extension}"));
         std::fs::copy(&file, &path).map_err(|e| anyhow::anyhow!("Couldn't copy {}: {e}", file.display()))?;
+        self.add_to_library(&path, &std::fs::read(&path)?, MediaClass::Audio);
         self.send(SongUpdate::Vocals(path));
       },
       SongRequest::LipSync { dir, track, vocals, quality, shots } => {
@@ -542,7 +555,7 @@ impl SongRun<'_> {
         let target = out.clone();
         tokio::task::spawn_blocking(move || cut::assemble(&shots, &audio, aspect.size(&resolution), grade, &target)).await??;
         let bytes = std::fs::read(&out)?;
-        self.add_to_library(&bytes, "mp4", MediaClass::Video);
+        self.add_to_library(&out, &bytes, MediaClass::Video);
         self.send(SongUpdate::Cut(out));
       },
     }
@@ -560,7 +573,7 @@ impl SongRun<'_> {
     info!("Song made by {}", song.model);
     self.charge(Account::Vertex, self.engine.prices.lyria_song(&song.model), &song.model);
     let path = save(dir, &format!("song_v{version}.{}", song.file.extension), &song.file.bytes)?;
-    self.add_to_library(&song.file.bytes, song.file.extension, MediaClass::Audio);
+    self.add_to_library(&path, &song.file.bytes, MediaClass::Audio);
     self.send(SongUpdate::Track { path, model: song.model, sung: song.text });
     Ok(())
   }
@@ -622,7 +635,7 @@ impl SongRun<'_> {
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
     let file = in_keeping(file, look);
     let path = save_picture(dir, &format!("{}_{:02}_v{}.{}", job.kind.label(), job.index + 1, job.version, file.extension), &file.bytes)?;
-    self.add_to_library(&file.bytes, file.extension, MediaClass::Image);
+    self.add_to_library(&path, &file.bytes, MediaClass::Image);
     Ok(path)
   }
 
@@ -640,7 +653,9 @@ impl SongRun<'_> {
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
     self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
     let file = in_keeping(file, &design.look);
-    save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)
+    let path = save_picture(dir, &format!("shot_{:03}_{}_v{}.{}", job.index + 1, quality.tag(), job.version, file.extension), &file.bytes)?;
+    self.add_to_library(&path, &file.bytes, MediaClass::Image);
+    Ok(path)
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -652,7 +667,9 @@ impl SongRun<'_> {
     let rate = self.engine.prices.veo_per_second(tier.model(), false, resolution).unwrap_or(0.0);
     self.charge(Account::Vertex, f64::from(seconds) * rate, tier.model());
     let file = files.into_iter().next().ok_or_else(|| anyhow::anyhow!("Veo returned no video"))?;
-    save(dir, &format!("clip_{:03}_{}_v{}.mp4", job.index + 1, quality.tag(), job.version), &file.bytes)
+    let path = save(dir, &format!("clip_{:03}_{}_v{}.mp4", job.index + 1, quality.tag(), job.version), &file.bytes)?;
+    self.add_to_library(&path, &file.bytes, MediaClass::Video);
+    Ok(path)
   }
 
   /// The track's vocal stem, separated on fal and kept in the project for every later sync.
@@ -664,6 +681,7 @@ impl SongRun<'_> {
     let vocals = fal.vocals(&bytes, mime).await?;
     self.charge(Account::Fal, seconds.unwrap_or(0.0) * self.engine.prices.vocals_per_second(), VOCALS_MODEL);
     let path = save(dir, "vocals.mp3", &vocals)?;
+    self.add_to_library(&path, &vocals, MediaClass::Audio);
     self.send(SongUpdate::Vocals(path.clone()));
     Ok(path)
   }
@@ -676,7 +694,9 @@ impl SongRun<'_> {
     let pro = quality == Quality::Final;
     let synced = fal.lip_sync(&head?, &voice?, pro).await?;
     self.charge(Account::Fal, seconds * self.engine.prices.lip_sync_per_second(pro), if pro { "lipsync-2-pro" } else { "lipsync-2" });
-    save(dir, &format!("clip_{:03}_{}_synced_v{}.mp4", job.index + 1, quality.tag(), job.version), &synced)
+    let path = save(dir, &format!("clip_{:03}_{}_synced_v{}.mp4", job.index + 1, quality.tag(), job.version), &synced)?;
+    self.add_to_library(&path, &synced, MediaClass::Video);
+    Ok(path)
   }
 
   /// Asks the writer for JSON.
@@ -705,11 +725,40 @@ impl SongRun<'_> {
     }
   }
 
-  fn add_to_library(&self, bytes: &[u8], extension: &str, class: MediaClass) {
-    let added = tokio::task::block_in_place(|| self.engine.library.add(NewFile { bytes, extension, class, origin: Origin::Generated, maybe_batch_token: Some(&self.batch), maybe_prompt_token: None, maybe_model_id: Some(MODEL_ID) }));
+  /// Puts a copy of one of the video's files (at `path`, holding `bytes`) in the library, titled
+  /// with the video's name and what the file is. Every version of every asset goes in.
+  fn add_to_library(&self, path: &Path, bytes: &[u8], class: MediaClass) {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let title = asset_title(path);
+    // Filed with what the app made, even a track or picture the user brought in: the library
+    // page leaves uploads out, and every one of a video's files should be found there. The
+    // title says which were imported.
+    let added = tokio::task::block_in_place(|| self.engine.library.add(NewFile { bytes, extension, class, origin: Origin::Generated, maybe_batch_token: Some(&self.batch), maybe_prompt_token: None, maybe_model_id: Some(MODEL_ID), maybe_title: Some(&title) }));
     if let Err(err) = added {
-      warn!("Couldn't add the file to the library: {err:#}");
+      warn!("Couldn't add {} to the library: {err:#}", path.display());
     }
+  }
+
+  /// Adds the files of a video made before everything went to the library: every picture, clip
+  /// and track in its folder that isn't `known` to be there already, old versions included.
+  fn catalogue(&self, dir: &Path, known: &BTreeSet<PathBuf>) {
+    let files = project_media(dir);
+    let missing: Vec<&(PathBuf, MediaClass)> = files.iter().filter(|(path, _)| !known.contains(path)).collect();
+    let mut added = Vec::new();
+    for (n, (path, class)) in missing.iter().enumerate() {
+      if self.stopped() {
+        break;
+      }
+      self.send(SongUpdate::Note(format!("Adding this video's files to the library\u{2026} {} of {}", n + 1, missing.len())));
+      match std::fs::read(path) {
+        Ok(bytes) => {
+          self.add_to_library(path, &bytes, *class);
+          added.push(path.clone());
+        },
+        Err(err) => warn!("Couldn't read {}: {err}", path.display()),
+      }
+    }
+    self.send(SongUpdate::Catalogued(added));
   }
 
   fn charge(&self, account: Account, usd: f64, item: &str) {
@@ -864,6 +913,67 @@ fn still_model(pro: bool) -> &'static str {
   } else {
     NANO_BANANA
   }
+}
+
+/// Every picture, clip and track in a video's folder, in a steady order: the folder itself and
+/// its `references`, `shots` and `clips`. The grid's small copies and the project file are not media.
+fn project_media(dir: &Path) -> Vec<(PathBuf, MediaClass)> {
+  let mut out = Vec::new();
+  for folder in [dir.to_path_buf(), dir.join("references"), dir.join("shots"), dir.join("clips")] {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&folder).into_iter().flatten().flatten().map(|entry| entry.path()).filter(|path| path.is_file()).collect();
+    files.sort();
+    for path in files {
+      let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+      if name.starts_with('.') || name.ends_with(".thumb.jpg") {
+        continue;
+      }
+      let class = match name.rsplit('.').next().unwrap_or_default() {
+        "png" | "jpg" | "jpeg" | "webp" => MediaClass::Image,
+        "mp4" => MediaClass::Video,
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" => MediaClass::Audio,
+        _ => continue,
+      };
+      out.push((path, class));
+    }
+  }
+  out
+}
+
+/// A library title for one of a video's files: the video's name, then what the file is, read
+/// from its name (`shot_012_final_v3.png` is "scene 12 still, final, v3").
+fn asset_title(path: &Path) -> String {
+  let video = path.ancestors().skip(1).take(2).find_map(|dir| std::fs::read_to_string(dir.join("project.json")).ok()).and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|project| project.get("title").and_then(Value::as_str).map(str::trim).filter(|title| !title.is_empty()).map(str::to_owned)).unwrap_or_else(|| "Music video".to_owned());
+  format!("{video} \u{b7} {}", describe_asset(&path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default()))
+}
+
+fn describe_asset(stem: &str) -> String {
+  let mut words = stem.split('_');
+  let what = match words.next().unwrap_or_default() {
+    "shot" => format!("scene {} still", number(words.next())),
+    "clip" => format!("scene {} clip", number(words.next())),
+    "look" => "performer".to_owned(),
+    "face" => "face".to_owned(),
+    "location" => "location".to_owned(),
+    "prop" => "prop".to_owned(),
+    "song" => "song".to_owned(),
+    "vocals" => "vocal stem".to_owned(),
+    "cut" => "the film".to_owned(),
+    other => other.to_owned(),
+  };
+  let notes: Vec<String> = words.filter_map(|word| match word {
+    "draft" | "final" => Some(word.to_owned()),
+    "synced" => Some("lip-synced".to_owned()),
+    "imported" => Some("imported".to_owned()),
+    version if version.starts_with('v') && version[1..].chars().all(|c| c.is_ascii_digit()) => Some(version.to_owned()),
+    _ => None,
+  }).collect();
+  if notes.is_empty() { what } else { format!("{what}, {}", notes.join(", ")) }
+}
+
+/// "012" as "12"; anything else as it is.
+fn number(word: Option<&str>) -> String {
+  let word = word.unwrap_or_default();
+  word.parse::<u32>().map_or_else(|_| word.to_owned(), |n| n.to_string())
 }
 
 /// Writes `bytes` to `dir/name`, making the folder.
@@ -1135,7 +1245,8 @@ mod tests {
       assert_eq!(body["generationConfig"]["imageConfig"], json!({ "aspectRatio": "9:16", "imageSize": "1K" }));
       let prompt = body["contents"][0]["parts"][1]["text"].as_str().unwrap();
       assert!(prompt.contains("they are the person on the reference sheet") && prompt.contains("The venue: a tunnel."));
-      assert!(engine.library().list("image", false, 0, 40).0.is_empty(), "stills stay out of the library");
+      let in_library = engine.library().list("image", false, 0, 40).0;
+      assert_eq!(in_library.iter().map(|file| file.maybe_title.as_deref()).collect::<Vec<_>>(), [Some("Music video \u{b7} scene 1 still, draft, v1")], "every still that is made goes in the library, titled");
       let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1187,6 +1298,38 @@ mod tests {
       let gemini_requests = gemini_requests.lock().unwrap();
       assert!(gemini_requests[0].0.starts_with("POST /v1beta/models/gemini-3.1-flash-image:generateContent"), "{}", gemini_requests[0].0);
       assert!(gemini_requests[0].1.contains("A wide shot"));
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Opening a video made before everything went to the library adds what is in its folder:
+    /// every version of every picture, clip and track, but not the grid's small copies, the
+    /// project file or anything already there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_videos_older_files_are_added_to_the_library() {
+      let (engine, dir) = engine("http://127.0.0.1:9/".to_owned());
+      let project = dir.join("p");
+      std::fs::create_dir_all(&project).unwrap();
+      std::fs::write(project.join("project.json"), r#"{"title":"Context Maker"}"#).unwrap();
+      let draft = save_picture(&project.join("shots"), "shot_012_draft_v3.png", &tiny_png()).unwrap();
+      let final_still = save_picture(&project.join("shots"), "shot_012_final_v1.png", &tiny_png()).unwrap();
+      let sheet = save(&project.join("references"), "look_01_v2.png", &tiny_png()).unwrap();
+      let song = save(&project, "song_imported.mp3", b"mp3").unwrap();
+      let known = BTreeSet::from([sheet.clone()]);
+      let (tx, rx) = std::sync::mpsc::channel();
+      engine.start_song(14, SongRequest::Catalogue { dir: project.clone(), known }, tx.clone(), egui::Context::default());
+      let updates = finished(&rx, 14).await;
+      let Some(SongUpdate::Catalogued(added)) = updates.iter().find(|u| matches!(u, SongUpdate::Catalogued(_))) else { panic!("{updates:?}") };
+      assert_eq!(added, &[song.clone(), draft.clone(), final_still.clone()], "the sheet was there already; small copies and the project file aren't media");
+      let titles: Vec<String> = engine.library().list("image", false, 0, 40).0.into_iter().filter_map(|file| file.maybe_title).collect();
+      assert!(titles.contains(&"Context Maker \u{b7} scene 12 still, draft, v3".to_owned()) && titles.contains(&"Context Maker \u{b7} scene 12 still, final, v1".to_owned()), "{titles:?}");
+      // A track the user brought in shows on the library page too (which leaves uploads out).
+      let tracks = engine.library().list("audio", false, 0, 40).0;
+      assert_eq!((tracks.len(), tracks[0].maybe_title.as_deref()), (1, Some("Context Maker \u{b7} song, imported")));
+
+      // A second look finds nothing new.
+      engine.start_song(15, SongRequest::Catalogue { dir: project, known: BTreeSet::from([sheet, song, draft, final_still]) }, tx, egui::Context::default());
+      let again = finished(&rx, 15).await;
+      assert!(again.iter().any(|u| matches!(u, SongUpdate::Catalogued(added) if added.is_empty())), "{again:?}");
       let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1313,6 +1456,16 @@ mod tests {
       let face_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Face], false);
       assert!(face_only.contains("they are the person in the close-up") && !face_only.contains("Keep the location"), "{face_only}");
       assert!(face_from_sheet_prompt("grainy black and white").contains("this exact person") && face_from_sheet_prompt("grainy black and white").contains("Strictly black and white"));
+    }
+
+    #[test]
+    fn library_titles_say_what_each_file_is() {
+      let named = |stem: &str| describe_asset(stem);
+      assert_eq!(named("shot_012_final_v3"), "scene 12 still, final, v3");
+      assert_eq!(named("clip_007_draft_synced_v2"), "scene 7 clip, draft, lip-synced, v2");
+      assert_eq!(named("shot_003_v1"), "scene 3 still, v1", "a still from before there were two passes");
+      assert_eq!((named("look_01_v2"), named("face_02_v1"), named("prop_04_v1")), ("performer, v2".to_owned(), "face, v1".to_owned(), "prop, v1".to_owned()));
+      assert_eq!((named("song_v483920"), named("vocals"), named("vocals_imported"), named("cut_v4")), ("song, v483920".to_owned(), "vocal stem".to_owned(), "vocal stem, imported".to_owned(), "the film, v4".to_owned()));
     }
 
     /// With the sheet missing, the location's picture must not be taken for the performer.
