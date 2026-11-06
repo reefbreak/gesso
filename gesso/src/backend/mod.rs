@@ -9,6 +9,7 @@ pub mod session;
 pub mod video;
 pub mod wire;
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -273,13 +274,13 @@ impl Backend {
   }
 
   /// Runs a Music Video stage on the local engine; the page hears back by `run_id`.
-  pub fn run_song(&self, run_id: u64, request: local::song::SongRequest) {
+  pub fn run_song(&self, run_id: u64, project: &str, request: local::song::SongRequest) {
     let Some(local) = &self.local else {
       let _ = self.tx.send(Event::Song { run_id, update: local::song::SongUpdate::Done(Err("Music Video runs in local mode only.".to_owned())) });
       return;
     };
     let _guard = self.rt.enter();
-    local.start_song(run_id, request, self.tx.clone(), self.ctx.clone());
+    local.start_song_for(run_id, Some(project.to_owned()), request, self.tx.clone(), self.ctx.clone());
   }
 
   /// Stops a Music Video run before its next still or clip.
@@ -303,6 +304,11 @@ impl Backend {
     self.spawn(move |tx| async move {
       let _ = tx.send(Event::Health(local.check_health().await));
     });
+  }
+
+  /// In local mode, what each Music Video project has cost so far, part by part.
+  pub fn song_costs(&self) -> BTreeMap<String, Vec<(String, f64)>> {
+    self.local.as_ref().map(|l| l.spend_by_project()).unwrap_or_default()
   }
 
   /// In local mode, spend per model on each account and the totals.

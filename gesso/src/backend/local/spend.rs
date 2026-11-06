@@ -4,6 +4,7 @@
 //! [`super::pricing`]), so the totals update the moment a call returns. They're an estimate of
 //! this app's usage, not the cloud bill, which also counts anything else on those accounts.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,11 @@ pub struct SpendEntry {
   pub item: String,
   #[serde(default)]
   pub maybe_batch_token: Option<String>,
+  /// The Music Video project the call was for, and which part of making it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_project: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_part: Option<String>,
 }
 
 /// Totals per account.
@@ -146,6 +152,12 @@ impl SpendLedger {
     break_down(&entries, Local::now())
   }
 
+  /// What each Music Video project has cost, part by part (a project id to its parts).
+  pub fn by_project(&self) -> BTreeMap<String, Vec<(String, f64)>> {
+    let entries = self.entries.lock().map(|e| e.clone()).unwrap_or_default();
+    by_project(&entries)
+  }
+
   pub fn path(&self) -> &Path {
     &self.path
   }
@@ -178,6 +190,23 @@ fn summarize(entries: &[SpendEntry], now: DateTime<Local>) -> SpendSummary {
     summary.last = Some((last.item.clone(), usd));
   }
   summary
+}
+
+/// Charges that name a project, summed by part.
+fn by_project(entries: &[SpendEntry]) -> BTreeMap<String, Vec<(String, f64)>> {
+  let mut out: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
+  for entry in entries {
+    let Some(project) = &entry.maybe_project else {
+      continue;
+    };
+    let part = entry.maybe_part.as_deref().unwrap_or("Other");
+    let parts = out.entry(project.clone()).or_default();
+    match parts.iter_mut().find(|(name, _)| name == part) {
+      Some((_, usd)) => *usd += entry.usd,
+      None => parts.push((part.to_owned(), entry.usd)),
+    }
+  }
+  out
 }
 
 /// Charges grouped by account and model, in the user's local day and month.
@@ -235,11 +264,23 @@ mod tests {
   fn spend_is_broken_down_by_model_costliest_first() {
     let now = Local.with_ymd_and_hms(2026, 10, 12, 15, 0, 0).unwrap();
     let at = |m: u32, d: u32| Local.with_ymd_and_hms(2026, m, d, 9, 0, 0).unwrap().with_timezone(&Utc);
-    let charge = |when, account, usd, item: &str| SpendEntry { at: when, account, usd, item: item.to_owned(), maybe_batch_token: None };
+    let charge = |when, account, usd, item: &str| SpendEntry { at: when, account, usd, item: item.to_owned(), maybe_batch_token: None, maybe_project: None, maybe_part: None };
     let entries = vec![charge(at(9, 30), Account::Vertex, 2.0, "veo"), charge(at(10, 1), Account::Vertex, 1.0, "veo"), charge(at(10, 12), Account::Vertex, 0.5, "veo"), charge(at(10, 12), Account::Vertex, 0.07, "nano"), charge(at(10, 12), Account::Bedrock, 0.14, "nano")];
     let items = break_down(&entries, now);
     assert_eq!(items.iter().map(|i| (i.account, i.item.as_str(), i.calls)).collect::<Vec<_>>(), [(Account::Vertex, "veo", 3), (Account::Bedrock, "nano", 1), (Account::Vertex, "nano", 1)]);
     assert_eq!((items[0].today, items[0].month, items[0].all_time), (0.5, 1.5, 3.5));
+  }
+
+  #[test]
+  fn a_videos_charges_are_summed_by_part() {
+    let tagged = |usd, project: Option<&str>, part: &str| SpendEntry { maybe_project: project.map(str::to_owned), maybe_part: Some(part.to_owned()), ..entry(Utc::now(), Account::Vertex, usd, None) };
+    let costs = by_project(&[tagged(0.08, Some("a"), "Song"), tagged(0.5, Some("a"), "Clips"), tagged(0.25, Some("a"), "Clips"), tagged(1.0, Some("b"), "Clips"), tagged(9.0, None, "Clips")]);
+    assert_eq!(costs.get("a"), Some(&vec![("Song".to_owned(), 0.08), ("Clips".to_owned(), 0.75)]));
+    assert_eq!(costs.get("b"), Some(&vec![("Clips".to_owned(), 1.0)]));
+    assert_eq!(costs.len(), 2, "a charge from another page belongs to no video");
+    // Ledgers written before videos were counted still load.
+    let old: SpendEntry = serde_json::from_str(r#"{"at":"2026-01-01T00:00:00Z","account":"vertex","usd":1.0,"item":"gemini"}"#).unwrap();
+    assert_eq!((old.maybe_project, old.maybe_part), (None, None));
   }
 
   #[test]
@@ -255,6 +296,6 @@ mod tests {
 
   fn entry(at: DateTime<Utc>, account: Account, usd: f64, batch: Option<&str>) -> SpendEntry {
     let item = if account == Account::Bedrock { "stability" } else { "gemini" };
-    SpendEntry { at, account, usd, item: item.to_owned(), maybe_batch_token: batch.map(str::to_owned) }
+    SpendEntry { at, account, usd, item: item.to_owned(), maybe_batch_token: batch.map(str::to_owned), maybe_project: None, maybe_part: None }
   }
 }

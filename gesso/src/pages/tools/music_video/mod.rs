@@ -9,7 +9,7 @@
 mod stages;
 mod workshop;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,13 +17,14 @@ use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
-use crate::backend::local::song::project::{CutOf, Quality, ReferenceKind, SongProject, Stage, Summary, Track};
-use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
+use crate::backend::local::song::project::{CutOf, Made, Quality, ReferenceKind, SongProject, Stage, Summary, Track};
+use crate::backend::local::song::{COST_PARTS, ClipJob, ReferenceJob, SongEstimate, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
 use crate::backend::local::song::cut::ShotMedia;
 use crate::backend::local::tools::{Film, FilmScene, VeoTier};
 use crate::backend::video::VideoPlayer;
 use crate::pages::common::{AppRequest, Env};
+use crate::shell::usd;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets;
@@ -43,6 +44,8 @@ const HD_CLIP_SECONDS: u16 = 8;
 const DEFAULT_TIERS: [usize; 2] = [0, 2];
 /// Both passes start at 720p: 1080p costs about twice as much, because every clip is 8 seconds.
 const DEFAULT_RESOLUTIONS: [usize; 2] = [0, 0];
+/// How often the cost figures are read from the ledger again.
+const COSTS_EVERY_SECS: f64 = 2.0;
 
 /// Names a saved project to open at startup.
 const OPEN_ENV: &str = "ARTCRAFT_MUSIC_VIDEO";
@@ -121,6 +124,25 @@ pub(super) enum Action {
   Reveal(PathBuf),
 }
 
+/// The price, part by part, of what a video's folder holds: the estimate for work done before
+/// each video's calls were counted. Clips are priced at the page's default model for their pass.
+fn price_made(backend: &Backend, made: &Made) -> Vec<(String, f64)> {
+  let price = |estimate: SongEstimate| backend.estimate_song(&estimate).unwrap_or(0.0);
+  let mut parts = vec![(COST_PARTS[1], made.songs as f64 * price(SongEstimate::Song { clip: false })), (COST_PARTS[2], price(SongEstimate::Stills { count: made.references, pro: false, large: false })), (COST_PARTS[3], price(SongEstimate::Stills { count: made.stills[0], pro: false, large: false }) + price(SongEstimate::Stills { count: made.stills[1], pro: true, large: true }))];
+  let mut clips = 0.0;
+  let mut sync = 0.0;
+  for pass in 0..2 {
+    let resolution = RESOLUTIONS[DEFAULT_RESOLUTIONS[pass]];
+    // 1080p clips are always eight seconds long.
+    let seconds = if resolution == "1080p" { made.clips[pass] as u32 * 8 } else { made.clip_seconds[pass] };
+    clips += price(SongEstimate::Clips { seconds, tier: TIERS[DEFAULT_TIERS[pass]], resolution: resolution.to_owned() });
+    sync += price(SongEstimate::LipSync { seconds: made.synced_seconds[pass], pro: pass == 1, separate_seconds: if pass == 0 { made.separated_seconds } else { 0.0 } });
+  }
+  parts.push((COST_PARTS[4], clips));
+  parts.push((COST_PARTS[5], sync));
+  parts.into_iter().filter(|(_, usd)| *usd > 0.0).map(|(part, usd)| (part.to_owned(), usd)).collect()
+}
+
 /// Something for the app to say after an update.
 pub struct Notice {
   pub error: bool,
@@ -180,11 +202,13 @@ pub struct MusicVideoPage {
   dirty_since: Option<f64>,
   /// A project to open on the first frame (`ARTCRAFT_MUSIC_VIDEO`, for screenshots).
   open_on_start: Option<String>,
+  /// What each video's calls have cost, part by part, and when that was last read.
+  costs: Option<(f64, BTreeMap<String, Vec<(String, f64)>>)>,
 }
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, costs: None }
   }
 }
 
@@ -206,14 +230,83 @@ impl MusicVideoPage {
     if let Some(id) = std::mem::take(&mut self.open_on_start) {
       self.apply(env, Action::Open(id));
     }
+    self.count_costs(ui, env.backend);
     let mut actions = Vec::new();
-    self.rail(ui, rail, &mut actions);
+    let all = self.cost_of_all(env.backend);
+    self.rail(ui, rail, all, &mut actions);
     stages::show(self, ui, env, stage, panel, &mut actions);
     workshop::show(self, ui, &mut actions);
     for action in actions {
       self.apply(env, action);
     }
     self.autosave(ui, env.backend);
+  }
+
+  /// Keeps the cost figures fresh: the ledger is read again every couple of seconds, and a video
+  /// made before its calls were counted is priced once from the files in its folder.
+  fn count_costs(&mut self, ui: &Ui, backend: &Backend) {
+    let now = ui.input(|i| i.time);
+    if self.costs.as_ref().is_none_or(|(read, _)| now - read >= COSTS_EVERY_SECS) {
+      self.costs = Some((now, backend.song_costs()));
+    }
+    if self.busy() {
+      ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(COSTS_EVERY_SECS));
+    }
+    if self.project.earlier_cost.is_none() {
+      if let Some(library_dir) = backend.library_dir() {
+        let made = self.project.made(&self.project.dir(&library_dir));
+        self.project.earlier_cost = Some(price_made(backend, &made));
+        if !made.is_empty() {
+          self.dirty_since.get_or_insert(now);
+        }
+      }
+    }
+  }
+
+  /// What a video has cost so far, part by part in [`COST_PARTS`]' order: its counted calls, plus
+  /// `earlier`, the estimate for what was made before they were counted.
+  pub(super) fn cost_of(&self, id: &str, earlier: &[(String, f64)]) -> Vec<(&'static str, f64)> {
+    let counted = self.costs.as_ref().and_then(|(_, costs)| costs.get(id));
+    COST_PARTS.iter().map(|part| (*part, counted.into_iter().flatten().chain(earlier).filter(|(name, _)| name == part).map(|(_, usd)| usd).sum::<f64>())).filter(|(_, usd)| *usd > 0.0).collect()
+  }
+
+  /// The rail's cost block: this video's total, what it's made of, and every video together.
+  fn cost_block(&self, ui: &mut Ui, backend_all: f64) {
+    let earlier = self.project.earlier_cost.clone().unwrap_or_default();
+    let parts = self.cost_of(&self.project.id, &earlier);
+    let total: f64 = parts.iter().map(|(_, usd)| usd).sum();
+    widgets::hud(ui, "Cost so far", theme::FAINT);
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new(usd(total)).size(20.0).family(theme::mono_bold()).color(theme::INK));
+    for (part, cost) in &parts {
+      let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
+      ui.painter().text(row.left_center(), Align2::LEFT_CENTER, *part, FontId::new(11.5, theme::medium()), theme::MUTED);
+      ui.painter().text(row.right_center(), Align2::RIGHT_CENTER, usd(*cost), FontId::new(11.5, theme::mono()), theme::MUTED);
+    }
+    let estimated: f64 = earlier.iter().map(|(_, usd)| usd).sum();
+    let mut note = "At list prices, counted as each call returns.".to_owned();
+    if estimated > 0.0 {
+      note = format!("At list prices. {} of it is an estimate from the files made before Gesso counted each video's calls.", usd(estimated));
+    }
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new(note).size(11.0).color(theme::FAINT));
+    ui.add_space(4.0);
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
+    ui.painter().text(row.left_center(), Align2::LEFT_CENTER, "All videos", FontId::new(11.5, theme::medium()), theme::SIDEBAR_INK);
+    ui.painter().text(row.right_center(), Align2::RIGHT_CENTER, usd(backend_all), FontId::new(11.5, theme::mono_bold()), theme::SIDEBAR_INK);
+    ui.add_space(12.0);
+  }
+
+  /// What a saved video has cost so far.
+  pub(super) fn cost_of_saved(&self, backend: &Backend, summary: &Summary) -> f64 {
+    let earlier = summary.earlier_cost.clone().unwrap_or_else(|| price_made(backend, &summary.made));
+    self.cost_of(&summary.id, &earlier).iter().map(|(_, usd)| usd).sum()
+  }
+
+  /// Every video's cost together: the one on screen and the saved ones.
+  pub(super) fn cost_of_all(&self, backend: &Backend) -> f64 {
+    let open: f64 = self.cost_of(&self.project.id, self.project.earlier_cost.as_deref().unwrap_or_default()).iter().map(|(_, usd)| usd).sum();
+    open + self.recent.iter().flatten().filter(|summary| summary.id != self.project.id).map(|summary| self.cost_of_saved(backend, summary)).sum::<f64>()
   }
 
   /// Takes news from a run; `None` when it isn't this page's or needs no toast.
@@ -511,7 +604,7 @@ impl MusicVideoPage {
   }
 
   /// The left rail: the project's name and the stages, each with its state.
-  fn rail(&mut self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
+  fn rail(&mut self, ui: &mut Ui, rect: Rect, all_videos: f64, actions: &mut Vec<Action>) {
     ui.painter().rect(rect, theme::RADIUS, theme::PANEL, theme::hairline(), egui::StrokeKind::Inside);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(egui::Layout::top_down(egui::Align::Min)));
     let ui = &mut child;
@@ -569,6 +662,7 @@ impl MusicVideoPage {
       };
       ui.label(egui::RichText::new(hint).size(11.5).color(theme::FAINT));
       ui.add_space(12.0);
+      self.cost_block(ui, all_videos);
       self.to_update(ui, actions);
       if let Some(line) = self.progress_line() {
         ui.label(egui::RichText::new(line).size(12.0).color(theme::MUTED));
@@ -856,7 +950,7 @@ impl MusicVideoPage {
     *self.slot(sync) = Some(Run { id, stage: self.stage, note: note.to_owned(), started_as: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality, scenes, clips });
     // The project's folder has to exist before a run writes into it.
     self.save(backend);
-    backend.run_song(id, request);
+    backend.run_song(id, &self.project.id, request);
   }
 
   fn analyse(&mut self, backend: &Backend) {

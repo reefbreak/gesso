@@ -362,6 +362,9 @@ impl Shot {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SongProject {
+  /// What the video cost before its calls were counted one by one: an estimate from the files
+  /// in its folder, part by part, made once (`None` until then).
+  pub earlier_cost: Option<Vec<(String, f64)>>,
   pub id: String,
   pub created_at: String,
   pub updated_at: String,
@@ -488,6 +491,32 @@ pub struct Summary {
   pub updated_at: String,
   pub stage: Stage,
   pub shots: usize,
+  /// What the video cost before its calls were counted one by one, once that's been worked
+  /// out; until then, `made` is what to work it out from.
+  pub earlier_cost: Option<Vec<(String, f64)>>,
+  pub made: Made,
+}
+
+/// What a video's folder holds that was paid for: every version of everything, since a redraw
+/// keeps the picture it replaces. Used to price the work done before Gesso counted each video's
+/// calls. Imported files cost nothing and aren't counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Made {
+  pub songs: usize,
+  pub references: usize,
+  /// Stills, clips and their seconds, and lip-synced seconds, for the draft pass then the final.
+  pub stills: [usize; 2],
+  pub clips: [usize; 2],
+  pub clip_seconds: [u32; 2],
+  pub synced_seconds: [f64; 2],
+  /// Seconds of track the vocal was separated from (zero when it wasn't).
+  pub separated_seconds: f64,
+}
+
+impl Made {
+  pub fn is_empty(&self) -> bool {
+    *self == Self::default()
+  }
 }
 
 impl SongProject {
@@ -526,9 +555,43 @@ impl SongProject {
     let Ok(entries) = std::fs::read_dir(library_dir.join(DIRECTORY)) else {
       return Vec::new();
     };
-    let mut out: Vec<Summary> = entries.flatten().filter_map(|entry| Self::load(library_dir, &entry.file_name().to_string_lossy())).map(|p| Summary { title: p.display_title(), id: p.id, updated_at: p.updated_at, stage: p.stage, shots: p.shots.len() }).collect();
+    let mut out: Vec<Summary> = entries.flatten().filter_map(|entry| Self::load(library_dir, &entry.file_name().to_string_lossy())).map(|p| Summary { title: p.display_title(), made: if p.earlier_cost.is_none() { p.made(&p.dir(library_dir)) } else { Made::default() }, earlier_cost: p.earlier_cost, id: p.id, updated_at: p.updated_at, stage: p.stage, shots: p.shots.len() }).collect();
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
+  }
+
+  /// What `dir`, the project's folder, holds that was paid for, read from the files' names
+  /// (`shot_012_final_v3.png`, `clip_012_draft_synced_v2.mp4`).
+  pub fn made(&self, dir: &Path) -> Made {
+    let names = |folder: PathBuf| -> Vec<String> { std::fs::read_dir(folder).into_iter().flatten().flatten().filter(|entry| entry.path().is_file()).map(|entry| entry.file_name().to_string_lossy().to_lowercase()).filter(|name| !name.starts_with('.') && !name.ends_with(".thumb.jpg") && !name.contains("imported")).collect() };
+    let mut made = Made::default();
+    for name in names(dir.to_path_buf()) {
+      if name.starts_with("song_v") {
+        made.songs += 1;
+      } else if name.starts_with("vocals.") {
+        made.separated_seconds = self.grid.as_ref().map_or(0.0, |grid| grid.duration);
+      }
+    }
+    made.references = names(dir.join("references")).iter().filter(|name| name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".webp")).count();
+    for name in names(dir.join("shots")) {
+      if let Some(pass) = pass_of(&name).filter(|_| name.starts_with("shot_")) {
+        made.stills[pass] += 1;
+      }
+    }
+    for name in names(dir.join("clips")) {
+      let Some(pass) = pass_of(&name).filter(|_| name.starts_with("clip_") && name.ends_with(".mp4")) else {
+        continue;
+      };
+      // The scene's length as planned now; a clip of a scene since removed counts as the longest.
+      let seconds = name.split('_').nth(1).and_then(|n| n.parse::<usize>().ok()).and_then(|n| self.shots.get(n.checked_sub(1)?)).map(|shot| shot.slot.seconds());
+      if name.contains("_synced_") {
+        made.synced_seconds[pass] += seconds.unwrap_or(8.0);
+      } else {
+        made.clips[pass] += 1;
+        made.clip_seconds[pass] += u32::from(seconds.map_or(8, super::plan::clip_seconds));
+      }
+    }
+    made
   }
 
   /// The project's folder, where its song, stills and clips are kept.
@@ -832,6 +895,17 @@ impl SongProject {
     let scenes: Vec<usize> = self.shots.iter().enumerate().filter(|(_, s)| s.sing && s.take(quality).clip.is_some() && (!only_missing || s.sync_due(quality))).map(|(i, _)| i).collect();
     let seconds = scenes.iter().map(|i| self.shots[*i].slot.seconds()).sum();
     (scenes, seconds)
+  }
+}
+
+/// Which pass a file's name says it belongs to: 0 for the draft, 1 for the final.
+fn pass_of(name: &str) -> Option<usize> {
+  if name.contains("_draft") {
+    Some(0)
+  } else if name.contains("_final") {
+    Some(1)
+  } else {
+    None
   }
 }
 
@@ -1147,6 +1221,25 @@ mod tests {
     assert_eq!(project.scenes_to_sync(Quality::Draft, true).0, [0]);
     // The final pass has nothing of its own yet: two drafts to redraw.
     assert_eq!(project.lineage(Quality::Final), Lineage { stills_missing: 2, ..Default::default() });
+  }
+
+  /// A video made before its calls were counted is priced from its folder: every version of
+  /// every paid-for file, read from the names; imported files and small copies don't count.
+  #[test]
+  fn what_a_video_has_made_is_read_from_its_folder() {
+    let dir = std::env::temp_dir().join(format!("gesso-made-{}", uuid::Uuid::new_v4()));
+    for (folder, names) in [("", vec!["song_v1.mp3", "song_v2.mp3", "song_imported.mp3", "vocals.mp3", "cut_v1.mp4", "project.json"]), ("references", vec!["look_01_v1.png", "look_01_v2.png", "look_01_v2.thumb.jpg", "location_03_v1_imported.png"]), ("shots", vec!["shot_001_draft_v1.png", "shot_001_draft_v2.png", "shot_001_draft_end_v1.png", "shot_001_final_v1.png", "shot_001_draft_v1.thumb.jpg"]), ("clips", vec!["clip_001_draft_v1.mp4", "clip_002_draft_v1.mp4", "clip_009_final_v1.mp4", "clip_001_draft_synced_v1.mp4"])] {
+      std::fs::create_dir_all(dir.join(folder)).unwrap();
+      for name in names {
+        std::fs::write(dir.join(folder).join(name), b"x").unwrap();
+      }
+    }
+    let mut project = SongProject::new();
+    project.shots = vec![Shot { slot: slot(0, 0.0, 3.5), ..Default::default() }, Shot { slot: slot(1, 3.5, 9.0), ..Default::default() }];
+    let made = project.made(&dir);
+    assert_eq!(made, Made { songs: 2, references: 2, stills: [3, 1], clips: [2, 1], clip_seconds: [4 + 6, 8], synced_seconds: [3.5, 0.0], separated_seconds: 0.0 });
+    assert!(!made.is_empty() && SongProject::new().made(&dir.join("nowhere")).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]

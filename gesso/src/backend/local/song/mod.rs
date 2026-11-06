@@ -301,6 +301,20 @@ pub enum SongRequest {
   },
 }
 
+impl SongRequest {
+  /// Which part of a video's cost the request's charges belong to (one of [`COST_PARTS`]).
+  pub fn cost_part(&self) -> &'static str {
+    match self {
+      SongRequest::Compose { .. } => COST_PARTS[1],
+      SongRequest::References { .. } => COST_PARTS[2],
+      SongRequest::Stills { .. } => COST_PARTS[3],
+      SongRequest::Clips { .. } => COST_PARTS[4],
+      SongRequest::LipSync { .. } => COST_PARTS[5],
+      _ => COST_PARTS[0],
+    }
+  }
+}
+
 /// What a run reports back, as it goes. Every run ends with `Done`.
 #[derive(Debug)]
 pub enum SongUpdate {
@@ -359,6 +373,9 @@ pub enum SongUpdate {
   Done(Result<(), String>),
 }
 
+/// What a video's cost is made of, in the order it's shown.
+pub const COST_PARTS: [&str; 6] = ["Writing and planning", "Song", "Reference images", "Scene images", "Clips", "Lip sync"];
+
 /// Something the page prices before running it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SongEstimate {
@@ -388,14 +405,21 @@ pub enum SongEstimate {
 
 impl LocalEngine {
   /// Runs a stage in the background; the page hears back by `run_id`.
+  #[cfg(test)]
   pub fn start_song(self: &Arc<Self>, run_id: u64, request: SongRequest, tx: Sender<Event>, ctx: egui::Context) {
+    self.start_song_for(run_id, None, request, tx, ctx);
+  }
+
+  /// As [`Self::start_song`], with the run's charges counted towards `project` (its id).
+  pub fn start_song_for(self: &Arc<Self>, run_id: u64, project: Option<String>, request: SongRequest, tx: Sender<Event>, ctx: egui::Context) {
+    let part = request.cost_part();
     let cancel = Arc::new(AtomicBool::new(false));
     if let Ok(mut runs) = self.song_runs.lock() {
       runs.insert(run_id, cancel.clone());
     }
     let engine = self.clone();
     tokio::spawn(async move {
-      let run = SongRun { engine: &engine, run_id, tx: &tx, ctx: &ctx, cancel, batch: LocalLibrary::new_batch_token(), pace: Pace::new(QUOTA_WAIT) };
+      let run = SongRun { engine: &engine, run_id, tx: &tx, ctx: &ctx, cancel, batch: LocalLibrary::new_batch_token(), pace: Pace::new(QUOTA_WAIT), project, part };
       let result = run.stage(request).await.map_err(|err| {
         warn!("Music video run {run_id} failed: {err:#}");
         format!("{err:#}")
@@ -436,6 +460,9 @@ struct SongRun<'a> {
   batch: String,
   /// Slows the whole run down once a provider's per-minute limit is met.
   pace: Pace,
+  /// The video the run's charges count towards, and which part of it.
+  project: Option<String>,
+  part: &'static str,
 }
 
 impl SongRun<'_> {
@@ -813,7 +840,7 @@ impl SongRun<'_> {
   }
 
   fn charge(&self, account: Account, usd: f64, item: &str) {
-    self.engine.charge(self.tx, vec![(account, usd, item.to_owned())], &self.batch);
+    self.engine.charge_for(self.tx, vec![(account, usd, item.to_owned())], &self.batch, self.project.as_deref().map(|project| (project, self.part)));
   }
 
   /// Runs a provider call at the run's pace, waiting and trying again when its quota is met and
@@ -1480,10 +1507,12 @@ mod tests {
       let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
       let (tx, rx) = std::sync::mpsc::channel();
       let draft = Draft { title: "Night Bus".into(), style: "slow, 90 BPM".into(), lyrics: "[Verse]\nline one".into() };
-      engine.start_song(4, SongRequest::Compose { dir: dir.join("p"), draft, length: SongLength::TwoMinutes, instrumental: false, version: 1 }, tx, egui::Context::default());
+      engine.start_song_for(4, Some("song_a".into()), SongRequest::Compose { dir: dir.join("p"), draft, length: SongLength::TwoMinutes, instrumental: false, version: 1 }, tx, egui::Context::default());
       let updates = finished(&rx, 4).await;
       assert!(matches!(updates.last(), Some(SongUpdate::Done(Ok(())))), "{updates:?}");
       assert!(updates.iter().any(|u| matches!(u, SongUpdate::Track { model, path, .. } if model == "lyria-3.5" && std::fs::read(path).unwrap() == [1, 2, 3])), "{updates:?}");
+      // The song is counted towards the video it was made for.
+      assert_eq!(engine.spend_by_project().get("song_a"), Some(&vec![("Song".to_owned(), 0.08)]));
       let requests = requests.lock().unwrap();
       assert_eq!(requests[0].0, "POST /v1beta/interactions HTTP/1.1");
       let body: Value = serde_json::from_str(&requests[0].1).unwrap();
@@ -1495,7 +1524,7 @@ mod tests {
     async fn a_stopped_run_makes_nothing_more() {
       let (base_url, requests) = fake_vertex(Vec::new());
       let (engine, dir) = engine(base_url);
-      let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO) };
+      let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO), project: None, part: COST_PARTS[0] };
       let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None, ending: false, opening: None }];
       run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());

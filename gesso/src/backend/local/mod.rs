@@ -22,7 +22,7 @@ pub mod suite;
 pub mod tools;
 pub mod vertex;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -163,6 +163,11 @@ impl LocalEngine {
   /// Spend per model on each account (System Health).
   pub fn spend_breakdown(&self) -> Vec<spend::ItemSpend> {
     self.spend.breakdown()
+  }
+
+  /// What each Music Video project has cost so far, part by part.
+  pub fn spend_by_project(&self) -> BTreeMap<String, Vec<(String, f64)>> {
+    self.spend.by_project()
   }
 
   /// Where the spend ledger is saved.
@@ -506,8 +511,14 @@ impl LocalEngine {
 
   /// Records charges against the user's accounts and tells the top bar.
   fn charge(&self, tx: &Sender<Event>, charges: Vec<(Account, f64, String)>, batch: &str) {
+    self.charge_for(tx, charges, batch, None);
+  }
+
+  /// As [`Self::charge`], for a Music Video project: `tag` is the project's id and the part of
+  /// the video the call was for.
+  fn charge_for(&self, tx: &Sender<Event>, charges: Vec<(Account, f64, String)>, batch: &str, tag: Option<(&str, &str)>) {
     let at = chrono::Utc::now();
-    self.spend.record(charges.into_iter().map(|(account, usd, item)| SpendEntry { at, account, usd, item, maybe_batch_token: Some(batch.to_owned()) }).collect());
+    self.spend.record(charges.into_iter().map(|(account, usd, item)| SpendEntry { at, account, usd, item, maybe_batch_token: Some(batch.to_owned()), maybe_project: tag.map(|(project, _)| project.to_owned()), maybe_part: tag.map(|(_, part)| part.to_owned()) }).collect());
     let _ = tx.send(Event::Spend(self.spend.summary()));
   }
 

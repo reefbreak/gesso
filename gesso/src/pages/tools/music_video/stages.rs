@@ -47,7 +47,7 @@ const TEXT_COLUMN: f32 = 760.0;
 pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   ui.painter().rect(stage, theme::RADIUS, theme::fade(theme::INK, 0.012), theme::hairline(), egui::StrokeKind::Inside);
   match page.stage {
-    Stage::Idea => idea(page, ui, stage, panel_rect, actions),
+    Stage::Idea => idea(page, ui, env, stage, panel_rect, actions),
     Stage::Lyrics => lyrics(page, ui, stage, panel_rect, actions),
     Stage::Song => song(page, ui, env, stage, panel_rect, actions),
     Stage::Analysis => analysis(page, ui, env, stage, panel_rect, actions),
@@ -62,16 +62,23 @@ pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
 
 // --- Idea ------------------------------------------------------------------------------------
 
-fn idea(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
+fn idea(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
   let mut changed = false;
   column(ui, stage, "idea", |ui| {
     heading(ui, Stage::Idea, "What's the song?", "Describe the song you want: what it's about, how it should feel, the kind of music. The writer turns it into lyrics and a music direction you can edit.");
     changed |= text_box(ui, "mv-idea", &mut page.project.idea, "A snarling big-beat anthem about the people who write prompts and wrangle agents all day\u{2026}", 6);
     ui.add_space(18.0);
-    widgets::hud(ui, "Your videos", theme::FAINT);
-    ui.add_space(6.0);
     let others: Vec<_> = page.recent.iter().flatten().filter(|s| s.id != page.project.id).cloned().collect();
+    ui.horizontal(|ui| {
+      widgets::hud(ui, "Your videos", theme::FAINT);
+      if !others.is_empty() {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+          ui.label(egui::RichText::new(format!("{} spent on all videos so far", usd(page.cost_of_all(env.backend)))).size(11.5).family(theme::mono()).color(theme::MUTED));
+        });
+      }
+    });
+    ui.add_space(6.0);
     if others.is_empty() {
       ui.label(egui::RichText::new("Videos you start are saved as you go, and your other ones are listed here to come back to.").size(13.0).color(theme::FAINT));
     }
@@ -79,7 +86,7 @@ fn idea(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, a
       let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), if busy { Sense::hover() } else { Sense::click() });
       ui.painter().rect(row, theme::RADIUS, if resp.hovered() && !busy { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
       ui.painter().text(pos2(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, &summary.title, FontId::new(14.0, theme::medium()), theme::INK);
-      let detail = format!("{} \u{b7} {}", summary.stage.label(), day(&summary.updated_at));
+      let detail = format!("{} \u{b7} {} \u{b7} {}", usd(page.cost_of_saved(env.backend, summary)), summary.stage.label(), day(&summary.updated_at));
       ui.painter().text(pos2(row.right() - 14.0, row.center().y), Align2::RIGHT_CENTER, detail, FontId::new(11.5, theme::mono()), theme::MUTED);
       if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !busy {
         actions.push(Action::Open(summary.id.clone()));

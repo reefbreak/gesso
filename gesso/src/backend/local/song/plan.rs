@@ -258,7 +258,7 @@ pub fn tidy_lyrics(lyrics: &str) -> Tidied {
   let mut out = Tidied::default();
   let mut lines: Vec<String> = Vec::new();
   let mut section = String::new();
-  let mut head = |tag: String, lines: &mut Vec<String>| {
+  let head = |tag: String, lines: &mut Vec<String>| {
     if !lines.is_empty() {
       lines.push(String::new());
     }

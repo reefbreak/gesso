@@ -233,6 +233,13 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **A refused song is asked for again.** Google's filter sometimes refuses a prompt it accepts a
   moment later ("Input blocked"). Gesso resubmits once, then without the directions found in the
   lyrics, then with the lyrics as typed, before reporting the error. Refusals aren't billed.
+- **Cost per video.** The left rail shows what the open video has cost so far, split into
+  writing and planning, the song, reference images, scene images, clips and lip sync, with the
+  total for all videos under it; the list on the Idea stage shows each saved video's cost. Every
+  call is counted towards its video as it returns, at list prices (see `spend.json`). A video
+  started before this was counted is priced once from the files in its folder, every version
+  included, and that part is marked as an estimate: it leaves out the writer's calls and anything
+  that failed or was deleted, and prices clips at the default model for their pass.
 - **Draft, then final.** The Quality switch in the left rail picks the pass. **Draft** uses the
   cheap, fast models (Nano Banana 2 at 1K, Veo 3.1 Lite) to settle the direction. **Final** runs
   the same scenes again with the best ones: each still is redrawn by Nano Banana Pro at 2K with
