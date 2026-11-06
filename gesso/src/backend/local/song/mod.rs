@@ -691,6 +691,7 @@ impl SongRun<'_> {
         self.send(SongUpdate::Note(note.to_owned()));
       }
       tried.push(prompt.clone());
+      info!("Asking for the song ({wording:?}) with:\n{prompt}");
       match self.engine.vertex.generate_song(&models, &prompt).await {
         Ok(made) => {
           song = Some(made);
@@ -961,7 +962,14 @@ fn is_blocked(err: &anyhow::Error) -> bool {
 
 /// What Lyria is given: the direction first, then the lyrics under their own heading.
 fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool, wording: Wording) -> String {
-  let mut prompt = format!("{}\n{}", draft.style.trim(), length.music_line());
+  // The direction is named as the thing to follow: sent bare above a page of lyrics, it reads as
+  // one more line and the words end up choosing the genre. The as-typed wording is the plain
+  // one that is fallen back to when a prompt is refused.
+  let mut prompt = match (wording, draft.style.trim()) {
+    (Wording::AsTyped, style) => format!("{style}\n{}", length.music_line()),
+    (_, "") => length.music_line().to_owned(),
+    (_, style) => format!("Musical style, to follow closely for the genre, tempo, instruments, vocal and production, whatever the lyrics suggest:\n{style}\n\n{}", length.music_line()),
+  };
   if instrumental || draft.lyrics.trim().is_empty() {
     prompt.push_str("\nInstrumental only, no vocals.");
   } else {
@@ -975,7 +983,7 @@ fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool, wording: 
     if !tidied.directions.is_empty() && wording == Wording::Sorted {
       prompt.push_str(&format!("\nArrangement notes, for the instruments and production only, never sung or spoken: {}.", tidied.directions.join("; ")));
     }
-    prompt.push_str(&format!("\n\nSing these lyrics as written. A line in square brackets is a section label only: follow it, and never sing, speak or read it out.\n\n{}", tidied.lyrics));
+    prompt.push_str(&format!("\n\nLyrics, to sing as written in the style above. A line in square brackets is a section label only: follow it, and never sing, speak or read it out.\n\n{}", tidied.lyrics));
   }
   prompt
 }
@@ -1656,7 +1664,9 @@ mod tests {
     fn the_music_prompt_leads_with_the_direction() {
       let draft = Draft { title: "T".into(), style: "Fast breakbeat, 140 BPM".into(), lyrics: "[Verse]\nla".into() };
       let full = music_prompt(&draft, SongLength::TwoMinutes, false, Wording::Sorted);
-      assert!(full.starts_with("Fast breakbeat, 140 BPM\nA complete song about two minutes long"));
+      assert!(full.starts_with("Musical style, to follow closely for the genre, tempo, instruments, vocal and production, whatever the lyrics suggest:\nFast breakbeat, 140 BPM\n\nA complete song about two minutes long"), "{full}");
+      assert!(music_prompt(&draft, SongLength::TwoMinutes, false, Wording::AsTyped).starts_with("Fast breakbeat, 140 BPM\nA complete song about two minutes long"));
+      assert!(music_prompt(&Draft { style: " ".into(), ..draft.clone() }, SongLength::TwoMinutes, false, Wording::Sorted).starts_with("A complete song"));
       assert!(full.ends_with("[Verse]\nla"));
       // Directions written among the lyrics go to the band, not the singer.
       let noted = Draft { lyrics: "[Intro: guitar loop, drums kick in]\nVerse 1\nla\nOutro [repeat to fade]".into(), ..draft.clone() };
