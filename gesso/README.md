@@ -230,6 +230,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   out before the song is made and sent to Lyria as arrangement notes; the lyrics go as plain
   section tags (`[Intro]`, `[Verse 1]`) and sung lines. The Lyrics box keeps what you typed. Lines
   in round brackets with no section name are still sung, as backing vocals.
+- **A refused song is asked for again.** Google's filter sometimes refuses a prompt it accepts a
+  moment later ("Input blocked"). Gesso resubmits once, then without the directions found in the
+  lyrics, then with the lyrics as typed, before reporting the error. Refusals aren't billed.
 - **Draft, then final.** The Quality switch in the left rail picks the pass. **Draft** uses the
   cheap, fast models (Nano Banana 2 at 1K, Veo 3.1 Lite) to settle the direction. **Final** runs
   the same scenes again with the best ones: each still is redrawn by Nano Banana Pro at 2K with

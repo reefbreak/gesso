@@ -582,7 +582,38 @@ impl SongRun<'_> {
       (false, Some(model)) => vec![model],
       (false, None) => self.engine.vertex.song_models().to_vec(),
     };
-    let song = self.engine.vertex.generate_song(&models, &music_prompt(draft, length, instrumental)).await?;
+    // Google's filter sometimes refuses a prompt it accepts a moment later, and is stricter with
+    // the direction than with the lyrics. A refusal costs nothing, so ask again: the same way
+    // once, then with the directions found in the lyrics left out, then with the lyrics as typed.
+    let mut tried: Vec<String> = Vec::new();
+    let mut song = None;
+    let mut refusal = None;
+    for wording in [Wording::Sorted, Wording::Sorted, Wording::WithoutNotes, Wording::AsTyped] {
+      let prompt = music_prompt(draft, length, instrumental, wording);
+      if tried.iter().filter(|earlier| **earlier == prompt).count() >= if wording == Wording::Sorted { 2 } else { 1 } {
+        continue;
+      }
+      if let Some(note) = wording.note().filter(|_| !tried.is_empty()) {
+        self.send(SongUpdate::Note(note.to_owned()));
+      }
+      tried.push(prompt.clone());
+      match self.engine.vertex.generate_song(&models, &prompt).await {
+        Ok(made) => {
+          song = Some(made);
+          break;
+        },
+        Err(err) if is_blocked(&err) && !self.stopped() => {
+          warn!("The song's prompt was refused ({wording:?}): {err:#}");
+          refusal = Some(err);
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    let song = match (song, refusal) {
+      (Some(song), _) => song,
+      (None, Some(err)) => return Err(err.context(format!("Google's filter refused the song {} times, however it was worded. It doesn't say which words it objects to: look for an artist, band or song name, or violent or explicit wording, in the music direction and the lyrics", tried.len()))),
+      (None, None) => anyhow::bail!("The song wasn't made"),
+    };
     info!("Song made by {}", song.model);
     self.charge(Account::Vertex, self.engine.prices.lyria_song(&song.model), &song.model);
     let path = save(dir, &format!("song_v{version}.{}", song.file.extension), &song.file.bytes)?;
@@ -806,16 +837,48 @@ impl SongRun<'_> {
   }
 }
 
+/// How the lyrics are put to the music model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wording {
+  /// Directions taken out of the lyrics and given as arrangement notes.
+  Sorted,
+  /// Directions taken out and left out.
+  WithoutNotes,
+  /// The lyrics exactly as typed.
+  AsTyped,
+}
+
+impl Wording {
+  /// What the page says when a refusal leads to this wording.
+  fn note(self) -> Option<&'static str> {
+    match self {
+      Wording::Sorted => Some("Google's filter refused the song; asking again\u{2026}"),
+      Wording::WithoutNotes => Some("Refused again; trying without the directions written in the lyrics\u{2026}"),
+      Wording::AsTyped => Some("Refused again; trying the lyrics exactly as typed (bracketed directions may be sung)\u{2026}"),
+    }
+  }
+}
+
+/// Whether a provider refused the prompt itself (nothing was made or billed).
+fn is_blocked(err: &anyhow::Error) -> bool {
+  let message = format!("{err:#}").to_lowercase();
+  ["input blocked", "prohibited use", "sensitive words"].iter().any(|sign| message.contains(sign))
+}
+
 /// What Lyria is given: the direction first, then the lyrics under their own heading.
-fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool) -> String {
+fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool, wording: Wording) -> String {
   let mut prompt = format!("{}\n{}", draft.style.trim(), length.music_line());
   if instrumental || draft.lyrics.trim().is_empty() {
     prompt.push_str("\nInstrumental only, no vocals.");
   } else {
     // Notes to the band that were written among the lyrics go with the direction, where they
     // can't be mistaken for words; the lyrics are left as bare section tags and sung lines.
+    if wording == Wording::AsTyped {
+      prompt.push_str(&format!("\n\nSing these lyrics as written, following their section tags:\n\n{}", draft.lyrics.trim()));
+      return prompt;
+    }
     let tidied = plan::tidy_lyrics(&draft.lyrics);
-    if !tidied.directions.is_empty() {
+    if !tidied.directions.is_empty() && wording == Wording::Sorted {
       prompt.push_str(&format!("\nArrangement notes, for the instruments and production only, never sung or spoken: {}.", tidied.directions.join("; ")));
     }
     prompt.push_str(&format!("\n\nSing these lyrics as written. A line in square brackets is a section label only: follow it, and never sing, speak or read it out.\n\n{}", tidied.lyrics));
@@ -1456,17 +1519,22 @@ mod tests {
     #[test]
     fn the_music_prompt_leads_with_the_direction() {
       let draft = Draft { title: "T".into(), style: "Fast breakbeat, 140 BPM".into(), lyrics: "[Verse]\nla".into() };
-      let full = music_prompt(&draft, SongLength::TwoMinutes, false);
+      let full = music_prompt(&draft, SongLength::TwoMinutes, false, Wording::Sorted);
       assert!(full.starts_with("Fast breakbeat, 140 BPM\nA complete song about two minutes long"));
       assert!(full.ends_with("[Verse]\nla"));
       // Directions written among the lyrics go to the band, not the singer.
       let noted = Draft { lyrics: "[Intro: guitar loop, drums kick in]\nVerse 1\nla\nOutro [repeat to fade]".into(), ..draft.clone() };
-      let sent = music_prompt(&noted, SongLength::Minute, false);
+      let sent = music_prompt(&noted, SongLength::Minute, false, Wording::Sorted);
       assert!(sent.contains("Arrangement notes, for the instruments and production only, never sung or spoken: Intro: guitar loop, drums kick in; Outro: repeat to fade."), "{sent}");
       assert!(sent.ends_with("never sing, speak or read it out.\n\n[Intro]\n\n[Verse 1]\nla\n\n[Outro]"), "{sent}");
       assert!(!full.contains("Arrangement notes"));
-      assert!(music_prompt(&draft, SongLength::Minute, false).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false).contains("about three minutes long"));
-      let instrumental = music_prompt(&draft, SongLength::Clip, true);
+      // After a refusal: the same lyrics without the notes, then exactly as typed.
+      let plain = music_prompt(&noted, SongLength::Minute, false, Wording::WithoutNotes);
+      assert!(!plain.contains("Arrangement notes") && !plain.contains("guitar loop") && plain.ends_with("[Outro]"), "{plain}");
+      assert!(music_prompt(&noted, SongLength::Minute, false, Wording::AsTyped).ends_with("following their section tags:\n\n[Intro: guitar loop, drums kick in]\nVerse 1\nla\nOutro [repeat to fade]"));
+      assert!(is_blocked(&anyhow::anyhow!("Vertex AI error 400 Bad Request: Input blocked: The prompt could not be submitted. The prompt contains sensitive words")) && !is_blocked(&anyhow::anyhow!("429 Too Many Requests")));
+      assert!(music_prompt(&draft, SongLength::Minute, false, Wording::Sorted).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false, Wording::Sorted).contains("about three minutes long"));
+      let instrumental = music_prompt(&draft, SongLength::Clip, true, Wording::Sorted);
       assert!(instrumental.contains("A 30-second piece.") && instrumental.ends_with("Instrumental only, no vocals."));
       assert!(!instrumental.contains("la"));
     }
