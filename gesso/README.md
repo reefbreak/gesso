@@ -159,6 +159,10 @@ runs, and leaves everything it made editable before the next stage uses it.
   can be started while clips are being made, and clips while a lip sync runs. Each leaves alone
   the scenes the other is working on. The clip and the vocal are put in fal's storage first,
   because fal's models read files from links only.
+- **The words run under the pictures.** Each scene's card shows the line sung over it, so read
+  across the grid the song's words run under the stills and clips like a track; the sung line is
+  brighter on scenes the performer sings on camera. A scene can be marked as sung on the Shots
+  stage as well as on Scenes, which turns the video's lip sync on if it was off.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

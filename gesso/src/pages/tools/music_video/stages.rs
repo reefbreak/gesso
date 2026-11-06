@@ -29,6 +29,9 @@ const CARD_GAP: f32 = 12.0;
 /// Scene and reference cards are at least this wide; the grid fits as many columns as it can.
 const CARD_MIN_WIDTH: f32 = 210.0;
 const CARD_TEXT_HEIGHT: f32 = 54.0;
+/// The line under a scene's card for what is sung over it: read across the grid, the song's words
+/// run under the pictures like a track.
+const CARD_LYRIC_HEIGHT: f32 = 18.0;
 const TIMELINE_HEIGHT: f32 = 28.0;
 /// Reference cards are bigger: there are only a handful, and they're looked at closely.
 const REFERENCE_MIN_WIDTH: f32 = 240.0;
@@ -711,6 +714,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
   let separate_seconds = if page.project.vocals.is_some() { 0.0 } else { page.project.grid.as_ref().map_or(0.0, |g| g.duration) };
   let sync_cost = env.backend.estimate_song(&SongEstimate::LipSync { seconds: sync_seconds, pro: page.pro(), separate_seconds });
   let pass = page.pass();
+  let mut sing_toggled = None;
   panel(ui, panel_rect, "Shots", "The most expensive stage: check the estimate before you run it. Try a few scenes first by picking one and making just its clip.", |ui| {
     field(ui, &format!("Model \u{b7} {} pass", quality.label().to_lowercase()));
     if let Some(i) = segmented(ui, &TIERS.map(|tier| tier.label()), page.tier[pass]) {
@@ -755,12 +759,24 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       }
     }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
-      let shot = &page.project.shots[index];
-      let take = shot.take(quality);
+      let shot = &mut page.project.shots[index];
       field(ui, &format!("Scene {} \u{b7} {:.1} s", index + 1, shot.slot.seconds()));
       ui.label(body(&shot.motion));
+      if !shot.slot.lyric.is_empty() {
+        ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
+      }
+      // Marking a scene as sung here saves a trip back to the Scenes stage.
+      if ui.checkbox(&mut shot.sing, "The performer sings this scene (lip-synced)").on_hover_text("Works best as a close-up with the face towards the camera and the mouth in view").changed() {
+        sing_toggled = Some(shot.sing);
+      }
+      let shot = &page.project.shots[index];
+      let take = shot.take(quality);
       if shot.sing {
-        ui.label(small(if take.synced.is_some() { "Sung and lip-synced." } else { "Sung: not lip-synced yet." }));
+        ui.label(small(match (take.synced.is_some(), take.clip.is_some()) {
+          (true, _) => "Sung and lip-synced.",
+          (false, true) => "Sung: not lip-synced yet. A clip made before the scene was marked as sung wasn't filmed for singing; it can be synced as it is, but making the clip again first gives a face turned to the camera with the mouth moving.",
+          (false, false) => "Sung: make the clip, then lip-sync it.",
+        }));
       }
       if let Some(error) = &shot.clip_error {
         error_line(ui, Some(error));
@@ -770,7 +786,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), can_clip && take.still.is_some(), None) {
         actions.push(Action::Clips(vec![index]));
       }
-      if lip_sync && shot.sing && take.clip.is_some() {
+      if shot.sing && take.clip.is_some() {
         let one_sync = env.backend.estimate_song(&SongEstimate::LipSync { seconds: shot.slot.seconds(), pro: quality == Quality::Final, separate_seconds });
         if run_button(ui, Icon::Mic, if take.synced.is_some() { "Lip-sync this scene again" } else { "Lip-sync this scene" }, one_sync.map(estimate), fal && can_sync, None) {
           actions.push(Action::LipSync(vec![index]));
@@ -779,6 +795,11 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
     }
     next_button(ui, Stage::Final, page.project.shots.iter().any(|s| s.has_clip()), actions);
   });
+  if let Some(sung) = sing_toggled {
+    // A sung scene turns the video's lip sync on; the last one unticked leaves it as it was.
+    page.project.lip_sync |= sung;
+    page.touch(ui);
+  }
 }
 
 // --- Final Video -----------------------------------------------------------------------------
@@ -869,7 +890,7 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
       for index in row * columns..((row + 1) * columns).min(page.project.shots.len()) {
         let shot = &page.project.shots[index];
         let take = shot.take(quality);
-        let (rect, resp) = ui.allocate_exact_size(picture + vec2(0.0, CARD_TEXT_HEIGHT), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(picture + vec2(0.0, CARD_TEXT_HEIGHT + CARD_LYRIC_HEIGHT), Sense::click());
         if !ui.is_rect_visible(rect) {
           continue;
         }
@@ -895,14 +916,23 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
           // Filled once the clip is lip-synced.
           badge(ui, image, 1, Icon::Mic, if take.synced.is_some() { theme::ACCENT } else { Color32::from_black_alpha(170) });
         }
-        let text = Rect::from_min_max(pos2(rect.left(), image.bottom() + 6.0), rect.max);
+        let text = Rect::from_min_max(pos2(rect.left(), image.bottom() + 6.0), pos2(rect.right(), rect.bottom() - CARD_LYRIC_HEIGHT));
+        let lyric = Rect::from_min_max(pos2(rect.left(), text.bottom()), rect.max);
+        if !shot.slot.lyric.trim().is_empty() {
+          // One line, cut short; brighter on the scenes the performer sings on camera.
+          let words = shot.slot.lyric.split_whitespace().collect::<Vec<_>>().join(" ");
+          let colour = if shot.sing { theme::ACCENT_400 } else { theme::MUTED };
+          let galley = ui.painter().layout_no_wrap(format!("\u{201c}{words}\u{201d}"), FontId::new(12.0, egui::FontFamily::Proportional), colour);
+          ui.painter().with_clip_rect(lyric).galley(lyric.left_top() + vec2(0.0, 2.0), galley, colour);
+        }
         let caption = format!("{} \u{b7} {} \u{b7} {:.1}s", index + 1, format_time(shot.slot.start as f32), shot.slot.seconds());
         ui.painter().text(text.left_top(), Align2::LEFT_TOP, caption, FontId::new(11.0, theme::mono()), theme::MUTED);
         ui.painter().text(text.right_top(), Align2::RIGHT_TOP, &shot.slot.section, FontId::new(11.0, theme::mono()), theme::FAINT);
         let line = if shot.beat.is_empty() { &shot.image } else { &shot.beat };
         let galley = ui.painter().layout(line.clone(), FontId::new(12.5, egui::FontFamily::Proportional), theme::INK, text.width());
         ui.painter().with_clip_rect(text).galley(text.left_top() + vec2(0.0, 16.0), galley, theme::INK);
-        let resp = resp.on_hover_text(&shot.image).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let hover = if shot.slot.lyric.trim().is_empty() { shot.image.clone() } else { format!("{}\n\nSung: {}", shot.image, shot.slot.lyric.trim()) };
+        let resp = resp.on_hover_text(hover).on_hover_cursor(egui::CursorIcon::PointingHand);
         // A double click shows the still at full size.
         if let Some(still) = shot.still_for(quality).filter(|_| resp.double_clicked()) {
           requests.push(AppRequest::Preview(file_url(still)));
