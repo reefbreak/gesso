@@ -566,7 +566,9 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let slots = page.project.grid.as_ref().map_or(0, |grid| plan::slots(grid, &page.project.sections, page.project.pace).len());
   // The final pass redraws the stills the draft settled on; the draft draws whatever is missing.
   let drawable = |shot: &&crate::backend::local::song::project::Shot| !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
-  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s) && s.take(quality).still.is_none()).map(|(i, _)| i).collect();
+  // Due: no still yet, or (in the final pass) one redrawn from a draft that has changed since.
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s) && s.still_due(quality)).map(|(i, _)| i).collect();
+  let stale_stills = page.project.lineage(quality).stills_stale;
   let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| drawable(s)).map(|(i, _)| i).collect();
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
@@ -614,6 +616,9 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
         actions.push(Action::Stills(targets.clone(), false));
       }
+      if only_missing && stale_stills > 0 {
+        ui.label(small(&format!("{stale_stills} of these {} out of date: the draft still {} redrawn after the final one was made.", if stale_stills == 1 { "is" } else { "are" }, if stale_stills == 1 { "was" } else { "were" })));
+      }
       if quality == Quality::Final && targets.is_empty() {
         ui.label(small("The final pass redraws draft stills. Draw them in the Draft pass first."));
       }
@@ -655,6 +660,22 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing);
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
+      }
+      // What a redraw overtakes, said before it is done.
+      let take = shot.take(quality);
+      let downstream = match (take.clip.is_some(), take.synced.is_some(), quality == Quality::Draft && shot.finished.still.is_some()) {
+        (false, _, false) => None,
+        (false, _, true) => Some("its final still"),
+        (true, false, false) => Some("its clip"),
+        (true, true, false) => Some("its clip and lip sync"),
+        (true, false, true) => Some("its clip and its final still"),
+        (true, true, true) => Some("its clip, lip sync and final still"),
+      };
+      if quality == Quality::Final && shot.still_stale() {
+        ui.label(egui::RichText::new("This final still is out of date: its draft was redrawn since.").size(12.0).color(theme::BADGE_BETA));
+      }
+      if let Some(downstream) = downstream {
+        ui.label(small(&format!("Redrawing this still puts {downstream} out of date. They stay until you make them again, and the left rail keeps count.")));
       }
       let can_draw = !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
       if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
@@ -703,7 +724,9 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
   });
   let whole = page.whole_clips_of();
   let with_still = page.project.shots.iter().filter(|s| s.take(quality).still.is_some()).count();
-  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.take(quality).still.is_some() && s.take(quality).clip.is_none()).map(|(i, _)| i).collect();
+  // Due: a still with no clip, or with a clip filmed before the still was redrawn.
+  let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.clip_due(quality)).map(|(i, _)| i).collect();
+  let lineage = page.project.lineage(quality);
   let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.take(quality).still.is_some()).map(|(i, _)| i).collect();
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
@@ -735,6 +758,12 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
     ui.label(small(if whole.is_some() { "Veo makes 1080p only as 8-second clips, so every scene costs 8 seconds whatever its length." } else { "Clips are 4, 6 or 8 seconds: the shortest that covers the scene." }));
     ui.add_space(4.0);
     ui.label(small(&format!("{made} of {with_still} clips made \u{b7} {seconds} s of video to generate")));
+    if lineage.clips_stale > 0 {
+      ui.label(egui::RichText::new(format!("{} clip{} out of date: the still was redrawn after the clip was filmed. The button below makes {} again.", lineage.clips_stale, if lineage.clips_stale == 1 { " is" } else { "s are" }, if lineage.clips_stale == 1 { "it" } else { "them" })).size(12.0).color(theme::BADGE_BETA));
+    }
+    if lineage.syncs_stale > 0 {
+      ui.label(egui::RichText::new(format!("{} lip sync{} out of date: the clip was remade, or its still redrawn, since.", lineage.syncs_stale, if lineage.syncs_stale == 1 { " is" } else { "s are" })).size(12.0).color(theme::BADGE_BETA));
+    }
     if with_still == 0 && quality == Quality::Final {
       ui.label(small("Final clips are filmed from final stills. Redraw the stills on the Scenes stage first."));
     }
@@ -779,6 +808,14 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       }
       let shot = &page.project.shots[index];
       let take = shot.take(quality);
+      // The scene's lineage: still, then clip, then lip sync.
+      let stale = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).size(12.0).color(theme::BADGE_BETA));
+      if shot.clip_stale(quality) {
+        stale(ui, "This clip is out of date: the still was redrawn after it was filmed. Make the clip again to match.");
+      }
+      if shot.sync_stale(quality) && !shot.clip_stale(quality) {
+        stale(ui, "This lip sync is out of date: the clip was remade since. Lip-sync it again.");
+      }
       if shot.sing {
         ui.label(small(match (take.synced.is_some(), take.clip.is_some()) {
           (true, _) => "Sung and lip-synced.",
@@ -848,6 +885,10 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
       (Quality::Draft, _) => {
         ui.label(small(&format!("{own_clips} of {total} scenes have a draft clip; {borrowed} will use their final clip.")));
       },
+    }
+    if sources.stale_clips > 0 {
+      ui.add_space(6.0);
+      warn(ui, &format!("{} clip{} out of date: the still was redrawn after the clip was filmed. Make {} again on the Shots stage, or cut anyway to use {} as {}.", sources.stale_clips, if sources.stale_clips == 1 { " is" } else { "s are" }, if sources.stale_clips == 1 { "it" } else { "them" }, if sources.stale_clips == 1 { "it" } else { "them" }, if sources.stale_clips == 1 { "it is" } else { "they are" }));
     }
     if has_cut {
       ui.add_space(6.0);
@@ -935,6 +976,11 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
         }
         if quality == Quality::Final && take.still.is_none() && shot.draft.still.is_some() {
           tag(ui, image, "Draft");
+        } else if clips && shot.clip_stale(quality) {
+          // The still has been redrawn since this clip was filmed.
+          tag(ui, image, "Clip out of date");
+        } else if !clips && quality == Quality::Final && shot.still_stale() {
+          tag(ui, image, "Out of date");
         }
         // The storyboard shows what went wrong with a still; the Shots stage, with a clip.
         if let Some(error) = if clips { &shot.clip_error } else { &shot.error } {
@@ -947,7 +993,7 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
         }
         if shot.sing {
           // Filled once the clip is lip-synced.
-          badge(ui, image, 1, Icon::Mic, if take.synced.is_some() { theme::ACCENT } else { Color32::from_black_alpha(170) });
+          badge(ui, image, 1, Icon::Mic, if take.synced.is_some() && !shot.sync_stale(quality) { theme::ACCENT } else { Color32::from_black_alpha(170) });
         }
         let text = Rect::from_min_max(pos2(rect.left(), image.bottom() + 6.0), pos2(rect.right(), rect.bottom() - CARD_LYRIC_HEIGHT));
         let lyric = Rect::from_min_max(pos2(rect.left(), text.bottom()), rect.max);

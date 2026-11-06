@@ -177,6 +177,12 @@ runs, and leaves everything it made editable before the next stage uses it.
   back to the other pass's, then to a still. The Final Video stage says how many scenes would
   fall back, which pass the film on screen was cut in, and when clips or lip syncs made since
   have put it out of date.
+- **Lineage: what a change overtakes.** A scene's assets are made in order: still, clip, lip sync,
+  film, and in the final pass the still is redrawn from the draft still. Each one records what it
+  was made from. Redraw a still and its clip, lip sync and final still stay where they are but
+  are marked out of date; the left rail counts what each stage has to make or make again, the
+  cards are tagged, and each stage's main button takes the out-of-date ones along with the
+  missing ones. Nothing is thrown away until its replacement is made.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

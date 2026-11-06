@@ -273,12 +273,10 @@ impl MusicVideoPage {
       },
       SongUpdate::Still { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
-          // The clip (and its lip sync) was made from the old still.
-          let take = shot.take_mut(quality);
+          // The clip and lip sync made from the old still stay, marked out of date, until they
+          // are made again.
           self.project.in_library.insert(path.clone());
-          take.still = Some(path);
-          take.clip = None;
-          take.synced = None;
+          shot.set_still(quality, path);
           shot.error = None;
           shot.clip_error = None;
         }
@@ -286,11 +284,9 @@ impl MusicVideoPage {
       },
       SongUpdate::Clip { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
-          // A lip sync of the old clip no longer applies.
-          let take = shot.take_mut(quality);
+          // A lip sync of the old clip stays, marked out of date.
           self.project.in_library.insert(path.clone());
-          take.clip = Some(path);
-          take.synced = None;
+          shot.set_clip(quality, path);
           shot.clip_error = None;
         }
         if self.selected == Some(index) {
@@ -301,7 +297,7 @@ impl MusicVideoPage {
       SongUpdate::Synced { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
           self.project.in_library.insert(path.clone());
-          shot.take_mut(quality).synced = Some(path);
+          shot.set_synced(quality, path);
           shot.clip_error = None;
         }
         if self.selected == Some(index) {
@@ -431,75 +427,125 @@ impl MusicVideoPage {
     self.project.quality == Quality::Final
   }
 
+  /// What this pass still has to make or make again, in the order it is made: stills, clips,
+  /// lip syncs, the film. Each line goes to the stage that does it. A change to one scene's still
+  /// shows here as the clip, the lip sync and the film it has overtaken.
+  fn to_update(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    if self.project.shots.is_empty() {
+      return;
+    }
+    let lineage = self.project.lineage(self.project.quality);
+    widgets::hud(ui, "To update", theme::FAINT);
+    ui.add_space(4.0);
+    if lineage.settled() {
+      ui.label(egui::RichText::new("Everything in this pass is made and up to date.").size(11.5).color(theme::FAINT));
+      ui.add_space(12.0);
+      return;
+    }
+    let counted = |missing: usize, stale: usize, one: &str, many: &str| {
+      let name = |n: usize| if n == 1 { one } else { many };
+      match (missing, stale) {
+        (0, stale) => format!("{stale} {} out of date", name(stale)),
+        (missing, 0) => format!("{missing} {} to make", name(missing)),
+        (missing, stale) => format!("{missing} {} to make, {stale} out of date", name(missing)),
+      }
+    };
+    let film = match (self.project.cut.is_some(), lineage.film_current) {
+      (true, Some(false)) => Some("The film is out of date".to_owned()),
+      (true, None) => Some("The film may be out of date".to_owned()),
+      _ => None,
+    };
+    let lines = [
+      (Stage::Scenes, (lineage.stills() > 0).then(|| counted(lineage.stills_missing, lineage.stills_stale, "still", "stills"))),
+      (Stage::Shots, (lineage.clips() > 0).then(|| counted(lineage.clips_missing, lineage.clips_stale, "clip", "clips"))),
+      (Stage::Shots, (lineage.syncs() > 0).then(|| counted(lineage.syncs_missing, lineage.syncs_stale, "lip sync", "lip syncs"))),
+      (Stage::Final, film),
+    ];
+    for (stage, line) in lines {
+      let Some(line) = line else {
+        continue;
+      };
+      let text = egui::RichText::new(format!("{line} \u{2192} {}", stage.label())).size(11.5).color(theme::BADGE_BETA);
+      if ui.add(egui::Button::new(text).frame(false).wrap()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Go to {}", stage.label())).clicked() {
+        actions.push(Action::Go(stage));
+      }
+    }
+    ui.add_space(12.0);
+  }
+
   /// The left rail: the project's name and the stages, each with its state.
   fn rail(&mut self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
     ui.painter().rect(rect, theme::RADIUS, theme::PANEL, theme::hairline(), egui::StrokeKind::Inside);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(egui::Layout::top_down(egui::Align::Min)));
     let ui = &mut child;
-    widgets::hud(ui, "Music video", theme::FAINT);
-    ui.add_space(4.0);
-    ui.label(widgets::heading(&self.project.display_title(), 18.0));
-    ui.add_space(10.0);
-    let furthest = self.project.furthest();
-    for stage in Stage::ALL {
-      let reachable = self.project.reachable(stage);
-      let current = stage == self.stage;
-      let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), if reachable { Sense::click() } else { Sense::hover() });
-      let hovered = resp.hovered() && reachable;
-      if current || hovered {
-        ui.painter().rect_filled(row, theme::RADIUS, if current { theme::WASH_SELECTED } else { theme::WASH });
+    // The rail scrolls: with the list of what needs updating it can be taller than the window.
+    egui::ScrollArea::vertical().id_salt("mv-rail").auto_shrink([false, false]).show(ui, |ui| {
+      widgets::hud(ui, "Music video", theme::FAINT);
+      ui.add_space(4.0);
+      ui.label(widgets::heading(&self.project.display_title(), 18.0));
+      ui.add_space(10.0);
+      let furthest = self.project.furthest();
+      for stage in Stage::ALL {
+        let reachable = self.project.reachable(stage);
+        let current = stage == self.stage;
+        let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), if reachable { Sense::click() } else { Sense::hover() });
+        let hovered = resp.hovered() && reachable;
+        if current || hovered {
+          ui.painter().rect_filled(row, theme::RADIUS, if current { theme::WASH_SELECTED } else { theme::WASH });
+        }
+        let ink = if current {
+          theme::INK
+        } else if reachable {
+          theme::SIDEBAR_INK
+        } else {
+          theme::FAINT
+        };
+        let mark = Rect::from_center_size(pos2(row.left() + 16.0, row.center().y), vec2(14.0, 14.0));
+        let running = self.run.iter().chain(&self.sync).any(|run| run.stage == stage);
+        if running {
+          icons::paint_spinner(ui, mark, theme::ACCENT_400);
+        } else if stage < furthest || (stage == Stage::Final && self.project.cut.is_some()) {
+          icons::paint(ui.painter(), mark, Icon::Check, theme::ACCENT_400);
+        } else {
+          ui.painter().text(mark.center(), Align2::CENTER_CENTER, stage.number().to_string(), FontId::new(11.0, theme::mono()), ink);
+        }
+        ui.painter().text(pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, stage.label(), FontId::new(13.5, if current { theme::semibold() } else { theme::medium() }), ink);
+        let resp = if reachable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("Finish the stage before this one first") };
+        if resp.clicked() && reachable {
+          actions.push(Action::Go(stage));
+        }
       }
-      let ink = if current {
-        theme::INK
-      } else if reachable {
-        theme::SIDEBAR_INK
-      } else {
-        theme::FAINT
+      ui.add_space(12.0);
+      // Draft or final: which models the pictures and clips use, and which set is on screen.
+      widgets::hud(ui, "Quality", theme::FAINT);
+      ui.add_space(4.0);
+      let busy = self.busy();
+      ui.add_enabled_ui(!busy, |ui| {
+        if let Some(i) = super::segmented(ui, &Quality::ALL.map(Quality::label), self.pass()) {
+          actions.push(Action::Pass(Quality::ALL[i]));
+        }
+      });
+      ui.add_space(2.0);
+      let hint = match self.project.quality {
+        Quality::Draft => "Cheap, fast models, to settle the direction.",
+        Quality::Final => "The best models: each still is redrawn from its draft, then filmed again.",
       };
-      let mark = Rect::from_center_size(pos2(row.left() + 16.0, row.center().y), vec2(14.0, 14.0));
-      let running = self.run.iter().chain(&self.sync).any(|run| run.stage == stage);
-      if running {
-        icons::paint_spinner(ui, mark, theme::ACCENT_400);
-      } else if stage < furthest || (stage == Stage::Final && self.project.cut.is_some()) {
-        icons::paint(ui.painter(), mark, Icon::Check, theme::ACCENT_400);
-      } else {
-        ui.painter().text(mark.center(), Align2::CENTER_CENTER, stage.number().to_string(), FontId::new(11.0, theme::mono()), ink);
+      ui.label(egui::RichText::new(hint).size(11.5).color(theme::FAINT));
+      ui.add_space(12.0);
+      self.to_update(ui, actions);
+      if let Some(line) = self.progress_line() {
+        ui.label(egui::RichText::new(line).size(12.0).color(theme::MUTED));
+        if let Some(run) = self.run.as_ref().filter(|run| run.total > 0) {
+          let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), Sense::hover());
+          widgets::progress_bar(ui.painter(), bar, run.done as f32 / run.total as f32);
+        }
+        ui.add_space(8.0);
       }
-      ui.painter().text(pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, stage.label(), FontId::new(13.5, if current { theme::semibold() } else { theme::medium() }), ink);
-      let resp = if reachable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("Finish the stage before this one first") };
-      if resp.clicked() && reachable {
-        actions.push(Action::Go(stage));
-      }
-    }
-    ui.add_space(12.0);
-    // Draft or final: which models the pictures and clips use, and which set is on screen.
-    widgets::hud(ui, "Quality", theme::FAINT);
-    ui.add_space(4.0);
-    let busy = self.busy();
-    ui.add_enabled_ui(!busy, |ui| {
-      if let Some(i) = super::segmented(ui, &Quality::ALL.map(Quality::label), self.pass()) {
-        actions.push(Action::Pass(Quality::ALL[i]));
-      }
-    });
-    ui.add_space(2.0);
-    let hint = match self.project.quality {
-      Quality::Draft => "Cheap, fast models, to settle the direction.",
-      Quality::Final => "The best models: each still is redrawn from its draft, then filmed again.",
-    };
-    ui.label(egui::RichText::new(hint).size(11.5).color(theme::FAINT));
-    ui.add_space(12.0);
-    if let Some(line) = self.progress_line() {
-      ui.label(egui::RichText::new(line).size(12.0).color(theme::MUTED));
-      if let Some(run) = self.run.as_ref().filter(|run| run.total > 0) {
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0), Sense::hover());
-        widgets::progress_bar(ui.painter(), bar, run.done as f32 / run.total as f32);
-      }
-      ui.add_space(8.0);
-    }
-    ui.add_enabled_ui(!self.busy(), |ui| {
-      if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Secondary, ui.available_width(), 30.0).clicked() {
-        actions.push(Action::New);
-      }
+      ui.add_enabled_ui(!self.busy(), |ui| {
+        if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Secondary, ui.available_width(), 30.0).clicked() {
+          actions.push(Action::New);
+        }
+      });
     });
   }
 
