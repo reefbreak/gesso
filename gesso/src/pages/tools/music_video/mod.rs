@@ -63,6 +63,10 @@ struct Run {
   then_analyse: bool,
   /// The pass its stills, clips and syncs belong to.
   quality: Quality,
+  /// The scenes whose clip it is making or lip-syncing: the other of the two leaves them alone.
+  scenes: BTreeSet<usize>,
+  /// Whether it is making clips, the one job lip sync can run beside.
+  clips: bool,
 }
 
 /// What a stage asked for; applied after the frame is drawn.
@@ -95,6 +99,8 @@ pub(super) enum Action {
   /// Puts the conversation's version of the section back into its box.
   WorkshopApply,
   WorkshopClose,
+  /// Stops the lip sync, leaving anything else running.
+  StopSync,
   Plan,
   /// Scenes whose stills to draw, by index; `true` to use the better model in the draft pass.
   Stills(Vec<usize>, bool),
@@ -124,6 +130,8 @@ pub struct MusicVideoPage {
   /// The stage on screen.
   stage: Stage,
   run: Option<Run>,
+  /// A lip sync, which runs on fal and so can go on while Veo makes clips.
+  sync: Option<Run>,
   error: Option<String>,
   /// The last analysis's caveats.
   analysis_note: Option<String>,
@@ -160,7 +168,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), dirty_since: None, open_on_start: None }
   }
 }
 
@@ -194,11 +202,13 @@ impl MusicVideoPage {
 
   /// Takes news from a run; `None` when it isn't this page's or needs no toast.
   pub fn on_update(&mut self, backend: &Backend, run_id: u64, update: SongUpdate) -> Option<Notice> {
-    if self.run.as_ref().map(|r| r.id) != Some(run_id) {
+    let sync = self.sync.as_ref().map(|r| r.id) == Some(run_id);
+    if !sync && self.run.as_ref().map(|r| r.id) != Some(run_id) {
       return None;
     }
     let mut notice = None;
-    let quality = self.run.as_ref().map_or(self.project.quality, |run| run.quality);
+    let current = self.project.quality;
+    let quality = self.slot(sync).as_ref().map_or(current, |run| run.quality);
     let library = |message: &str| Some(Notice { error: false, message: message.to_owned(), library_changed: true });
     match update {
       SongUpdate::Written(draft) => {
@@ -242,14 +252,14 @@ impl MusicVideoPage {
           reference.image = Some(path);
           reference.error = None;
         }
-        self.progress();
+        self.progress(sync);
         notice = Some(Notice { error: false, message: String::new(), library_changed: true });
       },
       SongUpdate::ReferenceFailed { index, message } => {
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.error = Some(message);
         }
-        self.progress();
+        self.progress(sync);
       },
       SongUpdate::Planned(scenes) => {
         let slots = std::mem::take(&mut self.pending_slots);
@@ -267,7 +277,7 @@ impl MusicVideoPage {
           shot.error = None;
           shot.clip_error = None;
         }
-        self.progress();
+        self.progress(sync);
       },
       SongUpdate::Clip { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
@@ -280,7 +290,7 @@ impl MusicVideoPage {
         if self.selected == Some(index) {
           self.player = None;
         }
-        self.progress();
+        self.progress(sync);
       },
       SongUpdate::Synced { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
@@ -290,12 +300,12 @@ impl MusicVideoPage {
         if self.selected == Some(index) {
           self.player = None;
         }
-        self.progress();
+        self.progress(sync);
       },
       SongUpdate::Vocals(path) => self.project.vocals = Some(path),
       SongUpdate::ShotFailed { index, message } => {
         // A failed clip or lip sync belongs to the Shots stage; the scene's still is fine.
-        let on_clip = self.run.as_ref().is_some_and(|run| run.stage == Stage::Shots);
+        let on_clip = self.slot(sync).as_ref().is_some_and(|run| run.stage == Stage::Shots);
         if let Some(shot) = self.project.shots.get_mut(index) {
           if on_clip {
             shot.clip_error = Some(message);
@@ -303,7 +313,7 @@ impl MusicVideoPage {
             shot.error = Some(message);
           }
         }
-        self.progress();
+        self.progress(sync);
       },
       SongUpdate::Cut(path) => {
         self.project.cut = Some(path);
@@ -311,12 +321,12 @@ impl MusicVideoPage {
         notice = library("The film is in your library");
       },
       SongUpdate::Note(note) => {
-        if let Some(run) = &mut self.run {
+        if let Some(run) = self.slot(sync) {
           run.note = note;
         }
       },
       SongUpdate::Done(result) => {
-        let finished = self.run.take();
+        let finished = self.slot(sync).take();
         if let Some(workshop) = self.workshop.as_mut().filter(|w| w.waiting) {
           workshop.waiting = false;
           workshop.error = result.as_ref().err().cloned();
@@ -339,13 +349,34 @@ impl MusicVideoPage {
     notice.filter(|n| !n.message.is_empty() || n.library_changed)
   }
 
+  /// Whether anything is running, a lip sync included: what locks the rest of the page.
   pub(super) fn busy(&self) -> bool {
-    self.run.is_some()
+    self.run.is_some() || self.sync.is_some()
+  }
+
+  /// Whether clips can be started: nothing but a lip sync is running.
+  pub(super) fn can_make_clips(&self) -> bool {
+    self.run.is_none()
+  }
+
+  /// Whether a lip sync can be started: none is running, and nothing else is but clips being made.
+  pub(super) fn can_sync(&self) -> bool {
+    self.sync.is_none() && self.run.as_ref().is_none_or(|run| run.clips)
+  }
+
+  /// The lip sync's progress line, while one runs.
+  pub(super) fn sync_line(&self) -> Option<String> {
+    self.sync.as_ref().map(|run| if run.total > 0 { format!("{} {} of {}", run.note, run.done, run.total) } else { run.note.clone() })
   }
 
   /// Whether the stage on screen is the one running.
   pub(super) fn running_here(&self) -> bool {
     self.run.as_ref().is_some_and(|run| run.stage == self.stage)
+  }
+
+  /// The main run, or the lip sync beside it.
+  fn slot(&mut self, sync: bool) -> &mut Option<Run> {
+    if sync { &mut self.sync } else { &mut self.run }
   }
 
   /// The run's progress line ("Drawing stills… 12 of 64").
@@ -408,7 +439,7 @@ impl MusicVideoPage {
         theme::FAINT
       };
       let mark = Rect::from_center_size(pos2(row.left() + 16.0, row.center().y), vec2(14.0, 14.0));
-      let running = self.run.as_ref().is_some_and(|run| run.stage == stage);
+      let running = self.run.iter().chain(&self.sync).any(|run| run.stage == stage);
       if running {
         icons::paint_spinner(ui, mark, theme::ACCENT_400);
       } else if stage < furthest || (stage == Stage::Final && self.project.cut.is_some()) {
@@ -590,6 +621,10 @@ impl MusicVideoPage {
         let quality = self.quality();
         let mut shots = Vec::new();
         for index in indices {
+          // A scene being lip-synced keeps its clip until that is done.
+          if self.sync.as_ref().is_some_and(|run| run.scenes.contains(&index)) {
+            continue;
+          }
           if let Some(shot) = self.project.shots.get_mut(index) {
             if let Some(still) = shot.take(quality).still.clone() {
               shot.clip_version += 1;
@@ -598,8 +633,9 @@ impl MusicVideoPage {
             }
           }
         }
-        if !shots.is_empty() {
-          self.start(backend, shots.len(), "Veo is making clips\u{2026}", SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: self.tier(), resolution: self.resolution().to_owned(), quality, shots });
+        if !shots.is_empty() && self.can_make_clips() {
+          let scenes = shots.iter().map(|shot| shot.index).collect();
+          self.launch(backend, false, scenes, shots.len(), "Veo is making clips\u{2026}", SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: self.tier(), resolution: self.resolution().to_owned(), quality, shots });
         }
       },
       Action::LipSync(indices) => {
@@ -609,6 +645,10 @@ impl MusicVideoPage {
         };
         let mut shots = Vec::new();
         for index in indices {
+          // A scene whose clip is being made again is synced once the new clip is in.
+          if self.run.as_ref().is_some_and(|run| run.scenes.contains(&index)) {
+            continue;
+          }
           if let Some(shot) = self.project.shots.get_mut(index) {
             if let Some(clip) = shot.take(quality).clip.clone() {
               shot.clip_version += 1;
@@ -617,8 +657,9 @@ impl MusicVideoPage {
             }
           }
         }
-        if !shots.is_empty() {
-          self.start(backend, shots.len(), "Lip-syncing sung scenes\u{2026}", SongRequest::LipSync { dir, track, vocals: self.project.vocals.clone(), quality, shots });
+        if !shots.is_empty() && self.can_sync() {
+          let scenes = shots.iter().map(|shot| shot.index).collect();
+          self.launch(backend, true, scenes, shots.len(), "Lip-syncing sung scenes\u{2026}", SongRequest::LipSync { dir, track, vocals: self.project.vocals.clone(), quality, shots });
         }
       },
       Action::ImportVocals(file) => self.start(backend, 0, "Bringing in the vocal stem\u{2026}", SongRequest::ImportVocals { dir, file }),
@@ -636,8 +677,8 @@ impl MusicVideoPage {
           self.start(backend, 0, "Cutting the film on your Mac\u{2026}", request);
         }
       },
-      Action::Stop => {
-        if let Some(run) = &mut self.run {
+      Action::Stop | Action::StopSync => {
+        if let Some(run) = self.slot(matches!(action, Action::StopSync)) {
           backend.cancel_song(run.id);
           run.note = "Stopping after the ones in flight\u{2026}".to_owned();
         }
@@ -654,9 +695,16 @@ impl MusicVideoPage {
     if self.busy() {
       return;
     }
+    self.launch(backend, false, BTreeSet::new(), total, note, request);
+  }
+
+  /// Starts a run in its slot: the lip sync's, or the main one. `scenes` are the ones whose clip
+  /// it makes or syncs. The caller has checked that the slot is free.
+  fn launch(&mut self, backend: &Backend, sync: bool, scenes: BTreeSet<usize>, total: usize, note: &str, request: SongRequest) {
     let id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
     self.error = None;
-    self.run = Some(Run { id, stage: self.stage, note: note.to_owned(), started_as: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality });
+    let clips = matches!(request, SongRequest::Clips { .. });
+    *self.slot(sync) = Some(Run { id, stage: self.stage, note: note.to_owned(), started_as: note.to_owned(), done: 0, total, then_analyse: false, quality: self.project.quality, scenes, clips });
     // The project's folder has to exist before a run writes into it.
     self.save(backend);
     backend.run_song(id, request);
@@ -684,8 +732,8 @@ impl MusicVideoPage {
     self.touch_now();
   }
 
-  fn progress(&mut self) {
-    if let Some(run) = &mut self.run {
+  fn progress(&mut self, sync: bool) {
+    if let Some(run) = self.slot(sync) {
       run.done += 1;
       run.note.clone_from(&run.started_as);
     }

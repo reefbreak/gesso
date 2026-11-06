@@ -155,6 +155,10 @@ runs, and leaves everything it made editable before the next stage uses it.
   or Shift-click stills to select several, then redraw them together from the panel. In the draft
   pass, "The better model (Nano Banana Pro)" redraws the picked stills with the final pass's
   model, which holds a likeness better, while they stay draft stills at draft size.
+- **Clips and lip sync side by side.** Veo makes the clips and fal syncs the mouths, so a lip sync
+  can be started while clips are being made, and clips while a lip sync runs. Each leaves alone
+  the scenes the other is working on. The clip and the vocal are put in fal's storage first,
+  because fal's models read files from links only.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

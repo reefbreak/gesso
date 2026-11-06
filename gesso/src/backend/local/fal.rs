@@ -3,17 +3,19 @@
 //! user supplies, so these two run on fal.
 //!
 //! Requests go through fal's queue (`queue.fal.run`): submit, poll the status URL, then read the
-//! response URL. Files are sent inline as data URIs, which fal accepts for file inputs; a few
-//! seconds of video and audio is a few megabytes.
+//! response URL. The models take their files as public links only (inline `data:` URIs are
+//! refused), so each file is first put in fal's own storage: ask for an upload link, `PUT` the
+//! bytes there, and pass the file's link to the model.
 
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use log::warn;
 use serde_json::{Value, json};
 
 const QUEUE_HOST: &str = "https://queue.fal.run/";
+/// fal's storage, where files are put before a model is given their link: the current host, then
+/// the one older clients use.
+const STORAGE_HOSTS: [&str; 2] = ["https://rest.fal.ai/", "https://rest.alpha.fal.ai/"];
 pub const LIP_SYNC_MODEL: &str = "fal-ai/sync-lipsync/v2";
 pub const VOCALS_MODEL: &str = "fal-ai/demucs";
 const SUBMIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -38,16 +40,46 @@ impl FalClient {
   /// Redraws the mouth in `video` (MP4 bytes) to match `audio` (WAV bytes), returning the new
   /// MP4. `pro` uses the costlier model with finer facial detail.
   pub async fn lip_sync(&self, video: &[u8], audio: &[u8], pro: bool) -> anyhow::Result<Vec<u8>> {
-    let result = self.run(LIP_SYNC_MODEL, &lip_sync_body(video, audio, pro)).await?;
+    let (video, audio) = futures::try_join!(self.upload(video, "video/mp4", "clip.mp4"), self.upload(audio, "audio/wav", "vocal.wav"))?;
+    let result = self.run(LIP_SYNC_MODEL, &lip_sync_body(&video, &audio, pro)).await?;
     let url = result.pointer("/video/url").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("fal's lip sync returned no video"))?;
     self.download(url).await
   }
 
   /// The vocal stem of `audio` (bytes of `mime_type`), as an MP3.
   pub async fn vocals(&self, audio: &[u8], mime_type: &str) -> anyhow::Result<Vec<u8>> {
-    let result = self.run(VOCALS_MODEL, &vocals_body(audio, mime_type)).await?;
+    let extension = if mime_type.contains("wav") { "wav" } else if mime_type.contains("aac") || mime_type.contains("mp4") { "m4a" } else { "mp3" };
+    let audio = self.upload(audio, mime_type, &format!("track.{extension}")).await?;
+    let result = self.run(VOCALS_MODEL, &vocals_body(&audio)).await?;
     let url = result.pointer("/vocals/url").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("fal's vocal separation returned no vocals"))?;
     self.download(url).await
+  }
+
+  /// Puts a file in fal's storage and returns its link, which fal's models can read.
+  async fn upload(&self, bytes: &[u8], mime_type: &str, file_name: &str) -> anyhow::Result<String> {
+    let hosts: Vec<&str> = self.base_url.as_deref().map_or_else(|| STORAGE_HOSTS.to_vec(), |base| vec![base]);
+    let mut first_error = None;
+    for host in hosts {
+      match self.upload_to(host, bytes, mime_type, file_name).await {
+        Ok(link) => return Ok(link),
+        Err(err) => {
+          warn!("Couldn't put {file_name} in fal's storage at {host}: {err:#}");
+          first_error.get_or_insert(err);
+        },
+      }
+    }
+    Err(first_error.unwrap_or_else(|| anyhow::anyhow!("fal has no storage host configured")).context("Couldn't upload the file to fal"))
+  }
+
+  async fn upload_to(&self, host: &str, bytes: &[u8], mime_type: &str, file_name: &str) -> anyhow::Result<String> {
+    let url = format!("{host}storage/upload/initiate?storage_type=fal-cdn-v3");
+    let ticket = read_json(self.authorised(self.http.post(url)).json(&json!({ "content_type": mime_type, "file_name": file_name })).timeout(SUBMIT_TIMEOUT).send().await?).await?;
+    let (Some(upload_url), Some(file_url)) = (ticket.get("upload_url").and_then(Value::as_str), ticket.get("file_url").and_then(Value::as_str)) else {
+      anyhow::bail!("fal's storage gave no upload link");
+    };
+    // The upload link is signed, so the key isn't sent with it.
+    self.http.put(upload_url).header("Content-Type", mime_type).body(bytes.to_vec()).timeout(SUBMIT_TIMEOUT).send().await?.error_for_status()?;
+    Ok(file_url.to_owned())
   }
 
   /// Submits to the queue, waits, and returns the model's result.
@@ -87,22 +119,18 @@ impl FalClient {
   }
 }
 
-fn lip_sync_body(video: &[u8], audio: &[u8], pro: bool) -> Value {
+fn lip_sync_body(video_url: &str, audio_url: &str, pro: bool) -> Value {
   json!({
     "model": if pro { "lipsync-2-pro" } else { "lipsync-2" },
-    "video_url": data_uri("video/mp4", video),
-    "audio_url": data_uri("audio/wav", audio),
+    "video_url": video_url,
+    "audio_url": audio_url,
     // The clip and the slice are cut to the same length; if they differ by a frame, stop at the shorter.
     "sync_mode": "cut_off",
   })
 }
 
-fn vocals_body(audio: &[u8], mime_type: &str) -> Value {
-  json!({ "audio_url": data_uri(mime_type, audio), "model": "htdemucs", "stems": ["vocals"], "output_format": "mp3" })
-}
-
-fn data_uri(mime_type: &str, bytes: &[u8]) -> String {
-  format!("data:{mime_type};base64,{}", BASE64.encode(bytes))
+fn vocals_body(audio_url: &str) -> Value {
+  json!({ "audio_url": audio_url, "model": "htdemucs", "stems": ["vocals"], "output_format": "mp3" })
 }
 
 /// Why a job failed, when fal says.
@@ -133,22 +161,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lip_sync_sends_both_files_inline() {
-      let body = lip_sync_body(&[1, 2, 3], &[4, 5], true);
-      assert_eq!(body, json!({ "model": "lipsync-2-pro", "video_url": "data:video/mp4;base64,AQID", "audio_url": "data:audio/wav;base64,BAU=", "sync_mode": "cut_off" }));
-      assert_eq!(lip_sync_body(&[], &[], false)["model"], "lipsync-2");
+    fn lip_sync_sends_links_to_both_files() {
+      let body = lip_sync_body("https://f/clip.mp4", "https://f/vocal.wav", true);
+      assert_eq!(body, json!({ "model": "lipsync-2-pro", "video_url": "https://f/clip.mp4", "audio_url": "https://f/vocal.wav", "sync_mode": "cut_off" }));
+      assert_eq!(lip_sync_body("v", "a", false)["model"], "lipsync-2");
     }
 
     #[test]
     fn only_the_vocal_stem_is_asked_for() {
-      let body = vocals_body(&[1, 2, 3], "audio/mpeg");
+      let body = vocals_body("https://f/track.mp3");
       assert_eq!(body["stems"], json!(["vocals"]));
-      assert_eq!(body["audio_url"], "data:audio/mpeg;base64,AQID");
+      assert_eq!(body["audio_url"], "https://f/track.mp3");
     }
   }
 
-  /// The whole queue round trip against a stand-in server: submit with the key, poll until done,
-  /// read the result, download the file.
+  /// The whole round trip against a stand-in server: both files are put in storage, their links
+  /// are submitted with the key, the job is polled until done, and the result is downloaded.
   #[tokio::test(flavor = "multi_thread")]
   async fn a_job_is_submitted_polled_and_downloaded() {
     let (base_url, requests) = fake_fal();
@@ -156,10 +184,19 @@ mod tests {
     let synced = client.lip_sync(&[1, 2, 3], &[4, 5], false).await.unwrap();
     assert_eq!(synced, b"synced-video");
     let requests = requests.lock().unwrap();
-    let lines: Vec<&str> = requests.iter().map(|(line, _)| line.as_str()).collect();
-    assert_eq!(lines, ["POST /fal-ai/sync-lipsync/v2 HTTP/1.1", "GET /status HTTP/1.1", "GET /status HTTP/1.1", "GET /result HTTP/1.1", "GET /file.mp4 HTTP/1.1"]);
-    assert!(requests[..4].iter().all(|(_, headers)| headers.contains("authorization: key test-key")));
-    assert!(!requests[4].1.contains("authorization"), "the public file link doesn't get the key");
+    let lines: Vec<&str> = requests.iter().map(|(line, _, _)| line.as_str()).collect();
+    // The two uploads run side by side, so their four requests come in either order.
+    let (uploads, job) = lines.split_at(4);
+    assert_eq!(uploads.iter().filter(|line| **line == "POST /storage/upload/initiate?storage_type=fal-cdn-v3 HTTP/1.1").count(), 2);
+    assert_eq!(uploads.iter().filter(|line| line.starts_with("PUT /put/")).count(), 2);
+    assert_eq!(job, ["POST /fal-ai/sync-lipsync/v2 HTTP/1.1", "GET /status HTTP/1.1", "GET /status HTTP/1.1", "GET /result HTTP/1.1", "GET /file.mp4 HTTP/1.1"]);
+    for (line, headers, _) in requests.iter() {
+      let signed_or_public = line.starts_with("PUT") || line.contains("/file.mp4");
+      assert_eq!(headers.contains("authorization: key test-key"), !signed_or_public, "{line}: the key goes to fal's API, not to signed or public links");
+    }
+    let submitted: Value = serde_json::from_str(&requests[4].2).unwrap();
+    assert!(submitted["video_url"].as_str().unwrap().ends_with("/files/clip.mp4") && submitted["audio_url"].as_str().unwrap().ends_with("/files/vocal.wav"), "{submitted}");
+    assert!(requests.iter().any(|(line, headers, body)| line.starts_with("PUT /put/clip.mp4") && headers.contains("content-type: video/mp4") && body.as_bytes() == [1, 2, 3]));
   }
 
   #[tokio::test(flavor = "multi_thread")]
@@ -185,13 +222,14 @@ mod tests {
       write!(stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
     });
     let client = FalClient::new(reqwest::Client::builder().no_proxy().build().unwrap(), "bad".into(), Some(url));
-    let err = client.vocals(&[1], "audio/mpeg").await.unwrap_err().to_string();
+    let err = format!("{:#}", client.vocals(&[1], "audio/mpeg").await.unwrap_err());
     assert!(err.contains("fal error 401") && err.contains("Invalid Key"), "{err}");
   }
 
-  /// A stand-in for fal's queue: the submit names its status and result URLs, the first status
-  /// is still in progress, the result points at a file. Records each request line and headers.
-  fn fake_fal() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+  /// A stand-in for fal: storage hands out an upload link and a file link, the submit names its
+  /// status and result URLs, the first status is still in progress, the result points at a file.
+  /// Records each request's line, headers and body.
+  fn fake_fal() -> (String, Arc<Mutex<Vec<(String, String, String)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}/", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -215,8 +253,13 @@ mod tests {
           }
           headers.push_str(&line.to_ascii_lowercase());
         }
-        reader.read_exact(&mut vec![0; length]).unwrap();
-        let reply = if request_line.starts_with("POST") {
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let body = String::from_utf8_lossy(&body).into_owned();
+        let reply = if request_line.contains("/storage/upload/initiate") {
+          let name = serde_json::from_str::<Value>(&body).unwrap()["file_name"].as_str().unwrap().to_owned();
+          json!({ "upload_url": format!("{root}put/{name}"), "file_url": format!("{root}files/{name}") }).to_string()
+        } else if request_line.starts_with("POST") {
           json!({ "request_id": "r1", "status_url": format!("{root}status"), "response_url": format!("{root}result") }).to_string()
         } else if request_line.contains("/status") {
           polls += 1;
@@ -226,7 +269,7 @@ mod tests {
         } else {
           "synced-video".to_owned()
         };
-        record.lock().unwrap().push((request_line.trim().to_owned(), headers));
+        record.lock().unwrap().push((request_line.trim().to_owned(), headers, body));
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
       }
     });

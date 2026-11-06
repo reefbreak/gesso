@@ -674,7 +674,9 @@ fn lip_sync_note(on: bool, fal_connected: bool, planned: bool, sung: usize) -> S
 // --- Shots -----------------------------------------------------------------------------------
 
 fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
-  let busy = page.busy();
+  // Clips and a lip sync can run side by side: Veo makes one, fal the other.
+  let (can_clip, can_sync) = (page.can_make_clips(), page.can_sync());
+  let sync_line = page.sync_line();
   let quality = page.quality();
   let selected_clip = page.selected.and_then(|i| page.project.shots.get(i)).and_then(|s| s.take(quality).best_clip().cloned());
   let mut grid_area = stage;
@@ -726,7 +728,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
     }
     error_line(ui, page.error.as_deref());
     let label = if only_missing { format!("Make {} clip{}", targets.len(), plural(targets.len())) } else { format!("Make all {} again", targets.len()) };
-    if run_button(ui, Icon::Video, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
+    if run_button(ui, Icon::Video, &label, cost.map(estimate), !targets.is_empty() && can_clip, line.as_deref()) {
       actions.push(Action::Clips(targets.clone()));
     }
     stop_button(ui, page.running_here(), actions);
@@ -745,8 +747,11 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       };
       // Nothing to sync, nothing to price.
       let price = sync_cost.filter(|_| !sync_targets.is_empty()).map(estimate);
-      if run_button(ui, Icon::Mic, &label, price, fal && !sync_targets.is_empty() && !busy, None) {
+      if run_button(ui, Icon::Mic, &label, price, fal && !sync_targets.is_empty() && can_sync, sync_line.as_deref()) {
         actions.push(Action::LipSync(sync_targets.clone()));
+      }
+      if sync_line.is_some() && widgets::button(ui, Some(Icon::X), "Stop the lip sync", widgets::Kind::Secondary, 0.0, 30.0).clicked() {
+        actions.push(Action::StopSync);
       }
     }
     if let Some(index) = page.selected.filter(|i| *i < page.project.shots.len()) {
@@ -762,12 +767,12 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       }
       let clip_seconds = u32::from(whole.unwrap_or_else(|| plan::clip_seconds(shot.slot.seconds())));
       let one = env.backend.estimate_song(&SongEstimate::Clips { seconds: clip_seconds, tier, resolution: resolution.clone() });
-      if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), !busy && take.still.is_some(), None) {
+      if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), can_clip && take.still.is_some(), None) {
         actions.push(Action::Clips(vec![index]));
       }
       if lip_sync && shot.sing && take.clip.is_some() {
         let one_sync = env.backend.estimate_song(&SongEstimate::LipSync { seconds: shot.slot.seconds(), pro: quality == Quality::Final, separate_seconds });
-        if run_button(ui, Icon::Mic, if take.synced.is_some() { "Lip-sync this scene again" } else { "Lip-sync this scene" }, one_sync.map(estimate), fal && !busy, None) {
+        if run_button(ui, Icon::Mic, if take.synced.is_some() { "Lip-sync this scene again" } else { "Lip-sync this scene" }, one_sync.map(estimate), fal && can_sync, None) {
           actions.push(Action::LipSync(vec![index]));
         }
       }
