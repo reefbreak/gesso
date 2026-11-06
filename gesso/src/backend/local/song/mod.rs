@@ -715,7 +715,7 @@ impl SongRun<'_> {
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
   {
-    let waiting = |wait: Duration| self.send(SongUpdate::Note(format!("Google's per-minute limit is full; waiting {}s and going slower\u{2026}", wait.as_secs())));
+    let waiting = |wait: Duration| self.send(SongUpdate::Note(format!("Google is busy or at its limit; waiting {}s and going slower\u{2026}", wait.as_secs())));
     with_quota_retries(&self.pace, || !self.stopped(), waiting, call).await
   }
 
@@ -940,16 +940,19 @@ where
         pace.slow_down(wait).await;
         wait = (wait * 2).min(QUOTA_MAX_WAIT);
       },
-      Err(err) if is_quota(&err) => return Err(err.context("Google's per-minute limit was still full after several minutes of waiting. Give it a few minutes, then use the same button: it makes only the ones still missing. A quota increase for the model in the Google Cloud console stops this happening")),
+      Err(err) if is_quota(&err) => return Err(err.context("Google was still busy or at its limit after several minutes of waiting. Give it a few minutes, then use the same button: it makes only the ones still missing")),
       result => return result,
     }
   }
   unreachable!("the last attempt returns")
 }
 
+/// Whether the provider turned the call away for now, not for good: its quota is met, or (Veo's
+/// "experiencing high load", a 503) it has no room at the moment.
 fn is_quota(err: &anyhow::Error) -> bool {
-  let text = err.to_string();
-  text.contains("error 429") || text.contains("RESOURCE_EXHAUSTED") || text.to_ascii_lowercase().contains("quota")
+  let text = format!("{err:#}");
+  let lower = text.to_ascii_lowercase();
+  text.contains("error 429") || text.contains("error 503") || text.contains("RESOURCE_EXHAUSTED") || text.contains("UNAVAILABLE") || ["quota", "high load", "try again later", "overloaded"].iter().any(|word| lower.contains(word))
 }
 
 #[cfg(test)]
@@ -1339,6 +1342,14 @@ mod tests {
       .await;
       assert!(result.is_err());
       assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_busy_service_is_waited_for_like_a_full_quota() {
+      assert!(is_quota(&anyhow::anyhow!("Veo failed: The service is currently experiencing high load and cannot process your request. Please try again later. Operation ID: 14a0a7ca.")));
+      assert!(is_quota(&anyhow::anyhow!("Vertex AI error 503 Service Unavailable: backend")));
+      assert!(is_quota(&anyhow::anyhow!("inner: RESOURCE_EXHAUSTED").context("outer")));
+      assert!(!is_quota(&anyhow::anyhow!("Veo failed: the prompt was blocked by safety filters")));
     }
 
     #[tokio::test]
