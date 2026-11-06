@@ -430,10 +430,38 @@ pub struct SongProject {
   /// The video's files that are in the library already, so opening it adds only the rest.
   #[serde(default)]
   pub in_library: BTreeSet<PathBuf>,
+  /// Earlier takes of the song, oldest first, each with the work that was timed to it.
+  #[serde(default)]
+  pub song_takes: Vec<SongTake>,
   /// Earlier versions of the words, oldest first: kept whenever a rewrite, a restore or a new
   /// song is about to move on from them.
   #[serde(default)]
   pub lyric_versions: Vec<LyricVersion>,
+}
+
+/// An earlier take of the song, set aside when another took its place. Its file is never
+/// deleted, and the storyboard built on it is kept with it, so going back loses nothing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SongTake {
+  pub at: String,
+  pub track: Track,
+  pub timed: Timed,
+}
+
+/// Everything in a project that is timed to its track, and so belongs to one take of the song.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Timed {
+  pub grid: Option<BeatGrid>,
+  pub sections: Vec<Section>,
+  pub read: Read,
+  pub lines: Vec<TimedLine>,
+  pub shots: Vec<Shot>,
+  pub vocals: Option<PathBuf>,
+  pub cut: Option<PathBuf>,
+  pub cut_of: Option<CutOf>,
+  pub share: Option<Share>,
 }
 
 /// The film's copy for uploading to Instagram.
@@ -661,6 +689,50 @@ impl SongProject {
     } else {
       idea
     }
+  }
+
+  /// Puts a new track in place. The one it replaces is set aside among the earlier takes with
+  /// everything timed to it, and the new one starts with nothing timed.
+  pub fn set_track(&mut self, track: Track) {
+    if self.track.as_ref().is_some_and(|current| current.path == track.path) {
+      self.track = Some(track);
+      return;
+    }
+    self.shelve_track();
+    self.song_takes.retain(|take| take.track.path != track.path);
+    self.track = Some(track);
+  }
+
+  /// Goes back to an earlier take, with its analysis, scenes, clips and cut as they were left.
+  /// The take in place is set aside the same way.
+  pub fn use_take(&mut self, index: usize) {
+    if index >= self.song_takes.len() {
+      return;
+    }
+    let take = self.song_takes.remove(index);
+    self.shelve_track();
+    self.track = Some(take.track);
+    let timed = take.timed;
+    (self.grid, self.sections, self.read, self.lines, self.shots, self.vocals, self.cut, self.cut_of, self.share) = (timed.grid, timed.sections, timed.read, timed.lines, timed.shots, timed.vocals, timed.cut, timed.cut_of, timed.share);
+  }
+
+  /// Lists the song files in `dir`, the project's folder, that no take accounts for: songs
+  /// made before earlier takes were kept. Their scenes are gone; the audio isn't.
+  pub fn adopt_song_files(&mut self, dir: &Path) {
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path()).filter(|path| path.is_file() && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("song_"))).filter(|path| self.track.as_ref().is_none_or(|track| &track.path != path) && self.song_takes.iter().all(|take| &take.track.path != path)).map(|path| (std::fs::metadata(&path).and_then(|meta| meta.modified()).unwrap_or(std::time::UNIX_EPOCH), path)).collect();
+    found.sort();
+    let adopted = found.into_iter().map(|(made, path)| SongTake { at: chrono::DateTime::<chrono::Utc>::from(made).to_rfc3339(), track: Track { path, ..Default::default() }, timed: Timed::default() });
+    // They are older than anything set aside since.
+    self.song_takes.splice(0..0, adopted);
+  }
+
+  /// Sets the track in place aside, taking what is timed to it along.
+  fn shelve_track(&mut self) {
+    let Some(track) = self.track.take() else {
+      return;
+    };
+    let timed = Timed { grid: self.grid.take(), sections: std::mem::take(&mut self.sections), read: std::mem::take(&mut self.read), lines: std::mem::take(&mut self.lines), shots: std::mem::take(&mut self.shots), vocals: self.vocals.take(), cut: self.cut.take(), cut_of: self.cut_of.take(), share: self.share.take() };
+    self.song_takes.push(SongTake { at: chrono::Utc::now().to_rfc3339(), track, timed });
   }
 
   /// Keeps the words as they stand among the earlier versions, unless they're empty or the same
@@ -1355,6 +1427,42 @@ mod tests {
     assert!(project.shots[0].wants_ending());
     project.shots[0].skip_ending = true;
     assert!(!project.shots[0].wants_ending() && project.shots[0].has_ending() && project.scenes_without_ending().is_empty());
+  }
+
+  /// A new take of the song doesn't lose the old one or the storyboard built on it: both are
+  /// set aside together and come back together.
+  #[test]
+  fn an_earlier_take_comes_back_with_its_scenes() {
+    let track = |name: &str| Track { path: PathBuf::from(name), model: "lyria".into(), sung: String::new() };
+    let mut project = SongProject::new();
+    project.set_track(track("song_v1.mp3"));
+    assert!(project.song_takes.is_empty());
+    project.shots = vec![Shot { image: "A dock".into(), ..Default::default() }];
+    project.cut = Some(PathBuf::from("cut_v1.mp4"));
+    project.set_track(track("song_v2.mp3"));
+    assert!(project.shots.is_empty() && project.cut.is_none(), "the new take starts with nothing timed");
+    assert_eq!(project.song_takes.iter().map(|take| (take.track.path.clone(), take.timed.shots.len())).collect::<Vec<_>>(), [(PathBuf::from("song_v1.mp3"), 1)]);
+    project.shots = vec![Shot::default(), Shot::default()];
+    project.use_take(0);
+    assert_eq!((project.track.as_ref().map(|t| t.path.clone()), project.shots.len(), project.cut.clone()), (Some(PathBuf::from("song_v1.mp3")), 1, Some(PathBuf::from("cut_v1.mp4"))));
+    assert_eq!(project.song_takes.iter().map(|take| (take.track.path.clone(), take.timed.shots.len())).collect::<Vec<_>>(), [(PathBuf::from("song_v2.mp3"), 2)]);
+    project.use_take(7);
+    assert_eq!(project.song_takes.len(), 1);
+
+    // Songs made before takes were kept are found in the folder, once.
+    let dir = std::env::temp_dir().join(format!("gesso-takes-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["song_v1.mp3", "song_v0.mp3", "song_imported.wav", "vocals.mp3"] {
+      std::fs::write(dir.join(name), b"x").unwrap();
+    }
+    let mut project = SongProject::new();
+    project.set_track(Track { path: dir.join("song_v1.mp3"), ..Default::default() });
+    project.adopt_song_files(&dir);
+    project.adopt_song_files(&dir);
+    let mut adopted: Vec<_> = project.song_takes.iter().map(|take| take.track.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    adopted.sort();
+    assert_eq!(adopted, ["song_imported.wav", "song_v0.mp3"]);
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]

@@ -199,6 +199,47 @@ fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &
 
 // --- Song ------------------------------------------------------------------------------------
 
+/// The song's earlier takes, newest first: click one to listen, then go back to it or leave it.
+/// Each keeps the analysis, scenes, clips and cut that were made for it.
+fn earlier_takes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, busy: bool, actions: &mut Vec<Action>) {
+  widgets::hud(ui, "Earlier takes", theme::FAINT);
+  ui.add_space(6.0);
+  for (index, take) in page.project.song_takes.iter().enumerate().rev() {
+    let open = page.viewing_take == Some(index);
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+    ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+    let name = take.track.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let scenes = take.timed.shots.len();
+    let kept = match (scenes, take.timed.cut.is_some()) {
+      (0, _) => "no scenes kept".to_owned(),
+      (n, false) => format!("{n} scene{} kept", plural(n)),
+      (n, true) => format!("{n} scene{} and the film kept", plural(n)),
+    };
+    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, if take.track.model.is_empty() { name.clone() } else { format!("{name} \u{b7} {}", take.track.model) }, FontId::new(13.5, theme::medium()), theme::INK);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {kept}", when(&take.at)), FontId::new(11.5, theme::mono()), theme::MUTED);
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+      page.viewing_take = if open { None } else { Some(index) };
+    }
+    ui.add_space(6.0);
+    if open {
+      card(ui, "Listen".to_owned(), |ui| {
+        waveform::player(ui, ui.id().with(("mv-take", index)), env.audio, &file_url(&take.track.path), None, false);
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+          if secondary(ui, Icon::RotateCw, "Go back to this take", !busy) {
+            actions.push(Action::UseTake(index));
+          }
+          if secondary(ui, Icon::Folder, "Show the file", true) {
+            actions.push(Action::Reveal(take.track.path.clone()));
+          }
+        });
+        ui.label(small("The take in use now is set aside with its scenes, the same way, so you can switch back and forth."));
+      });
+    }
+  }
+}
+
+
 fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
   let mut changed = false;
@@ -217,16 +258,20 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
       },
       None => empty(ui, Icon::Music, "No song yet", "Generate one, or import a track."),
     }
+    if !page.project.song_takes.is_empty() {
+      ui.add_space(18.0);
+      earlier_takes(page, ui, env, busy, actions);
+    }
   });
   let cost = env.backend.estimate_song(&SongEstimate::Song { clip: page.project.song_length.is_clip() });
   let line = page.progress_line().filter(|_| page.running_here());
   let has_track = page.project.track.is_some();
-  panel(ui, panel_rect, "Song", "Each generation is a new take; the latest one is kept.", |ui| {
+  panel(ui, panel_rect, "Song", "Each generation is a new take. Earlier takes are kept and can be gone back to.", |ui| {
     changed |= length_choice(ui, &mut page.project.song_length);
     ui.label(small("Lyria is asked for this length and lands near it, not on it. What decides a song's length most is how much there is to sing: after a big change, write the lyrics again on the Idea stage, where the same setting tells the writer how much to write."));
     ui.add_space(6.0);
     ui.checkbox(&mut page.instrumental, "Instrumental (no vocals)");
-    ui.label(small("Lyria 3 on your Vertex AI account. A new song clears the scenes, which are timed to the old one."));
+    ui.label(small("Lyria 3 on your Vertex AI account. A new take starts a new storyboard, since scenes are timed to their song; the old take keeps its own."));
     error_line(ui, page.error.as_deref());
     if run_button(ui, Icon::Sparkles, if has_track { "Make another take" } else { "Make the song" }, cost.map(estimate), !busy, line.as_deref()) {
       actions.push(Action::Compose);
@@ -236,6 +281,13 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
       if let Some(file) = pick_files(&[RefKind::Audio], false).into_iter().next() {
         actions.push(Action::Import(file));
       }
+    }
+    if let Some(track) = &page.project.track {
+      ui.add_space(10.0);
+      if secondary(ui, Icon::Folder, "Show the audio file", true) {
+        actions.push(Action::Reveal(track.path.clone()));
+      }
+      ui.label(small("Opens the video's folder, where the song is a file of its own to copy or share."));
     }
     if has_track {
       field(ui, "Vocal stem (optional)");

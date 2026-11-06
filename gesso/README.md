@@ -239,6 +239,12 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **Lyrics are written new.** The writer is told to carry over an idea's energy and structure, not
   the words of an existing song, and to describe music without artist or song names (Lyria refuses
   them).
+- **Earlier takes of the song are kept.** A new take (or an imported track) sets the old one
+  aside with everything timed to it: the analysis, scenes, stills, clips and cut. The Song stage
+  lists earlier takes newest first: click one to listen, "Go back to this take" swaps it in with
+  its storyboard as it was left, and the take in use is set aside the same way. Songs made before
+  this are found in the video's folder and listed without scenes. "Show the audio file" opens the
+  folder, where the song is a file of its own.
 - **Earlier lyrics are kept.** A rewrite, a new song take or going back to an older version keeps
   the title, music direction and lyrics as they were; "Keep this version" does it by hand. The
   Lyrics stage lists them newest first: click one to read it, and "Go back to this version" swaps

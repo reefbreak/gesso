@@ -83,6 +83,8 @@ pub(super) enum Action {
     rewrite: bool,
   },
   OwnLyrics,
+  /// Go back to an earlier take of the song, by its place in the project's list.
+  UseTake(usize),
   /// Export the cut film's copy for Instagram.
   Share,
   /// Have the writer describe the ending frame of every scene that has none.
@@ -240,6 +242,8 @@ pub struct MusicVideoPage {
   /// Whether the writer has been asked for the ending frames this video's scenes lack, so a
   /// failed attempt isn't repeated on every frame.
   endings_asked: bool,
+  /// The earlier take of the song that is open to listen to, by its place in the project's list.
+  pub(super) viewing_take: Option<usize>,
   /// The earlier version of the lyrics that is open to read, by its place in the project's list.
   pub(super) viewing_lyrics: Option<usize>,
   /// What each video's calls have cost, part by part, and when that was last read.
@@ -248,7 +252,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -378,13 +382,10 @@ impl MusicVideoPage {
         // A new track means new beats, so everything timed to the old one goes.
         let generated = !model.is_empty();
         self.project.in_library.insert(path.clone());
-        self.project.track = Some(Track { path, model, sung });
-        self.project.grid = None;
-        self.project.sections.clear();
-        self.project.lines.clear();
-        self.project.shots.clear();
-        self.project.vocals = None;
-        self.project.cut = None;
+        // The take it replaces is set aside with its scenes, and can be gone back to.
+        self.project.set_track(Track { path, model, sung });
+        self.selected = None;
+        self.player = None;
         if generated {
           notice = library("The song is in your library");
         }
@@ -763,6 +764,9 @@ impl MusicVideoPage {
         if let Some(project) = SongProject::load(&library_dir, &id) {
           let stage = if project.reachable(project.stage) { project.stage } else { project.furthest() };
           *self = Self { project, stage, writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
+          // Songs made before earlier takes were kept are still in the folder: list them.
+          let dir = self.project.dir(&library_dir);
+          self.project.adopt_song_files(&dir);
           // Everything the video has made belongs in the library, whenever it was made.
           let request = SongRequest::Catalogue { dir: self.project.dir(&library_dir), known: self.project.in_library.clone() };
           self.start(backend, 0, "Checking this video's files are in the library\u{2026}", request);
@@ -982,6 +986,16 @@ impl MusicVideoPage {
           self.player = None;
           self.touch_now();
         }
+      },
+      Action::UseTake(index) => {
+        self.project.use_take(index);
+        if !self.project.reachable(self.stage) {
+          self.stage = self.project.furthest();
+        }
+        self.viewing_take = None;
+        self.selected = None;
+        self.player = None;
+        self.save(backend);
       },
       Action::Share => {
         if let Some(film) = self.project.cut.clone() {
