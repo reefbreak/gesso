@@ -533,11 +533,20 @@ impl MusicVideoPage {
       },
       Action::References(indices) => {
         let mut items = Vec::new();
+        // The head shot is drawn from the sheet. When the sheet is being drawn in the same go, the
+        // head shot waits for it: the button then offers it as the one still missing.
+        let sheet = self.project.references.iter().position(|r| r.kind == ReferenceKind::Look);
+        let sheet_picture = sheet.and_then(|i| self.project.references[i].image.clone());
+        let sheet_in_this_run = sheet.is_some_and(|i| indices.contains(&i));
         for index in indices {
           if let Some(reference) = self.project.references.get_mut(index) {
+            if reference.kind == ReferenceKind::Face && sheet_in_this_run {
+              continue;
+            }
             reference.version += 1;
             reference.error = None;
-            items.push(ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: None });
+            let sheet = sheet_picture.clone().filter(|_| reference.kind == ReferenceKind::Face);
+            items.push(ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: None, sheet });
           }
         }
         if !items.is_empty() {
@@ -587,7 +596,7 @@ impl MusicVideoPage {
         if let Some((reference, picture)) = pictured {
           reference.version += 1;
           reference.error = None;
-          let item = ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: Some((picture, change)) };
+          let item = ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: Some((picture, change)), sheet: None };
           let look = self.project.design().look;
           self.start(backend, 1, "Changing the picture\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items: vec![item] });
         }
@@ -785,6 +794,7 @@ impl MusicVideoPage {
 pub(super) fn kind_title(kind: ReferenceKind) -> &'static str {
   match kind {
     ReferenceKind::Look => "Performer",
+    ReferenceKind::Face => "Face",
     ReferenceKind::Location => "Location",
     ReferenceKind::Prop => "Prop",
   }

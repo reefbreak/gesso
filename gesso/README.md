@@ -129,7 +129,7 @@ runs, and leaves everything it made editable before the next stage uses it.
 | Music Analysis   | Tempo and beats; mood, sections and timed lyrics                  | Your Mac (FFmpeg); Vertex (Gemini listening)     |
 | Visual Style     | A look statement, palette, lighting and the common style block    | Writer                                           |
 | Creative Brief   | Logline, arc, editing strategy, motifs, performer, venue, props   | Writer                                           |
-| Reference Images | The performer's three-view sheet, the venue and each prop         | Vertex (Nano Banana 2, or Pro in the final pass) |
+| Reference Images | The performer's sheet and head shot, the venue and each prop      | Vertex (Nano Banana 2, or Pro in the final pass) |
 | Scenes           | The song cut into scenes on its beats, each with an opening frame | Your Mac (timing); writer; Vertex (stills)       |
 | Shots            | A silent clip per scene from its still; sung scenes lip-synced    | Vertex (Veo 3.1); fal (lip sync)                 |
 | Final Video      | Every clip trimmed to its scene and laid under the song           | Your Mac (FFmpeg)                                |
@@ -163,6 +163,11 @@ runs, and leaves everything it made editable before the next stage uses it.
   across the grid the song's words run under the stills and clips like a track; the sung line is
   brighter on scenes the performer sings on camera. A scene can be marked as sung on the Shots
   stage as well as on Scenes, which turns the video's lip sync on if it was off.
+- **A head shot beside the sheet.** On the performer's sheet the face is small, so close-ups have
+  little to go on. The Face reference is a head-and-shoulders portrait drawn from the sheet, so it
+  is the same person, and it goes with every still along with the sheet, the location and up to
+  two props. It stays through edits to the brief and goes only when a rewritten brief replaces the
+  performer. A picture of your own can be uploaded to the card instead.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

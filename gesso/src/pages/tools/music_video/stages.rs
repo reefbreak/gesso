@@ -10,7 +10,7 @@ use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{Aspect, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace};
-use crate::backend::local::song::project::{Quality, Stage};
+use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
 use crate::backend::local::song::writer::{Subject, Swatch};
 use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
 use crate::backend::media_cache::{Lookup, MediaCache};
@@ -438,6 +438,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let mut upload = None;
   let mut download = None;
   page.reference_changes.resize(page.project.references.len(), String::new());
+  let has_sheet = page.project.references.iter().any(|r| r.kind == ReferenceKind::Look && r.image.is_some());
   column_wide(ui, stage, "references", |ui| {
     heading(ui, Stage::References, "Reference images", "The performer, the location and the signature details. Every scene is drawn from these, so they stay the same from shot to shot.");
     if page.project.references.is_empty() {
@@ -469,7 +470,14 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
               ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
               ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
-                  if widgets::ghost(ui, Icon::RotateCw, None, "Draw this one again from its description", false).clicked() {
+                  let draw_tip = match (reference.kind, has_sheet) {
+                    (ReferenceKind::Face, true) => "Draw the head shot from the performer's picture, so it is the same person",
+                    (ReferenceKind::Face, false) => "Draw or upload the performer's picture first: the head shot is made from it",
+                    _ => "Draw this one again from its description",
+                  };
+                  // Without the sheet a head shot would be someone new.
+                  let can_draw = reference.kind != ReferenceKind::Face || has_sheet;
+                  if ui.add_enabled_ui(can_draw, |ui| widgets::ghost(ui, Icon::RotateCw, None, draw_tip, false).clicked()).inner {
                     redraw = Some(index);
                   }
                   if widgets::ghost(ui, Icon::Upload, None, "Upload a picture: your own, or this one after editing it elsewhere", false).clicked() {
@@ -529,7 +537,7 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let line = page.progress_line().filter(|_| page.running_here());
   let any = page.project.references.iter().any(|r| r.image.is_some());
   let pro = page.pro();
-  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, work on the description with AI, write a change to the picture, or save the picture, edit it in another app and upload it back to the same card. Names, and adding or removing props, are on the Creative Brief.", |ui| {
+  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, work on the description with AI, write a change to the picture, or save the picture, edit it in another app and upload it back to the same card. The Face card is a head shot drawn from the performer's picture, for close-ups. Names, and adding or removing props, are on the Creative Brief.", |ui| {
     picture_model(ui, pro);
     error_line(ui, page.error.as_deref());
     let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };

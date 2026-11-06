@@ -76,6 +76,9 @@ pub enum ReferenceKind {
   /// The performer, front, side and back.
   #[default]
   Look,
+  /// The performer's face in close-up, drawn from the sheet: on the sheet the face is small, so
+  /// close-ups have little to go on without it.
+  Face,
   Location,
   Prop,
 }
@@ -84,6 +87,7 @@ impl ReferenceKind {
   pub fn label(self) -> &'static str {
     match self {
       ReferenceKind::Look => "look",
+      ReferenceKind::Face => "face",
       ReferenceKind::Location => "location",
       ReferenceKind::Prop => "prop",
     }
@@ -293,6 +297,7 @@ impl SongProject {
       }
     }
     project.errors_split = true;
+    project.ensure_face();
     project.place_lyrics();
     Some(project)
   }
@@ -386,8 +391,33 @@ impl SongProject {
         Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image, version, error: None }
       })
       .collect();
+    // The head shot is of the sheet's performer: it stays only while the sheet does.
+    let face = self.references.iter().find(|r| r.kind == ReferenceKind::Face).cloned();
     self.references = references;
     self.brief = Some(brief);
+    self.keep_face(face.filter(|_| self.references.iter().any(|r| r.kind == ReferenceKind::Look && r.image.is_some())));
+  }
+
+  /// Gives the performer a head-shot reference beside their sheet: `kept` (the one there was) with
+  /// the performer's current name, or an empty one to be drawn.
+  fn keep_face(&mut self, kept: Option<Reference>) {
+    self.references.retain(|r| r.kind != ReferenceKind::Face);
+    let Some(sheet) = self.references.iter().position(|r| r.kind == ReferenceKind::Look) else {
+      return;
+    };
+    let (name, description) = (self.references[sheet].name.clone(), self.references[sheet].description.clone());
+    let face = match kept {
+      Some(face) => Reference { name, ..face },
+      None => Reference { kind: ReferenceKind::Face, name, description, image: None, version: 0, error: None },
+    };
+    self.references.insert(sheet + 1, face);
+  }
+
+  /// Adds the head-shot reference to a project saved before there was one.
+  fn ensure_face(&mut self) {
+    if !self.references.iter().any(|r| r.kind == ReferenceKind::Face) {
+      self.keep_face(None);
+    }
   }
 
   /// Puts each sung line on the scene it is sung over, leaving the scenes, their stills and their
@@ -428,7 +458,9 @@ impl SongProject {
         Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image: kept.as_ref().and_then(|r| r.image.clone()), version: kept.as_ref().map_or(0, |r| r.version), error: kept.and_then(|r| r.error) }
       })
       .collect();
+    let face = old.into_iter().find(|r| r.kind == ReferenceKind::Face);
     self.references = references;
+    self.keep_face(face);
   }
 
   /// After a reference's description was edited by hand: the brief takes the new wording (props
@@ -440,6 +472,8 @@ impl SongProject {
     for reference in &self.references {
       let subject = match reference.kind {
         ReferenceKind::Look => Some(&mut brief.character),
+        // The head shot's wording is its own: the brief describes the whole performer.
+        ReferenceKind::Face => None,
         ReferenceKind::Location => Some(&mut brief.venue),
         ReferenceKind::Prop => brief.props.iter_mut().find(|prop| prop.name == reference.name),
       };
@@ -455,8 +489,9 @@ impl SongProject {
     let mut made: Vec<&Reference> = self.references.iter().filter(|r| r.image.is_some()).collect();
     made.sort_by_key(|r| match r.kind {
       ReferenceKind::Look => 0,
-      ReferenceKind::Location => 1,
-      ReferenceKind::Prop => 2,
+      ReferenceKind::Face => 1,
+      ReferenceKind::Location => 2,
+      ReferenceKind::Prop => 3,
     });
     made.into_iter().filter_map(|r| r.image.clone().map(|image| (r.kind, image))).collect()
   }
@@ -562,21 +597,28 @@ mod tests {
     let mut project = SongProject::new();
     project.visual = Some(Style { block: "grainy".into(), ..Default::default() });
     project.set_brief(brief());
-    assert_eq!(project.references.iter().map(|r| (r.kind, r.name.as_str())).collect::<Vec<_>>(), [(ReferenceKind::Look, "The Orchestrator"), (ReferenceKind::Location, "Rail Vault"), (ReferenceKind::Prop, "Lanyard")]);
+    assert_eq!(project.references.iter().map(|r| (r.kind, r.name.as_str())).collect::<Vec<_>>(), [(ReferenceKind::Look, "The Orchestrator"), (ReferenceKind::Face, "The Orchestrator"), (ReferenceKind::Location, "Rail Vault"), (ReferenceKind::Prop, "Lanyard")]);
     for (i, reference) in project.references.iter_mut().enumerate() {
       reference.image = Some(PathBuf::from(format!("{i}.png")));
       reference.version = 2;
     }
     // Props first on disk order doesn't matter: the performer leads.
     project.references.reverse();
-    assert_eq!(project.reference_images(), [(ReferenceKind::Look, PathBuf::from("0.png")), (ReferenceKind::Location, PathBuf::from("1.png")), (ReferenceKind::Prop, PathBuf::from("2.png"))]);
+    assert_eq!(project.reference_images(), [(ReferenceKind::Look, PathBuf::from("0.png")), (ReferenceKind::Face, PathBuf::from("1.png")), (ReferenceKind::Location, PathBuf::from("2.png")), (ReferenceKind::Prop, PathBuf::from("3.png"))]);
 
     let mut revised = brief();
     revised.venue.description = "A flooded car park.".to_owned();
     project.set_brief(revised);
     assert_eq!(project.references[0].image, Some(PathBuf::from("0.png")), "the performer is unchanged");
-    assert_eq!((project.references[1].image.clone(), project.references[1].version), (None, 2), "the venue changed, so its picture goes");
+    assert_eq!((project.references[1].kind, project.references[1].image.clone()), (ReferenceKind::Face, Some(PathBuf::from("1.png"))), "so their head shot stays");
+    assert_eq!((project.references[2].image.clone(), project.references[2].version), (None, 2), "the venue changed, so its picture goes");
+
     assert_eq!(project.design(), Design { look: "grainy".into(), character: "Wiry, cable hair.".into(), venue: "A flooded car park.".into() });
+    // A rewritten performer is a new person: the sheet goes, and the head shot with it.
+    let mut recast = brief();
+    recast.character.description = "Broad, shaven head.".to_owned();
+    project.set_brief(recast);
+    assert_eq!((project.references[0].image.clone(), project.references[1].kind, project.references[1].image.clone()), (None, ReferenceKind::Face, None));
   }
 
   #[test]
@@ -595,7 +637,7 @@ mod tests {
     edited.props.push(Subject::default());
     project.follow_edited_brief();
     let summary: Vec<_> = project.references.iter().map(|r| (r.kind, r.name.as_str(), r.image.clone(), r.version)).collect();
-    assert_eq!(summary, [(ReferenceKind::Look, "The Captain", Some(PathBuf::from("0.png")), 2), (ReferenceKind::Location, "Rail Vault", Some(PathBuf::from("1.png")), 2), (ReferenceKind::Prop, "Lanyard", Some(PathBuf::from("2.png")), 2), (ReferenceKind::Prop, "Ship's wheel", None, 0)], "a prop with nothing written isn't a reference");
+    assert_eq!(summary, [(ReferenceKind::Look, "The Captain", Some(PathBuf::from("0.png")), 2), (ReferenceKind::Face, "The Captain", Some(PathBuf::from("1.png")), 2), (ReferenceKind::Location, "Rail Vault", Some(PathBuf::from("2.png")), 2), (ReferenceKind::Prop, "Lanyard", Some(PathBuf::from("3.png")), 2), (ReferenceKind::Prop, "Ship's wheel", None, 0)], "a prop with nothing written isn't a reference");
     assert_eq!(project.references[0].description, "Wiry, cable hair, a torn greatcoat.");
     assert_eq!(project.design().character, "Wiry, cable hair, a torn greatcoat.");
   }
@@ -605,7 +647,8 @@ mod tests {
     let mut project = SongProject::new();
     project.set_brief(brief());
     project.references[0].description = "Wiry, in a greatcoat.".to_owned();
-    project.references[2].description = "A brass compass.".to_owned();
+    project.references[1].description = "The same face, colder.".to_owned();
+    project.references[3].description = "A brass compass.".to_owned();
     project.follow_edited_references();
     let brief = project.brief.as_ref().unwrap();
     assert_eq!((brief.character.description.as_str(), brief.venue.description.as_str(), brief.props[0].description.as_str()), ("Wiry, in a greatcoat.", "A brick tunnel.", "A brass compass."));
@@ -625,6 +668,23 @@ mod tests {
     assert_eq!((opened.shots[0].error.as_deref(), opened.shots[0].clip_error.as_deref()), (None, Some("Veo said no")));
     assert_eq!((opened.shots[1].error.as_deref(), opened.shots[1].clip_error.as_deref()), (Some("blocked"), None));
     assert!(opened.errors_split);
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  /// A project saved before there was a head shot gains the empty card when it is opened, beside
+  /// the sheet, with the other pictures untouched.
+  #[test]
+  fn an_older_project_gains_the_head_shot_card_when_opened() {
+    let dir = std::env::temp_dir().join(format!("gesso-project-{}", uuid::Uuid::new_v4()));
+    let mut project = SongProject::new();
+    project.idea = "x".into();
+    project.set_brief(brief());
+    project.references.retain(|r| r.kind != ReferenceKind::Face);
+    project.references[0].image = Some(PathBuf::from("sheet.png"));
+    project.save(&dir).unwrap();
+    let opened = SongProject::load(&dir, &project.id).unwrap();
+    let cards: Vec<_> = opened.references.iter().map(|r| (r.kind, r.image.is_some())).collect();
+    assert_eq!(cards, [(ReferenceKind::Look, true), (ReferenceKind::Face, false), (ReferenceKind::Location, false), (ReferenceKind::Prop, false)]);
     let _ = std::fs::remove_dir_all(dir);
   }
 

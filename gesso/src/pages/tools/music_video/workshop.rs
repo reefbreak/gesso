@@ -300,13 +300,13 @@ mod tests {
   #[test]
   fn a_reference_description_goes_back_to_its_card_and_the_brief() {
     let mut project = project();
-    project.references[2].image = Some("compass.png".into());
-    let workshop = Workshop::open(&project, Target::Reference(2)).unwrap();
+    project.references[3].image = Some("compass.png".into());
+    let workshop = Workshop::open(&project, Target::Reference(3)).unwrap();
     assert_eq!(workshop.fields, [(TEXT.to_owned(), "No needle.".to_owned())]);
-    assert_eq!(Target::Reference(2).section(&project), "The description an image model draws the reference picture of \"Compass\" (prop) from");
-    Target::Reference(2).write(&mut project, &[(TEXT.to_owned(), "Brass, no needle.".to_owned())]);
+    assert_eq!(Target::Reference(3).section(&project), "The description an image model draws the reference picture of \"Compass\" (prop) from");
+    Target::Reference(3).write(&mut project, &[(TEXT.to_owned(), "Brass, no needle.".to_owned())]);
     project.follow_edited_brief();
-    assert_eq!((project.references[2].description.as_str(), project.references[2].image.is_some()), ("Brass, no needle.", true), "the picture stays");
+    assert_eq!((project.references[3].description.as_str(), project.references[3].image.is_some()), ("Brass, no needle.", true), "the picture stays");
     assert_eq!(project.brief.as_ref().unwrap().props[0].description, "Brass, no needle.");
     assert!(Workshop::open(&project, Target::Reference(9)).is_none());
   }

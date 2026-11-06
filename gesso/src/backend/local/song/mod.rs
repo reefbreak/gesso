@@ -73,10 +73,12 @@ const FINAL_STILL_SIZE: &str = "2K";
 /// Scenes lip-synced at once (each is one fal job).
 const SYNCS_AT_ONCE: usize = 3;
 /// A still is drawn from at most this many reference images (the performer first).
-const REFERENCES_PER_STILL: usize = 4;
+const REFERENCES_PER_STILL: usize = 5;
 /// The performer's sheet shows them three times side by side; props are shot square.
 const LOOK_RATIO: &str = "16:9";
 const PROP_RATIO: &str = "1:1";
+/// The head shot fills a square.
+const FACE_RATIO: &str = "1:1";
 const NANO_BANANA: &str = "gemini-3.1-flash-image";
 const NANO_BANANA_PRO: &str = "gemini-3-pro-image";
 /// Veo makes 1080p only as 8-second clips.
@@ -120,6 +122,8 @@ pub struct ReferenceJob {
   pub description: String,
   /// Instead of drawing from the description: the picture to change, and how.
   pub change: Option<(PathBuf, String)>,
+  /// For the head shot: the performer's sheet, so the face is that person's and not a new one.
+  pub sheet: Option<PathBuf>,
 }
 
 /// A still to make.
@@ -599,14 +603,18 @@ impl SongRun<'_> {
 
   async fn reference(&self, dir: &Path, look: &str, aspect: Aspect, pro: bool, job: ReferenceJob) -> anyhow::Result<PathBuf> {
     let model = still_model(pro);
-    let picture = job.change.as_ref().map(|(path, _)| self.engine.load_path(path)).transpose()?;
+    // One picture goes with the request at most: the one to change, or the sheet a head shot is drawn from.
+    let from_sheet = job.kind == ReferenceKind::Face && job.change.is_none() && job.sheet.is_some();
+    let picture = job.change.as_ref().map(|(path, _)| path).or(job.sheet.as_ref().filter(|_| from_sheet)).map(|path| self.engine.load_path(path)).transpose()?;
     let prompt = match &job.change {
       Some((_, change)) => change_prompt(change),
+      None if from_sheet => face_from_sheet_prompt(look),
       None => reference_prompt(job.kind, &job.name, &job.description, look),
     };
     let images: Vec<RefImage> = picture.into_iter().collect();
     let ratio = match job.kind {
       ReferenceKind::Look => LOOK_RATIO,
+      ReferenceKind::Face => FACE_RATIO,
       ReferenceKind::Location => aspect.ratio(),
       ReferenceKind::Prop => PROP_RATIO,
     };
@@ -744,6 +752,7 @@ fn music_prompt(draft: &Draft, clip: bool, instrumental: bool) -> String {
 fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &str) -> String {
   let subject = match kind {
     ReferenceKind::Look => format!("A character reference sheet for a music video, on a plain white background. On the left, a large head-and-shoulders portrait of the performer facing the camera, the face evenly lit and sharp. On the right, the same performer shown full-length three times side by side, from the front, the side and the back, the whole figure in frame from head to shoes each time. It is one person throughout, with the same face, hair and clothes in every view. The performer, {}: {}", name.trim(), sentence(description)),
+    ReferenceKind::Face => format!("A head-and-shoulders portrait of a music video's performer facing the camera, on a plain white background, the face filling most of the frame, evenly lit and sharp. The performer, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Location => format!("An establishing shot of a music video's location with nobody in it. The place, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Prop => format!("A reference photograph of a single prop from a music video, alone on a plain white background. The prop, {}: {}", name.trim(), sentence(description)),
   };
@@ -782,6 +791,11 @@ fn in_keeping(file: GeneratedFile, look: &str) -> GeneratedFile {
   }
 }
 
+/// The performer's head shot, drawn from their sheet so it is the same person.
+fn face_from_sheet_prompt(look: &str) -> String {
+  format!("The attached picture is a performer's reference sheet for a music video. Draw a head-and-shoulders portrait of this exact person: the same face, hair, skin, age and clothes as on the sheet, changing nothing about them. They face the camera with a neutral expression, the face filling most of the frame, evenly lit and sharp, on a plain white background. One picture of one person; don't copy the sheet's layout. The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look))
+}
+
 /// A written change to a reference picture the user already has.
 fn change_prompt(change: &str) -> String {
   format!("Change the attached reference picture as follows: {} Keep everything else exactly as it is: the same subject, pose, framing, background and style. No text, captions or logos.", sentence(change))
@@ -794,6 +808,7 @@ fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: b
   let mut parts = vec![format!("A single frame from a music video. {}", sentence(image))];
   let pictures: Vec<&str> = guided.then_some("the approved draft of this exact frame").into_iter().chain(kinds.iter().map(|kind| match kind {
     ReferenceKind::Look => "the performer's reference sheet",
+    ReferenceKind::Face => "the performer's face in close-up",
     ReferenceKind::Location => "the location",
     ReferenceKind::Prop => "a prop",
   })).collect();
@@ -806,13 +821,18 @@ fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: b
   if guided {
     parts.push("Recreate the approved draft faithfully: the same composition, framing, pose, expression and lighting, with finer detail and cleaner rendering. Change nothing about what is in the frame or where.".to_owned());
   }
-  if kinds.contains(&ReferenceKind::Look) {
-    // The scene's own words about the performer, and a draft drawn by a weaker model, both drift.
-    parts.push(format!("Wherever the performer appears, they are the person on the reference sheet: the same face, hair, build and clothes, whatever this scene's wording{} suggests. Show them once, as part of the scene; don't copy the sheet's layout or its plain background. For the record, they are: {}", if guided { " or the draft" } else { "" }, sentence(&design.character)));
-  } else {
-    parts.push(format!("The performer: {}", sentence(&design.character)));
+  let (sheet, face) = (kinds.contains(&ReferenceKind::Look), kinds.contains(&ReferenceKind::Face));
+  // The scene's own words about the performer, and a draft drawn by a weaker model, both drift.
+  let whatever = format!("whatever this scene's wording{} suggests", if guided { " or the draft" } else { "" });
+  match (sheet, face) {
+    (true, _) => {
+      let close_up = if face { " Take the face from the close-up, which shows it in full detail: the same features exactly." } else { "" };
+      parts.push(format!("Wherever the performer appears, they are the person on the reference sheet: the same face, hair, build and clothes, {whatever}.{close_up} Show them once, as part of the scene; don't copy the sheet's layout or its plain background. For the record, they are: {}", sentence(&design.character)));
+    },
+    (false, true) => parts.push(format!("Wherever the performer appears, they are the person in the close-up: the same face and hair exactly, {whatever}. Don't copy its plain background. For the record, they are: {}", sentence(&design.character))),
+    (false, false) => parts.push(format!("The performer: {}", sentence(&design.character))),
   }
-  if kinds.iter().any(|kind| *kind != ReferenceKind::Look) {
+  if kinds.iter().any(|kind| matches!(kind, ReferenceKind::Location | ReferenceKind::Prop)) {
     parts.push("Keep the location and the props as their pictures show them.".to_owned());
   }
   if !design.venue.trim().is_empty() {
@@ -1021,7 +1041,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply()]);
       let (engine, dir) = engine(base_url);
       let project = dir.join("project");
-      let items = vec![ReferenceJob { index: 0, version: 1, kind: ReferenceKind::Look, name: "The Orchestrator".into(), description: "Wiry, cable hair".into(), change: None }, ReferenceJob { index: 1, version: 3, kind: ReferenceKind::Location, name: "Rail Vault".into(), description: "A brick tunnel".into(), change: None }];
+      let items = vec![ReferenceJob { index: 0, version: 1, kind: ReferenceKind::Look, name: "The Orchestrator".into(), description: "Wiry, cable hair".into(), change: None, sheet: None }, ReferenceJob { index: 1, version: 3, kind: ReferenceKind::Location, name: "Rail Vault".into(), description: "A brick tunnel".into(), change: None, sheet: None }];
       let (tx, rx) = std::sync::mpsc::channel();
       engine.start_song(4, SongRequest::References { dir: project.clone(), look: "Raw 16mm black-and-white film".into(), aspect: Aspect::Wide, pro: false, items }, tx, egui::Context::default());
 
@@ -1056,7 +1076,7 @@ mod tests {
       assert!(image::open(path).unwrap().to_rgb8().get_pixel(0, 0).0[2].abs_diff(30) < 6, "the picture itself is kept");
       assert!(requests.lock().unwrap().is_empty(), "nothing is generated for an upload");
 
-      let item = ReferenceJob { index: 0, version: 3, kind: ReferenceKind::Look, name: "The Captain".into(), description: "Wiry".into(), change: Some((path.clone(), "a longer coat".into())) };
+      let item = ReferenceJob { index: 0, version: 3, kind: ReferenceKind::Look, name: "The Captain".into(), description: "Wiry".into(), change: Some((path.clone(), "a longer coat".into())), sheet: None };
       engine.start_song(6, SongRequest::References { dir: project, look: "grainy".into(), aspect: Aspect::Wide, pro: false, items: vec![item] }, tx, egui::Context::default());
       let updates = finished(&rx, 6).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Reference { index: 0, path }) if path.ends_with("references/look_01_v3.png")), "{updates:?}");
@@ -1064,6 +1084,28 @@ mod tests {
       let parts = serde_json::from_str::<Value>(&requests[0].1).unwrap()["contents"][0]["parts"].clone();
       assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
       assert!(parts[1]["text"].as_str().unwrap().starts_with("Change the attached reference picture as follows: a longer coat. Keep everything else"), "{parts}");
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The head shot is drawn from the sheet, so it is the same person: the sheet goes with the
+    /// request, square, and the description isn't what it is drawn from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_head_shot_is_drawn_from_the_sheet() {
+      let (base_url, requests) = fake_vertex(vec![image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let project = dir.join("project");
+      let sheet = save(&project.join("references"), "look_01_v1.png", &tiny_png()).unwrap();
+      let (tx, rx) = std::sync::mpsc::channel();
+      let items = vec![ReferenceJob { index: 1, version: 1, kind: ReferenceKind::Face, name: "The Captain".into(), description: "Wiry, cable hair".into(), change: None, sheet: Some(sheet) }];
+      engine.start_song(13, SongRequest::References { dir: project, look: "grainy".into(), aspect: Aspect::Wide, pro: false, items }, tx, egui::Context::default());
+      let updates = finished(&rx, 13).await;
+      assert!(matches!(updates.first(), Some(SongUpdate::Reference { index: 1, path }) if path.ends_with("references/face_02_v1.png")), "{updates:?}");
+      let requests = requests.lock().unwrap();
+      let body: Value = serde_json::from_str(&requests[0].1).unwrap();
+      assert!(body["contents"][0]["parts"][0]["inlineData"]["data"].is_string(), "the sheet is attached");
+      let prompt = body["contents"][0]["parts"][1]["text"].as_str().unwrap();
+      assert!(prompt.contains("Draw a head-and-shoulders portrait of this exact person") && !prompt.contains("Wiry, cable hair"), "{prompt}");
+      assert_eq!(body["generationConfig"]["imageConfig"]["aspectRatio"], "1:1");
       let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1260,6 +1302,17 @@ mod tests {
       assert_eq!(grey.extension, "png");
       let pixel = image::load_from_memory(&grey.bytes).unwrap().to_rgb8().get_pixel(1, 1).0;
       assert!(pixel[0] == pixel[1] && pixel[1] == pixel[2], "{pixel:?}");
+    }
+
+    #[test]
+    fn the_close_up_is_named_and_the_face_is_taken_from_it() {
+      let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
+      let both = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Face, ReferenceKind::Location], false);
+      assert!(both.contains("in order: 1, the performer's reference sheet; 2, the performer's face in close-up; 3, the location."), "{both}");
+      assert!(both.contains("Take the face from the close-up, which shows it in full detail"));
+      let face_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Face], false);
+      assert!(face_only.contains("they are the person in the close-up") && !face_only.contains("Keep the location"), "{face_only}");
+      assert!(face_from_sheet_prompt("grainy black and white").contains("this exact person") && face_from_sheet_prompt("grainy black and white").contains("Strictly black and white"));
     }
 
     /// With the sheet missing, the location's picture must not be taken for the performer.
