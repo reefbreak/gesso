@@ -869,6 +869,7 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
   let current = page.project.cut_is_current(quality);
   let cut_in = page.project.cut_of.as_ref().map(|made| made.quality);
   let has_cut = page.project.cut.is_some();
+  let can_edit = page.film().is_some();
   let unsynced = page.project.scenes_to_sync(quality, true).0.len();
   let line = page.progress_line().filter(|_| page.running_here());
   let mut changed = false;
@@ -954,6 +955,13 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
         actions.push(Action::Reveal(cut.clone()));
       }
     }
+    // The film as its parts, for changes the stages here don't make: reordering, dropping a
+    // scene, swapping in a clip made elsewhere.
+    ui.add_space(10.0);
+    if secondary(ui, Icon::Film, "Open in Edit Video", can_edit && !busy) {
+      actions.push(Action::EditFilm);
+    }
+    ui.label(small("Opens the film as its scenes over the song, not as one flat video. There you can reorder, remove or replace scenes and cut it again."));
   });
   if changed {
     page.touch(ui);

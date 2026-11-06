@@ -20,9 +20,10 @@ use crate::backend::local::song::plan::{self, Slot};
 use crate::backend::local::song::project::{CutOf, Quality, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{ClipJob, ReferenceJob, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
-use crate::backend::local::tools::VeoTier;
+use crate::backend::local::song::cut::ShotMedia;
+use crate::backend::local::tools::{Film, FilmScene, VeoTier};
 use crate::backend::video::VideoPlayer;
-use crate::pages::common::Env;
+use crate::pages::common::{AppRequest, Env};
 use crate::theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets;
@@ -101,6 +102,8 @@ pub(super) enum Action {
   WorkshopClose,
   /// Stops the lip sync, leaving anything else running.
   StopSync,
+  /// Opens the film in Edit Video as its scenes and soundtrack.
+  EditFilm,
   Plan,
   /// Scenes whose stills to draw, by index; `true` to use the better model in the draft pass.
   Stills(Vec<usize>, bool),
@@ -425,6 +428,25 @@ impl MusicVideoPage {
   /// Pictures are drawn with Nano Banana Pro in the final pass.
   pub(super) fn pro(&self) -> bool {
     self.project.quality == Quality::Final
+  }
+
+  /// The film as its parts, for Edit Video: each scene's clip (or still) at its length in the
+  /// cut, in order, with the song, at the size, finish and fades the cut here would use.
+  pub(super) fn film(&self) -> Option<Film> {
+    let shots = self.project.cut_shots(self.quality())?;
+    let scenes = shots
+      .into_iter()
+      .zip(&self.project.shots)
+      .enumerate()
+      .map(|(i, (cut, shot))| {
+        let (media, still) = match cut.media {
+          ShotMedia::Clip(path) => (path, false),
+          ShotMedia::Still(path) => (path, true),
+        };
+        FilmScene { label: format!("{} \u{b7} {}", i + 1, shot.slot.section), media, still, seconds: cut.end - cut.start, lyric: shot.slot.lyric.clone() }
+      })
+      .collect();
+    Some(Film { title: self.project.display_title(), scenes, audio: Some(self.project.track.as_ref()?.path.clone()), size: self.project.aspect.size(self.resolution()), grade: self.project.grade, fades: self.project.fades })
   }
 
   /// What this pass still has to make or make again, in the order it is made: stills, clips,
@@ -760,6 +782,11 @@ impl MusicVideoPage {
         if let Some(run) = self.slot(matches!(action, Action::StopSync)) {
           backend.cancel_song(run.id);
           run.note = "Stopping after the ones in flight\u{2026}".to_owned();
+        }
+      },
+      Action::EditFilm => {
+        if let Some(film) = self.film() {
+          env.requests.push(AppRequest::EditFilm(Box::new(film)));
         }
       },
       Action::Reveal(path) => {

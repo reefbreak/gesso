@@ -527,6 +527,10 @@ impl ArtcraftApp {
         self.backend.load_characters();
         self.characters_modal = Some(CharactersModal::new());
       },
+      AppRequest::EditFilm(film) => {
+        self.edit_video.open_film(*film);
+        self.navigate(Page::VideoEditor);
+      },
       AppRequest::PlayExternally(url) => {
         if let Err(err) = open::that(&url) {
           self.toasts.error(format!("Couldn't open the file: {err}"));

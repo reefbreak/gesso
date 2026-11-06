@@ -187,6 +187,13 @@ runs, and leaves everything it made editable before the next stage uses it.
   each), set on the Final Video stage. A fade runs smoothly across scene cuts. The sound fades
   with the picture only if asked, so a song with its own intro and ending is left as it is.
   Changing the fades or the finish marks the film as out of date until it is cut again.
+- **The film opens in Edit Video as its parts.** "Open in Edit Video" on the Final Video stage
+  sends the film over as its scenes in order, each with its length, and the song under them, at
+  the same size, finish and fades. Edit Video's Film tab lists them: scenes can be moved, removed
+  or given another clip (a file, or one made on the Trim, Extend or Describe tab), the soundtrack
+  can be swapped, and the film is cut again on your Mac with the same frame-exact cut. A scene
+  keeps its length, so the scenes around it stay on their beats; moving or removing one shifts
+  what follows against the song.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

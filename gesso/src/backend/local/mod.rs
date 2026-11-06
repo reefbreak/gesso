@@ -417,6 +417,12 @@ impl LocalEngine {
         let file = tokio::task::spawn_blocking(move || tools::join_videos(&videos)).await??;
         (vec![file], 0.0, format!("{count} clips joined \u{b7} on your Mac, free"), MediaClass::Video)
       },
+      ToolRequest::CutFilm { film } => {
+        let film = film.clone();
+        let (count, seconds) = (film.scenes.len(), film.seconds());
+        let file = tokio::task::spawn_blocking(move || tools::cut_film(&film)).await??;
+        (vec![file], 0.0, format!("{count} scenes, {seconds:.0}s \u{b7} cut on your Mac, free"), MediaClass::Video)
+      },
       ToolRequest::DescribeEdit { video, prompt, resolution, keep_sound, .. } => {
         let source = video.clone();
         let prepared = tokio::task::spawn_blocking(move || tools::prepare_for_omni(&source)).await??;

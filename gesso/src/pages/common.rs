@@ -1,6 +1,7 @@
 //! What the create pages share: the page shell (`DesktopCreatePageShell`), uploading references,
 //! cost-estimate bookkeeping and the app-level requests pages make.
 
+use crate::backend::local::tools::Film;
 use crate::backend::local::estimate::CostEstimate;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,6 +79,8 @@ pub enum AppRequest {
   },
   /// Open a file in the system's player.
   PlayExternally(String),
+  /// Open a film in Edit Video as its parts: the scenes in order and the soundtrack under them.
+  EditFilm(Box<Film>),
   /// Open the characters dialog (it mentions the picked one in the video prompt).
   OpenCharacters,
   LoadMoreLibrary(FeedKey),

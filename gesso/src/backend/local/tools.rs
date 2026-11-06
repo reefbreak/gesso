@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use super::GeneratedFile;
 use super::RefImage;
 use super::pricing::PriceBook;
+use super::song::cut::{self, CutShot, Fades, Grade, ShotMedia};
 use super::spend::Account;
 use super::vertex::{GeminiImageRequest, OMNI_MODELS, VeoRequest};
 use crate::backend::video;
@@ -62,6 +63,10 @@ pub enum ToolRequest {
   /// Clips in order; later ones are scaled to the first one's frame size.
   JoinVideos {
     videos: Vec<PathBuf>,
+  },
+  /// A film cut from its scenes, each trimmed to its length, over one soundtrack.
+  CutFilm {
+    film: Film,
   },
   ExtendVideo {
     video: PathBuf,
@@ -164,6 +169,7 @@ impl ToolRequest {
       ToolRequest::TrimVideo { .. } => local("tool_trim_video", "Trim", "ffmpeg"),
       ToolRequest::SaveImage { .. } => local("tool_stage_render", "3D Stage render", "stage"),
       ToolRequest::JoinVideos { .. } => local("tool_join_videos", "Join", "ffmpeg"),
+      ToolRequest::CutFilm { .. } => local("tool_cut_film", "Film", "ffmpeg"),
       ToolRequest::DescribeEdit { .. } => ToolRoute { id: "tool_describe_edit", name: "Edit with Gemini Omni Flash", provider: "Vertex AI", upstream: OMNI_MODELS[0], account: Some(Account::Vertex) },
       ToolRequest::ExtendVideo { tier, .. } => ToolRoute {
         id: "tool_extend_video",
@@ -221,6 +227,64 @@ pub fn trim_video(video: &Path, start: f64, end: f64) -> anyhow::Result<Generate
   let dir = tempfile::tempdir()?;
   let out = dir.path().join("trimmed.mp4");
   run_ffmpeg(&["-y", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"], video, &["-t", &format!("{:.3}", end - start), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"], &out)?;
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
+}
+
+/// A film as its parts, so it can be edited as one: the scenes in order, each a clip or a still
+/// held for its length, and the soundtrack that runs under all of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Film {
+  pub title: String,
+  pub scenes: Vec<FilmScene>,
+  pub audio: Option<PathBuf>,
+  /// The frame size it is cut at.
+  pub size: (u32, u32),
+  pub grade: Grade,
+  pub fades: Fades,
+}
+
+/// One scene of a film.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilmScene {
+  /// What the scene is called in the list ("12 \u{b7} Verse 1").
+  pub label: String,
+  pub media: PathBuf,
+  /// A picture held for the scene's length, where there is no clip.
+  pub still: bool,
+  /// How long the scene runs in the film; a longer clip is cut off, a shorter one holds its last frame.
+  pub seconds: f64,
+  /// What is sung over it, for the list.
+  pub lyric: String,
+}
+
+impl Film {
+  pub fn seconds(&self) -> f64 {
+    self.scenes.iter().map(|scene| scene.seconds).sum()
+  }
+
+  /// The scenes as the cut takes them: end to end from zero, in the order they are in now.
+  fn shots(&self) -> Vec<CutShot> {
+    let mut at = 0.0;
+    self
+      .scenes
+      .iter()
+      .map(|scene| {
+        let start = at;
+        at += scene.seconds;
+        CutShot { start, end: at, media: if scene.still { ShotMedia::Still(scene.media.clone()) } else { ShotMedia::Clip(scene.media.clone()) } }
+      })
+      .collect()
+  }
+}
+
+/// Cuts a film from its scenes with the frame-exact cut the Music Video page uses, so scenes keep
+/// their lengths and the soundtrack stays in time.
+pub fn cut_film(film: &Film) -> anyhow::Result<GeneratedFile> {
+  anyhow::ensure!(!film.scenes.is_empty(), "The film has no scenes");
+  let audio = film.audio.as_ref().ok_or_else(|| anyhow::anyhow!("The film has no soundtrack. Pick one first."))?;
+  let dir = tempfile::tempdir()?;
+  let out = dir.path().join("film.mp4");
+  cut::assemble(&film.shots(), audio, film.size, film.grade, film.fades, &out)?;
   Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
 }
 
@@ -399,6 +463,51 @@ fn run_ffmpeg(before_input: &[&str], input: &Path, after_input: &[&str], output:
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Moving or removing a scene moves everything after it; each scene keeps its own length.
+  #[test]
+  fn a_films_scenes_run_end_to_end_in_their_current_order() {
+    let scene = |name: &str, seconds: f64, still: bool| FilmScene { label: name.to_owned(), media: PathBuf::from(name), still, seconds, lyric: String::new() };
+    let mut film = Film { title: "Adrift".into(), scenes: vec![scene("a.mp4", 2.5, false), scene("b.png", 4.0, true), scene("c.mp4", 1.5, false)], audio: None, size: (1280, 720), grade: Grade::None, fades: Fades::default() };
+    let spans = |film: &Film| film.shots().iter().map(|shot| (shot.start, shot.end)).collect::<Vec<_>>();
+    assert_eq!(spans(&film), [(0.0, 2.5), (2.5, 6.5), (6.5, 8.0)]);
+    assert!(matches!(&film.shots()[1].media, ShotMedia::Still(path) if path == &PathBuf::from("b.png")));
+    assert_eq!(film.seconds(), 8.0);
+    film.scenes.swap(0, 2);
+    assert_eq!(spans(&film), [(0.0, 1.5), (1.5, 5.5), (5.5, 8.0)]);
+    film.scenes.remove(1);
+    assert_eq!(spans(&film), [(0.0, 1.5), (1.5, 4.0)]);
+    assert!(cut_film(&film).unwrap_err().to_string().contains("no soundtrack"));
+    assert_eq!(ToolRequest::CutFilm { film }.estimate(&PriceBook::default()), 0.0);
+  }
+
+  /// A real cut: two scenes over a soundtrack come out as one film of their combined length,
+  /// with sound.
+  #[test]
+  fn a_film_is_cut_from_its_scenes_over_the_soundtrack() {
+    if !video::ffmpeg_available() {
+      return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let make = |args: &[&str], name: &str| -> PathBuf {
+      let path = dir.path().join(name);
+      let done = video::command("ffmpeg").args(["-y", "-v", "error", "-f", "lavfi", "-i"]).args(args).arg(&path).status().unwrap();
+      assert!(done.success(), "couldn't make {name}");
+      path
+    };
+    let clip = make(&["testsrc=size=320x180:rate=24:duration=3", "-pix_fmt", "yuv420p"], "clip.mp4");
+    let still = make(&["color=c=white:size=320x180", "-frames:v", "1"], "still.png");
+    let song = make(&["sine=frequency=440:duration=6"], "song.wav");
+    let scene = |media: &PathBuf, still: bool, seconds: f64| FilmScene { label: "s".into(), media: media.clone(), still, seconds, lyric: String::new() };
+    let film = Film { title: "Adrift".into(), scenes: vec![scene(&clip, false, 2.0), scene(&still, true, 1.5)], audio: Some(song), size: (320, 180), grade: Grade::None, fades: Fades::default() };
+    let cut = cut_film(&film).unwrap();
+    let out = dir.path().join("film.mp4");
+    std::fs::write(&out, &cut.bytes).unwrap();
+    let (w, h, _, seconds) = video::probe_file(&out).unwrap();
+    assert_eq!((w, h), (320, 180));
+    assert!((seconds - 3.5).abs() < 0.1, "the film runs {seconds:.2}s");
+    assert!(has_audio(&out), "the soundtrack is under it");
+  }
 
   #[test]
   fn tools_are_priced_by_where_they_run() {

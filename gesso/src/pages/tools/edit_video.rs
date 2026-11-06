@@ -1,13 +1,17 @@
 //! Edit Video: trim a clip and join clips on the user's Mac (FFmpeg, free), extend a clip by
 //! about 7 seconds with Veo, or describe a change ("remove the dog's tail") for Gemini Omni Flash
 //! to make, both on Vertex.
+//!
+//! A film sent over from the Music Video page opens as its parts: the scenes in order, each with
+//! its length, over the soundtrack. Scenes can be reordered, removed or given another clip
+//! (one made here with the other tabs included), and the film cut again on the user's Mac.
 
 use std::path::PathBuf;
 
 use egui::{Rect, Ui};
 
 use super::{Source, ToolSession};
-use crate::backend::local::tools::{OMNI_LONGEST_CLIP, OMNI_MAX_SECONDS, OMNI_RESOLUTIONS, ToolRequest, VeoTier, omni_parts};
+use crate::backend::local::tools::{Film, OMNI_LONGEST_CLIP, OMNI_MAX_SECONDS, OMNI_RESOLUTIONS, ToolRequest, VeoTier, omni_parts};
 use crate::backend::video::{self, VideoPlayer};
 use crate::pages::common::{Env, pick_files};
 use crate::prompt_box::refs::RefKind;
@@ -16,15 +20,31 @@ use crate::ui::icons::Icon;
 use crate::ui::widgets;
 
 const ACCEPTS: [RefKind; 1] = [RefKind::Video];
+/// What a scene of a film can be replaced with, and a film's soundtrack.
+const SCENE_ACCEPTS: [RefKind; 2] = [RefKind::Video, RefKind::Image];
+const SOUND_ACCEPTS: [RefKind; 1] = [RefKind::Audio];
+/// The height of the scene list before it scrolls.
+const SCENE_LIST_HEIGHT: f32 = 168.0;
 const TIERS: [VeoTier; 3] = [VeoTier::Fast, VeoTier::Standard, VeoTier::Lite];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Mode {
+  /// A film as its scenes and soundtrack (offered only when one is open).
+  Film,
   #[default]
   Trim,
   Join,
   Extend,
   Describe,
+}
+
+/// What a click in the film's scene list asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SceneAction {
+  Pick,
+  Remove,
+  Earlier,
+  Later,
 }
 
 #[derive(Default)]
@@ -42,6 +62,9 @@ pub struct EditVideoPage {
   change: String,
   resolution: usize,
   replace_sound: bool,
+  /// The film being edited as its parts, and the scene picked in its list.
+  film: Option<Film>,
+  scene: usize,
 }
 
 impl EditVideoPage {
@@ -51,6 +74,33 @@ impl EditVideoPage {
       self.clips.push(source.clone());
     }
     self.session.source = Some(source);
+    self.player = None;
+    self.start = None;
+    self.end = None;
+    self.session.error = None;
+  }
+
+  /// Opens a film as its scenes and soundtrack, on the Film tab, with its first scene on screen.
+  pub fn open_film(&mut self, film: Film) {
+    self.mode = Mode::Film;
+    self.scene = 0;
+    self.film = Some(film);
+    self.show_scene();
+  }
+
+  /// Puts the picked scene's clip on screen (a held still has nothing to play).
+  fn show_scene(&mut self) {
+    let Some(scene) = self.film.as_ref().and_then(|film| film.scenes.get(self.scene)) else {
+      return;
+    };
+    if !scene.still {
+      self.show(scene.media.clone());
+    }
+  }
+
+  /// Puts a clip on screen without adding it to the Join list.
+  fn show(&mut self, path: PathBuf) {
+    self.session.source = Some(Source::from_path(path));
     self.player = None;
     self.start = None;
     self.end = None;
@@ -91,6 +141,108 @@ impl EditVideoPage {
     }
   }
 
+  /// The Film tab: the soundtrack, the scenes in order, what can be done to the picked scene, and
+  /// the cut. Returns the cut to run when its button is pressed.
+  fn film_tab(&mut self, ui: &mut Ui) -> Option<ToolRequest> {
+    let on_screen = self.session.source.as_ref().map(|source| source.path.clone());
+    let film = self.film.as_mut()?;
+    let mut show = false;
+    ui.label(egui::RichText::new(&film.title).size(14.0).family(theme::semibold()));
+    ui.label(egui::RichText::new(format!("{} scenes \u{b7} {:.1} s \u{b7} {}\u{d7}{}", film.scenes.len(), film.seconds(), film.size.0, film.size.1)).size(12.0).family(theme::mono()).color(theme::MUTED));
+
+    super::field(ui, "Soundtrack");
+    ui.horizontal(|ui| {
+      let name = film.audio.as_ref().and_then(|path| path.file_name()).map_or_else(|| "None".to_owned(), |name| name.to_string_lossy().into_owned());
+      ui.label(egui::RichText::new(name).size(12.5));
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if widgets::ghost(ui, Icon::Upload, None, "Use another soundtrack. It runs under every scene from the start, so it stays in place when scenes change", false).clicked() {
+          if let Some(path) = pick_files(&SOUND_ACCEPTS, false).into_iter().next() {
+            film.audio = Some(path);
+          }
+        }
+      });
+    });
+
+    super::field(ui, "Scenes, in order");
+    let mut action = None;
+    egui::ScrollArea::vertical().id_salt("film-scenes").max_height(SCENE_LIST_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+      let mut at = 0.0;
+      for (i, scene) in film.scenes.iter().enumerate() {
+        let picked = i == self.scene;
+        let start = at;
+        at += scene.seconds;
+        ui.horizontal(|ui| {
+          let text = format!("{} \u{b7} {:.1}s at {:.1}s{}", scene.label, scene.seconds, start, if scene.still { " \u{b7} still" } else { "" });
+          let label = egui::RichText::new(text).size(12.5).color(if picked { theme::INK } else { theme::MUTED });
+          let label = if picked { label.family(theme::semibold()) } else { label };
+          if ui.add(egui::Button::new(label).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if scene.lyric.is_empty() { "Pick this scene".to_owned() } else { format!("Sung: {}", scene.lyric) }).clicked() {
+            action = Some((i, SceneAction::Pick));
+          }
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::ghost(ui, Icon::X, None, "Remove this scene; the ones after it move earlier", false).clicked() {
+              action = Some((i, SceneAction::Remove));
+            }
+            if i + 1 < film.scenes.len() && widgets::ghost(ui, Icon::ChevronDown, None, "Move later", false).clicked() {
+              action = Some((i, SceneAction::Later));
+            }
+            if i > 0 && widgets::ghost(ui, Icon::ChevronUp, None, "Move earlier", false).clicked() {
+              action = Some((i, SceneAction::Earlier));
+            }
+          });
+        });
+      }
+    });
+    match action {
+      Some((i, SceneAction::Pick)) => {
+        self.scene = i;
+        show = true;
+      },
+      Some((i, SceneAction::Remove)) => {
+        film.scenes.remove(i);
+        self.scene = self.scene.min(film.scenes.len().saturating_sub(1));
+        show = true;
+      },
+      Some((i, SceneAction::Earlier)) => {
+        film.scenes.swap(i, i - 1);
+        self.scene = i - 1;
+      },
+      Some((i, SceneAction::Later)) => {
+        film.scenes.swap(i, i + 1);
+        self.scene = i + 1;
+      },
+      None => {},
+    }
+
+    if let Some(scene) = film.scenes.get_mut(self.scene) {
+      super::field(ui, &format!("Scene {}", scene.label));
+      ui.horizontal_wrapped(|ui| {
+        if widgets::button(ui, Some(Icon::Upload), "Replace with a file", widgets::Kind::Secondary, 0.0, 30.0).clicked() {
+          if let Some(path) = pick_files(&SCENE_ACCEPTS, false).into_iter().next() {
+            scene.still = Source::from_path(path.clone()).kind != crate::feed::types::MediaKind::Video;
+            scene.media = path;
+            show = true;
+          }
+        }
+        // A clip made on the other tabs (trimmed, extended, changed) and picked from the strip below.
+        let other = on_screen.as_ref().filter(|path| **path != scene.media);
+        if ui.add_enabled_ui(other.is_some(), |ui| widgets::button(ui, None, "Use the clip on screen", widgets::Kind::Secondary, 0.0, 30.0).on_hover_text("Puts the clip now on screen into this scene: one you made on the Trim, Extend or Describe tab and picked from the strip below")).inner.clicked() {
+          if let Some(path) = other {
+            scene.media.clone_from(path);
+            scene.still = false;
+          }
+        }
+      });
+      ui.label(egui::RichText::new("The scene keeps its length. To change its clip, use Trim, Extend or Describe, pick the result from the strip below, then use it here.").size(12.0).color(theme::FAINT));
+    }
+    ui.add_space(6.0);
+    let ready = film.audio.is_some() && !film.scenes.is_empty();
+    let request = super::run_button(ui, "Cut the film", Some(0.0), ready, &self.session).then(|| ToolRequest::CutFilm { film: film.clone() });
+    if show {
+      self.show_scene();
+    }
+    request
+  }
+
   fn panel(&mut self, ui: &mut Ui, rect: Rect, env: &mut Env<'_>) {
     let position = self.player.as_ref().map_or(0.0, VideoPlayer::position);
     let duration = self.player.as_ref().and_then(VideoPlayer::duration);
@@ -100,11 +252,13 @@ impl EditVideoPage {
     let describe_cost = duration.and_then(|seconds| env.backend.estimate_tool(&ToolRequest::DescribeEdit { video: PathBuf::new(), prompt: String::new(), seconds, resolution: resolution.to_owned(), keep_sound: true }));
     let mut run = None;
     super::panel(ui, rect, "Edit Video", "Trim and join clips on your Mac, have Veo continue a clip, or describe a change.", |ui| {
-      let modes = [Mode::Trim, Mode::Join, Mode::Extend, Mode::Describe];
-      if let Some(i) = super::segmented(ui, &["Trim", "Join", "Extend", "Describe"], modes.iter().position(|m| *m == self.mode).unwrap_or(0)) {
+      // The Film tab is there only while a film is open.
+      let (modes, labels): (Vec<Mode>, Vec<&str>) = if self.film.is_some() { (vec![Mode::Film, Mode::Trim, Mode::Join, Mode::Extend, Mode::Describe], vec!["Film", "Trim", "Join", "Extend", "Describe"]) } else { (vec![Mode::Trim, Mode::Join, Mode::Extend, Mode::Describe], vec!["Trim", "Join", "Extend", "Describe"]) };
+      if let Some(i) = super::segmented(ui, &labels, modes.iter().position(|m| *m == self.mode).unwrap_or(0)) {
         self.mode = modes[i];
       }
       match self.mode {
+        Mode::Film => run = self.film_tab(ui),
         Mode::Trim => {
           super::field(ui, "Keep from \u{2192} to");
           ui.horizontal_wrapped(|ui| {
