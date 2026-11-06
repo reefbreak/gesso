@@ -204,7 +204,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   waits for both and goes out of date when either changes, and the final pass redraws it from
   the draft. Drawing it is on for every scene; "Draw the ending frame and film to it" turns it
   off for one scene, which keeps its description and is filmed from the opening frame alone.
-  An ending frame is a second still per scene, so the stills cost about twice as much.
+  An ending frame is a second still per scene, so the stills cost about twice as much. One run
+  draws both: the openings first, then each ending matched to its new opening. The draw button
+  counts and prices pictures, not scenes, and says how many are openings and how many endings.
 - **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric
   writer is told how many verses and choruses to write for it, and Lyria how long to run. The
   length is asked for, not enforced: Lyria lands near it, and what is written decides most of it.

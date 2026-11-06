@@ -887,8 +887,11 @@ impl SongProject {
         (true, true) => lineage.stills_stale += 1,
         _ => {},
       }
-      // An ending frame is a still too, with its own place in the count.
-      if shot.end_due(quality) {
+      // An ending frame is a still too, with its own place in the count. One whose opening
+      // still isn't drawn yet is waiting just the same: the two are drawn in one run.
+      if take.still.is_none() && drawable && shot.wants_ending() && (quality == Quality::Draft || shot.draft.end_still.is_some()) {
+        lineage.stills_missing += 1;
+      } else if shot.end_due(quality) {
         if take.end_still.is_some() {
           lineage.stills_stale += 1;
         } else {

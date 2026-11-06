@@ -139,6 +139,7 @@ pub struct StillJob {
   /// This is the scene's ending frame, not its opening one (`image` is then its description).
   pub ending: bool,
   /// For an ending frame: the scene's opening still, so the two are one place, light and outfit.
+  /// `None` when the same run draws that opening first; the run then fills it in.
   pub opening: Option<PathBuf>,
 }
 
@@ -551,17 +552,33 @@ impl SongRun<'_> {
       SongRequest::Stills { dir, design, references, aspect, quality, better, shots } => {
         let references: Vec<(ReferenceKind, RefImage)> = references.iter().take(REFERENCES_PER_STILL).map(|(kind, path)| Ok((*kind, self.engine.load_path(path)?))).collect::<anyhow::Result<_>>()?;
         let (dir, design, references) = (&dir.join("shots"), &design, &references);
-        let jobs = shots.into_iter().map(|job| async move {
+        // Opening frames first: an ending frame is drawn to match its scene's opening still, and
+        // one without an opening named waits for the one this run draws.
+        let (endings, openings): (Vec<StillJob>, Vec<StillJob>) = shots.into_iter().partition(|job| job.ending);
+        let draw = |job: StillJob| async move {
           if self.stopped() {
-            return;
+            return None;
           }
           let (index, ending) = (job.index, job.ending);
           match self.still(dir, design, references, aspect, quality, better, job).await {
-            Ok(path) => self.send(SongUpdate::Still { index, path, ending }),
-            Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
+            Ok(path) => {
+              self.send(SongUpdate::Still { index, path: path.clone(), ending });
+              Some((index, path))
+            },
+            Err(err) => {
+              self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") });
+              None
+            },
           }
+        };
+        let drawn: Vec<(usize, PathBuf)> = stream::iter(openings.into_iter().map(draw)).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<_>>().await.into_iter().flatten().collect();
+        let endings = endings.into_iter().filter_map(|job| match (&job.opening, drawn.iter().find(|(index, _)| *index == job.index)) {
+          (Some(_), _) => Some(job),
+          (None, Some((_, opening))) => Some(StillJob { opening: Some(opening.clone()), ..job }),
+          // Its opening frame failed or the run was stopped: there is nothing to match it to.
+          (None, None) => None,
         });
-        stream::iter(jobs).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<()>>().await;
+        stream::iter(endings.map(draw)).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<_>>().await;
       },
       SongRequest::Clips { dir, look, aspect, tier, resolution, quality, shots } => {
         let (dir, look, resolution) = (&dir.join("clips"), look.as_str(), resolution.as_str());
@@ -1452,6 +1469,26 @@ mod tests {
       let prompt = parts[2]["text"].as_str().unwrap();
       assert!(prompt.contains("in order: 1, the frame this same shot opens on; 2, the performer's reference sheet."), "{prompt}");
       assert!(prompt.contains("This is the frame the shot ends on") && prompt.contains("The performer's face fills the frame."));
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run that draws a scene's opening and ending draws the opening first and matches the
+    /// ending to it; an ending whose opening failed isn't drawn at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ending_waits_for_the_opening_drawn_in_the_same_run() {
+      let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let (tx, rx) = std::sync::mpsc::channel();
+      let ending = StillJob { index: 0, version: 2, image: "A face fills the frame".into(), guide: None, ending: true, opening: None };
+      let shots = vec![ending.clone(), StillJob { index: 0, version: 1, image: "A dock, far off".into(), guide: None, ending: false, opening: None }, StillJob { index: 5, ..ending }];
+      engine.start_song(21, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
+      let updates = finished(&rx, 21).await;
+      let stills: Vec<(usize, bool)> = updates.iter().filter_map(|u| if let SongUpdate::Still { index, ending, .. } = u { Some((*index, *ending)) } else { None }).collect();
+      assert_eq!(stills, [(0, false), (0, true)], "{updates:?}");
+      let requests = requests.lock().unwrap();
+      assert_eq!(requests.len(), 2, "scene 6's ending has no opening to match, so it isn't drawn");
+      let parts = serde_json::from_str::<Value>(&requests[1].1).unwrap()["contents"][0]["parts"].clone();
+      assert!(parts[0]["inlineData"]["data"].is_string() && parts[1]["text"].as_str().unwrap().contains("This is the frame the shot ends on"), "the ending is drawn with the new opening beside it");
       let _ = std::fs::remove_dir_all(dir);
     }
 

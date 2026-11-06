@@ -634,14 +634,19 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
   let (pro, large) = (page.pro(), quality == Quality::Final);
-  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro, large });
+  // A scene is up to two pictures: its opening frame, and its ending frame drawn after it.
+  let frames = if only_missing { Frames::Due } else { Frames::Both };
+  let (openings, endings) = super::frame_count(&page.project.shots, &targets, quality, frames);
+  let pictures = openings + endings;
+  let cost = env.backend.estimate_song(&SongEstimate::Stills { count: pictures, pro, large });
   // The scenes picked together in the grid, less any that can't be drawn in this pass.
   page.picked.retain(|i| *i < page.project.shots.len());
   let chosen: Vec<usize> = page.picked.iter().copied().filter(|i| drawable(&&page.project.shots[*i])).collect();
   // In the draft pass, picked stills can be redrawn with the better model the final pass uses.
   let can_better = quality == Quality::Draft;
   let better = can_better && page.better_redraw;
-  let chosen_cost = env.backend.estimate_song(&SongEstimate::Stills { count: chosen.len(), pro: pro || better, large });
+  let chosen_frames = super::frame_count(&page.project.shots, &chosen, quality, Frames::Both);
+  let chosen_cost = env.backend.estimate_song(&SongEstimate::Stills { count: chosen_frames.0 + chosen_frames.1, pro: pro || better, large });
   let one = env.backend.estimate_song(&SongEstimate::Stills { count: 1, pro: pro || better, large });
   let mut clear_picked = false;
   let line = page.progress_line().filter(|_| page.running_here());
@@ -677,13 +682,16 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       field(ui, &format!("Stills \u{b7} {} pass", quality.label().to_lowercase()));
       picture_model(ui, pro);
       let label = match (quality, only_missing) {
-        (Quality::Draft, true) => format!("Draw {} still{}", targets.len(), plural(targets.len())),
-        (Quality::Draft, false) => format!("Draw all {} again", targets.len()),
-        (Quality::Final, true) => format!("Redraw {} still{}", targets.len(), plural(targets.len())),
-        (Quality::Final, false) => format!("Redraw all {} again", targets.len()),
+        (Quality::Draft, true) => format!("Draw {pictures} still{}", plural(pictures)),
+        (Quality::Draft, false) => format!("Draw all {pictures} again"),
+        (Quality::Final, true) => format!("Redraw {pictures} still{}", plural(pictures)),
+        (Quality::Final, false) => format!("Redraw all {pictures} again"),
       };
-      if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
-        actions.push(Action::Stills(targets.clone(), false, if only_missing { Frames::Due } else { Frames::Both }));
+      if run_button(ui, Icon::Image, &label, cost.map(estimate), pictures > 0 && !busy, line.as_deref()) {
+        actions.push(Action::Stills(targets.clone(), false, frames));
+      }
+      if endings > 0 {
+        ui.label(small(&format!("{openings} opening frame{} and {endings} ending frame{}, across {} scene{}. Each ending is drawn after its opening, to match it.", plural(openings), plural(endings), targets.len(), plural(targets.len()))));
       }
       if only_missing && stale_stills > 0 {
         ui.label(small(&format!("{stale_stills} of these {} out of date: the draft still {} redrawn after the final one was made.", if stale_stills == 1 { "is" } else { "are" }, if stale_stills == 1 { "was" } else { "were" })));
@@ -699,7 +707,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     }
     if !page.picked.is_empty() {
       field(ui, &format!("{} scene{} selected", page.picked.len(), plural(page.picked.len())));
-      if run_button(ui, Icon::RotateCw, &format!("Redraw {} selected", chosen.len()), chosen_cost.map(estimate), !busy && !chosen.is_empty(), None) {
+      if run_button(ui, Icon::RotateCw, &format!("Redraw {} selected ({} still{})", chosen.len(), chosen_frames.0 + chosen_frames.1, plural(chosen_frames.0 + chosen_frames.1)), chosen_cost.map(estimate), !busy && !chosen.is_empty(), None) {
         actions.push(Action::Stills(chosen.clone(), better, Frames::Both));
       }
       if chosen.len() < page.picked.len() {
