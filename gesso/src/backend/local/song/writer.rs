@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::plan::{Energy, Section, Slot};
+use super::plan::{Energy, Section, Slot, SongLength};
 
 /// A song on paper: what the music model is given.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -174,7 +174,7 @@ pub fn workshop_prompt(context: &str, section: &str, fields: &[(String, String)]
 }
 
 /// Asks for a song from an idea, or a rewrite of `current` following `notes`.
-pub fn song_prompt(idea: &str, notes: &str, current: Option<&Draft>) -> String {
+pub fn song_prompt(idea: &str, notes: &str, current: Option<&Draft>, length: SongLength) -> String {
   let mut prompt = format!("The idea for the song:\n{}\n\n", idea.trim());
   if let Some(draft) = current {
     prompt.push_str(&format!("The current draft, titled \"{}\".\nMusic direction: {}\nLyrics:\n{}\n\n", draft.title.trim(), draft.style.trim(), draft.lyrics.trim()));
@@ -188,8 +188,9 @@ pub fn song_prompt(idea: &str, notes: &str, current: Option<&Draft>) -> String {
      - \"title\": a short title.\n\
      - \"style\": the music direction in two or three sentences: genre and era, tempo in BPM, instruments and production, and how the vocal is delivered. No artist, band or song names.\n\
      - \"lyrics\": the full lyrics, each section headed by a tag on its own line such as [Intro], [Verse 1], [Chorus], [Bridge], [Break] or [Outro]. \
-     Instrumental sections are a tag with no lines under it. Aim for a song of two to three minutes.",
+     Instrumental sections are a tag with no lines under it. ",
   );
+  prompt.push_str(length.writing_line());
   prompt
 }
 
@@ -548,9 +549,12 @@ mod tests {
     #[test]
     fn a_rewrite_carries_the_draft_and_the_notes() {
       let draft = Draft { title: "T".into(), style: "fast".into(), lyrics: "[Verse]\nold line".into() };
-      let prompt = song_prompt("an idea", "make the chorus shorter", Some(&draft));
+      let prompt = song_prompt("an idea", "make the chorus shorter", Some(&draft), SongLength::TwoMinutes);
       assert!(prompt.contains("old line") && prompt.contains("make the chorus shorter") && prompt.contains("Rewrite the song"));
-      assert!(song_prompt("an idea", "", None).contains("Write the song."));
+      assert!(song_prompt("an idea", "", None, SongLength::TwoMinutes).contains("Write the song."));
+      // The length asked for reaches the writer, who sets it by how much there is to sing.
+      assert!(song_prompt("an idea", "", None, SongLength::Minute).ends_with("Aim for a song of about one minute: a short intro, one verse and one chorus."));
+      assert!(song_prompt("an idea", "", None, SongLength::Clip).contains("four lines at most"));
     }
 
     #[test]

@@ -8,8 +8,8 @@ use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 use super::workshop::Target;
 use super::{Action, Frames, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
-use crate::backend::local::song::cut::{Aspect, Grade};
-use crate::backend::local::song::plan::{self, Energy, Pace};
+use crate::backend::local::song::cut::{Aspect, Format, Grade};
+use crate::backend::local::song::plan::{self, Energy, Pace, SongLength};
 use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
 use crate::backend::local::song::writer::{Subject, Swatch};
 use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
@@ -87,13 +87,12 @@ fn idea(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, a
       ui.add_space(6.0);
     }
   });
-  if changed {
-    page.touch(ui);
-  }
   let has_idea = !page.project.idea.trim().is_empty();
   let has_lyrics = !page.project.lyrics.trim().is_empty();
   let line = page.progress_line().filter(|_| page.running_here());
   panel(ui, panel_rect, "Idea", "Start from an idea, or bring your own lyrics.", |ui| {
+    changed |= length_choice(ui, &mut page.project.song_length);
+    ui.label(small("How long a song to write for. The writer fits the number of verses and choruses to it."));
     writer_choice(ui, &mut page.writer);
     error_line(ui, page.error.as_deref());
     if run_button(ui, Icon::Sparkles, if has_lyrics { "Write it again" } else { "Write the song" }, Some(CENTS.to_owned()), has_idea && !busy, line.as_deref()) {
@@ -104,6 +103,9 @@ fn idea(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect, a
       actions.push(Action::OwnLyrics);
     }
   });
+  if changed {
+    page.touch(ui);
+  }
 }
 
 // --- Lyrics ----------------------------------------------------------------------------------
@@ -145,6 +147,7 @@ fn lyrics(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect,
 
 fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   let busy = page.busy();
+  let mut changed = false;
   column(ui, stage, "song", |ui| {
     heading(ui, Stage::Song, "Song", "Lyria sings the lyrics to your music direction. Or bring a track you made elsewhere: the video stages work the same either way.");
     match &page.project.track {
@@ -161,14 +164,12 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
       None => empty(ui, Icon::Music, "No song yet", "Generate one, or import a track."),
     }
   });
-  let cost = env.backend.estimate_song(&SongEstimate::Song { clip: page.short_song });
+  let cost = env.backend.estimate_song(&SongEstimate::Song { clip: page.project.song_length.is_clip() });
   let line = page.progress_line().filter(|_| page.running_here());
   let has_track = page.project.track.is_some();
   panel(ui, panel_rect, "Song", "Each generation is a new take; the latest one is kept.", |ui| {
-    field(ui, "Length");
-    if let Some(i) = segmented(ui, &["Full song", "30 s clip"], usize::from(page.short_song)) {
-      page.short_song = i == 1;
-    }
+    changed |= length_choice(ui, &mut page.project.song_length);
+    ui.label(small("Lyria is asked for this length and lands near it, not on it. What decides a song's length most is how much there is to sing: after a big change, write the lyrics again on the Idea stage, where the same setting tells the writer how much to write."));
     ui.add_space(6.0);
     ui.checkbox(&mut page.instrumental, "Instrumental (no vocals)");
     ui.label(small("Lyria 3 on your Vertex AI account. A new song clears the scenes, which are timed to the old one."));
@@ -194,6 +195,9 @@ fn song(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
     }
     next_button(ui, Stage::Analysis, has_track, actions);
   });
+  if changed {
+    page.touch(ui);
+  }
 }
 
 // --- Music Analysis --------------------------------------------------------------------------
@@ -958,9 +962,35 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
     if page.project.fades.fade_in > 0.0 || page.project.fades.fade_out > 0.0 {
       changed |= ui.checkbox(&mut page.project.fades.audio, "Fade the sound with the picture").on_hover_text("Off leaves the song exactly as it is, which suits a track with its own intro and ending").changed();
     }
+    field(ui, "Format");
+    if let Some(i) = segmented(ui, &Format::ALL.map(Format::label), Format::ALL.iter().position(|f| *f == page.project.format).unwrap_or(0)) {
+      page.project.format = Format::ALL[i];
+      changed = true;
+    }
+    // Veo films wide or tall only, so the other shapes are the middle of what was filmed.
+    let (format, aspect) = (page.project.format, page.project.aspect);
+    let kept = format.kept(aspect);
+    let (width, height) = format.size(aspect, page.resolution());
+    match format {
+      Format::AsFilmed => {
+        ui.label(small(&format!("{width}\u{d7}{height}, the shape the scenes were filmed in. The Instagram shapes are cut from the middle of it.")));
+      },
+      _ if kept > 0.999 => {
+        ui.label(small(&format!("{width}\u{d7}{height}. Nothing is cropped: the scenes were filmed in this shape.")));
+      },
+      _ if kept < 0.6 => {
+        ui.label(egui::RichText::new(format!("{width}\u{d7}{height}, keeping only the middle {:.0}% of each scene, because this video was filmed {}. For Instagram, set the frame to 9:16 tall on the Visual Style stage before drawing the stills.", kept * 100.0, if aspect == Aspect::Wide { "wide" } else { "tall" })).size(12.0).color(theme::BADGE_BETA));
+      },
+      _ => {
+        ui.label(small(&format!("{width}\u{d7}{height}, keeping the middle {:.0}% of each scene: the {} are cropped, so keep faces away from the edges.", kept * 100.0, if aspect == Aspect::Tall { "top and bottom" } else { "sides" })));
+      },
+    }
     field(ui, "Resolution");
     if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution[pass]) {
       page.resolution[pass] = i;
+    }
+    if format != Format::AsFilmed && page.resolution() != "1080p" {
+      ui.label(small("Instagram shows posts 1080 wide. 1080p here gives the sharpest upload; clips filmed at 720p are enlarged to fit."));
     }
     if blank > 0 {
       ui.add_space(6.0);
@@ -1273,6 +1303,18 @@ fn text_box(ui: &mut Ui, id: &str, text: &mut String, hint: &str, rows: usize) -
     changed = ui.add(egui::TextEdit::multiline(text).id_salt(id).frame(egui::Frame::NONE).desired_rows(rows).desired_width(f32::INFINITY).font(FontId::new(14.5, egui::FontFamily::Proportional)).hint_text(egui::RichText::new(hint).color(theme::FAINT))).changed();
   });
   changed
+}
+
+/// The song's length; returns whether it was changed.
+fn length_choice(ui: &mut Ui, length: &mut SongLength) -> bool {
+  field(ui, "Song length");
+  match segmented(ui, &SongLength::ALL.map(SongLength::label), SongLength::ALL.iter().position(|l| l == length).unwrap_or(3)) {
+    Some(i) => {
+      *length = SongLength::ALL[i];
+      true
+    },
+    None => false,
+  }
 }
 
 fn writer_choice(ui: &mut Ui, writer: &mut Writer) {

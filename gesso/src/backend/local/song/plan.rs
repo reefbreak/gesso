@@ -116,6 +116,61 @@ impl Slot {
   }
 }
 
+/// How long a song to make. The length is asked for, not set: the lyric writer is told how much
+/// to write and Lyria how long to run, and Lyria lands near it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SongLength {
+  /// A 30-second piece, from Lyria's clip model.
+  Clip,
+  Minute,
+  NinetySeconds,
+  #[default]
+  TwoMinutes,
+  ThreeMinutes,
+}
+
+impl SongLength {
+  pub const ALL: [SongLength; 5] = [SongLength::Clip, SongLength::Minute, SongLength::NinetySeconds, SongLength::TwoMinutes, SongLength::ThreeMinutes];
+
+  pub fn label(self) -> &'static str {
+    match self {
+      SongLength::Clip => "30 s",
+      SongLength::Minute => "1 min",
+      SongLength::NinetySeconds => "1\u{bd} min",
+      SongLength::TwoMinutes => "2 min",
+      SongLength::ThreeMinutes => "3 min",
+    }
+  }
+
+  /// Whether this is the 30-second piece, which its own model makes.
+  pub fn is_clip(self) -> bool {
+    self == SongLength::Clip
+  }
+
+  /// What Lyria is told about the length.
+  pub fn music_line(self) -> &'static str {
+    match self {
+      SongLength::Clip => "A 30-second piece.",
+      SongLength::Minute => "A complete song about one minute long, with a short intro and a clear ending.",
+      SongLength::NinetySeconds => "A complete song about a minute and a half long, with an intro and a clear ending.",
+      SongLength::TwoMinutes => "A complete song about two minutes long, with an intro and an ending.",
+      SongLength::ThreeMinutes => "A complete song about three minutes long, with an intro and an ending.",
+    }
+  }
+
+  /// What the lyric writer is told to aim for: the words set a song's length more than anything.
+  pub fn writing_line(self) -> &'static str {
+    match self {
+      SongLength::Clip => "Aim for a 30-second piece: a single hook or one short section, four lines at most.",
+      SongLength::Minute => "Aim for a song of about one minute: a short intro, one verse and one chorus.",
+      SongLength::NinetySeconds => "Aim for a song of about a minute and a half: a verse, a chorus, a second verse or a break, and the chorus again.",
+      SongLength::TwoMinutes => "Aim for a song of about two minutes: two verses, a chorus sung twice, and a break or a bridge.",
+      SongLength::ThreeMinutes => "Aim for a song of about three minutes: two or three verses, a chorus sung three times, a bridge and an outro.",
+    }
+  }
+}
+
 /// How close to a cut a line can start and still count as sung over the next shot.
 const LINE_LEAD: f64 = 0.3;
 

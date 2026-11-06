@@ -42,6 +42,54 @@ impl Aspect {
   }
 }
 
+/// The shape the film is cut to. Veo films in 16:9 or 9:16 only, so the other shapes are cropped
+/// from the middle of what was filmed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+  /// The shape the scenes were filmed in.
+  #[default]
+  AsFilmed,
+  /// Instagram Reels and Stories: 9:16.
+  Reel,
+  /// Instagram's feed portrait: 4:5.
+  Feed,
+  /// 1:1.
+  Square,
+}
+
+impl Format {
+  pub const ALL: [Format; 4] = [Format::AsFilmed, Format::Reel, Format::Feed, Format::Square];
+
+  pub fn label(self) -> &'static str {
+    match self {
+      Format::AsFilmed => "As filmed",
+      Format::Reel => "Reel 9:16",
+      Format::Feed => "Feed 4:5",
+      Format::Square => "Square 1:1",
+    }
+  }
+
+  /// The frame size at `resolution` (`720p` or `1080p`, which for the Instagram shapes is the
+  /// width: Instagram shows posts 1080 wide).
+  pub fn size(self, aspect: Aspect, resolution: &str) -> (u32, u32) {
+    let width = if resolution == "1080p" { 1080 } else { 720 };
+    match self {
+      Format::AsFilmed => aspect.size(resolution),
+      Format::Reel => (width, width * 16 / 9),
+      Format::Feed => (width, width * 5 / 4),
+      Format::Square => (width, width),
+    }
+  }
+
+  /// How much of the filmed picture this shape keeps, from 0 to 1 (1 when nothing is cropped).
+  pub fn kept(self, aspect: Aspect) -> f64 {
+    let ratio = |(w, h): (u32, u32)| f64::from(w) / f64::from(h);
+    let (filmed, cut) = (ratio(aspect.size("1080p")), ratio(self.size(aspect, "1080p")));
+    (filmed / cut).min(cut / filmed)
+  }
+}
+
 /// A finish applied to every shot, so clips from different generations sit together.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -318,6 +366,26 @@ mod tests {
     assert!(last < middle / 4, "and ends on black ({last} against {middle})");
     let (_, _, _, faded_seconds) = video::probe_file(&faded).unwrap();
     assert!((faded_seconds - 4.0).abs() < 0.1, "fading doesn't change the length ({faded_seconds:.2}s)");
+
+    // An Instagram feed post cut from a wide film: 4:5, the same length, the middle of the frame.
+    let feed = dir.path().join("feed.mp4");
+    assemble(&shots, &song, Format::Feed.size(Aspect::Wide, "720p"), Grade::None, Fades::default(), &feed).unwrap();
+    let (w, h, _, feed_seconds) = video::probe_file(&feed).unwrap();
+    assert_eq!((w, h), (720, 900));
+    assert!((feed_seconds - 5.5).abs() < 0.1, "the shape doesn't change the length ({feed_seconds:.2}s)");
+  }
+
+  #[test]
+  fn instagram_shapes_have_their_sizes_and_say_what_they_crop() {
+    assert_eq!(Format::AsFilmed.size(Aspect::Wide, "1080p"), (1920, 1080));
+    assert_eq!(Format::AsFilmed.size(Aspect::Tall, "720p"), (720, 1280));
+    assert_eq!((Format::Reel.size(Aspect::Tall, "1080p"), Format::Feed.size(Aspect::Tall, "1080p"), Format::Square.size(Aspect::Wide, "1080p")), ((1080, 1920), (1080, 1350), (1080, 1080)));
+    assert_eq!((Format::Reel.size(Aspect::Wide, "720p"), Format::Feed.size(Aspect::Wide, "720p")), ((720, 1280), (720, 900)));
+    // A reel cut from a tall film keeps everything; a feed post keeps most; from a wide film, little.
+    assert!((Format::Reel.kept(Aspect::Tall) - 1.0).abs() < 1e-9 && (Format::AsFilmed.kept(Aspect::Wide) - 1.0).abs() < 1e-9);
+    assert!((Format::Feed.kept(Aspect::Tall) - 0.703).abs() < 0.001, "{}", Format::Feed.kept(Aspect::Tall));
+    assert!((Format::Reel.kept(Aspect::Wide) - 0.316).abs() < 0.001, "{}", Format::Reel.kept(Aspect::Wide));
+    assert!((Format::Square.kept(Aspect::Wide) - 0.5625).abs() < 0.001);
   }
 
   #[test]

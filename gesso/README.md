@@ -202,6 +202,14 @@ runs, and leaves everything it made editable before the next stage uses it.
   redrawn opening puts it out of date, the clip waits for both and goes out of date when either
   changes, and the final pass redraws it from the draft. Leave the description empty and the
   scene works as before.
+- **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric
+  writer is told how many verses and choruses to write for it, and Lyria how long to run. The
+  length is asked for, not enforced: Lyria lands near it, and what is written decides most of it.
+  Thirty seconds uses Lyria's clip model.
+- **Instagram shapes.** The film can be cut as a Reel (9:16), a feed post (4:5) or a square (1:1)
+  as well as the shape it was filmed in. Veo films 16:9 or 9:16 only, so the other shapes are the
+  middle of each scene; the Final Video stage says how much of the picture is kept. For Instagram,
+  film tall (Visual Style, Frame, 9:16) and cut at 1080p.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

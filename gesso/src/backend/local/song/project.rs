@@ -10,8 +10,8 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 
 use super::beats::BeatGrid;
-use super::cut::{Aspect, CutShot, Fades, Grade, ShotMedia};
-use super::plan::{self, Pace, Section, Slot};
+use super::cut::{Aspect, CutShot, Fades, Format, Grade, ShotMedia};
+use super::plan::{self, Pace, Section, Slot, SongLength};
 use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 
 /// Under the local library's folder.
@@ -394,6 +394,12 @@ pub struct SongProject {
   /// The film's fades from and to black.
   #[serde(default)]
   pub fades: Fades,
+  /// How long a song to write for and ask Lyria for.
+  #[serde(default)]
+  pub song_length: SongLength,
+  /// The shape the film is cut to (Instagram's, or as filmed).
+  #[serde(default)]
+  pub format: Format,
   pub pace: Pace,
   pub shots: Vec<Shot>,
   pub cut: Option<PathBuf>,
@@ -420,6 +426,8 @@ pub struct CutOf {
   /// The finish and fades it was cut with (`None` for a film cut before they were recorded,
   /// which isn't held against it).
   pub finish: Option<(Grade, Fades)>,
+  /// The shape it was cut to (`None` for a film cut before that was recorded).
+  pub format: Option<Format>,
 }
 
 /// What in a pass is waiting to be made or has been overtaken by a change upstream of it: the
@@ -789,7 +797,7 @@ impl SongProject {
   /// film, or it was cut before its sources were recorded.
   pub fn cut_is_current(&self, quality: Quality) -> Option<bool> {
     let made = self.cut.as_ref().and(self.cut_of.as_ref())?;
-    let same_finish = made.finish.is_none_or(|finish| finish == (self.grade, self.fades));
+    let same_finish = made.finish.is_none_or(|finish| finish == (self.grade, self.fades)) && made.format.is_none_or(|format| format == self.format);
     Some(made.quality == quality && same_finish && Some(&made.media) == self.cut_media(quality).as_ref())
   }
 
@@ -1011,8 +1019,11 @@ mod tests {
     assert_eq!(project.cut_is_current(Quality::Draft), None, "nothing cut yet");
     project.cut = Some(PathBuf::from("cut_v1.mp4"));
     assert_eq!(project.cut_is_current(Quality::Draft), None, "a film from before its sources were recorded");
-    project.cut_of = Some(CutOf { quality: Quality::Draft, media: project.cut_media(Quality::Draft).unwrap(), finish: Some((project.grade, project.fades)) });
+    project.cut_of = Some(CutOf { quality: Quality::Draft, media: project.cut_media(Quality::Draft).unwrap(), finish: Some((project.grade, project.fades)), format: Some(project.format) });
     assert_eq!(project.cut_is_current(Quality::Draft), Some(true));
+    project.format = Format::Feed;
+    assert_eq!(project.cut_is_current(Quality::Draft), Some(false), "the shape was changed since");
+    project.format = Format::AsFilmed;
     project.fades.fade_out = 2.0;
     assert_eq!(project.cut_is_current(Quality::Draft), Some(false), "the fades were changed since");
     project.fades = Fades::default();

@@ -156,8 +156,6 @@ pub struct MusicVideoPage {
   writer: Writer,
   /// What to change in a rewrite.
   notes: String,
-  /// A 30-second clip instead of a full song.
-  short_song: bool,
   instrumental: bool,
   /// The Veo tier and resolution picked for each pass (draft, then final), as indices into
   /// [`TIERS`] and [`RESOLUTIONS`].
@@ -186,7 +184,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), short_song: false, instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None }
   }
 }
 
@@ -463,7 +461,7 @@ impl MusicVideoPage {
         FilmScene { label: format!("{} \u{b7} {}", i + 1, shot.slot.section), media, still, seconds: cut.end - cut.start, lyric: shot.slot.lyric.clone() }
       })
       .collect();
-    Some(Film { title: self.project.display_title(), scenes, audio: Some(self.project.track.as_ref()?.path.clone()), size: self.project.aspect.size(self.resolution()), grade: self.project.grade, fades: self.project.fades })
+    Some(Film { title: self.project.display_title(), scenes, audio: Some(self.project.track.as_ref()?.path.clone()), size: self.project.format.size(self.project.aspect, self.resolution()), grade: self.project.grade, fades: self.project.fades })
   }
 
   /// What this pass still has to make or make again, in the order it is made: stills, clips,
@@ -613,7 +611,7 @@ impl MusicVideoPage {
       Action::Write { rewrite } => {
         let current = rewrite.then(|| self.project.draft());
         let note = if rewrite { "Rewriting the song\u{2026}" } else { "Writing the song\u{2026}" };
-        self.start(backend, 0, note, SongRequest::Write { idea: self.project.idea.clone(), notes: self.notes.clone(), current, writer: self.writer });
+        self.start(backend, 0, note, SongRequest::Write { idea: self.project.idea.clone(), notes: self.notes.clone(), current, length: self.project.song_length, writer: self.writer });
       },
       Action::OwnLyrics => {
         if self.project.lyrics.trim().is_empty() {
@@ -623,7 +621,7 @@ impl MusicVideoPage {
       },
       Action::Compose => {
         let version = self.next_version();
-        self.start(backend, 0, "Lyria is making the song (a minute or two)\u{2026}", SongRequest::Compose { dir, draft: self.project.draft(), clip: self.short_song, instrumental: self.instrumental, version });
+        self.start(backend, 0, "Lyria is making the song (a minute or two)\u{2026}", SongRequest::Compose { dir, draft: self.project.draft(), length: self.project.song_length, instrumental: self.instrumental, version });
         self.analyse_after();
       },
       Action::Import(file) => {
@@ -818,8 +816,8 @@ impl MusicVideoPage {
       Action::Cut => {
         if let (Some(track), Some(shots)) = (&self.project.track, self.project.cut_shots(self.quality())) {
           self.project.cut_version += 1;
-          self.pending_cut = self.project.cut_media(self.quality()).map(|media| CutOf { quality: self.quality(), media, finish: Some((self.project.grade, self.project.fades)) });
-          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, fades: self.project.fades, shots, version: self.project.cut_version };
+          self.pending_cut = self.project.cut_media(self.quality()).map(|media| CutOf { quality: self.quality(), media, finish: Some((self.project.grade, self.project.fades)), format: Some(self.project.format) });
+          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, fades: self.project.fades, format: self.project.format, shots, version: self.project.cut_version };
           self.start(backend, 0, "Cutting the film on your Mac\u{2026}", request);
         }
       },

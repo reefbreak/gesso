@@ -48,8 +48,8 @@ use super::vertex::{GeminiImageRequest, SONG_CLIP_MODEL, TEXT_MODELS, TextReques
 use super::{GeneratedFile, LocalEngine, RefImage};
 use crate::backend::Event;
 use beats::BeatGrid;
-use cut::{Aspect, CutShot, Fades, Grade};
-use plan::{Section, Slot};
+use cut::{Aspect, CutShot, Fades, Format, Grade};
+use plan::{Section, Slot, SongLength};
 use project::{Quality, ReferenceKind};
 use writer::{Brief, Design, Draft, PlannedShot, Read, Revision, Style, TimedLine, Turn};
 
@@ -176,13 +176,15 @@ pub enum SongRequest {
     idea: String,
     notes: String,
     current: Option<Draft>,
+    /// How long a song to write for.
+    length: SongLength,
     writer: Writer,
   },
-  /// The song itself, from Lyria. `clip` makes a 30-second clip instead of a full song.
+  /// The song itself, from Lyria, asked for at `length` (30 seconds comes from the clip model).
   Compose {
     dir: PathBuf,
     draft: Draft,
-    clip: bool,
+    length: SongLength,
     instrumental: bool,
     version: u32,
   },
@@ -293,6 +295,7 @@ pub enum SongRequest {
     resolution: String,
     grade: Grade,
     fades: Fades,
+    format: Format,
     shots: Vec<CutShot>,
     version: u32,
   },
@@ -438,11 +441,11 @@ struct SongRun<'a> {
 impl SongRun<'_> {
   async fn stage(&self, request: SongRequest) -> anyhow::Result<()> {
     match request {
-      SongRequest::Write { idea, notes, current, writer } => {
-        let reply = self.write(writer, writer::SONGWRITER, &writer::song_prompt(&idea, &notes, current.as_ref())).await?;
+      SongRequest::Write { idea, notes, current, length, writer } => {
+        let reply = self.write(writer, writer::SONGWRITER, &writer::song_prompt(&idea, &notes, current.as_ref(), length)).await?;
         self.send(SongUpdate::Written(writer::parse_draft(&reply)?));
       },
-      SongRequest::Compose { dir, draft, clip, instrumental, version } => self.compose(&dir, &draft, clip, instrumental, version).await?,
+      SongRequest::Compose { dir, draft, length, instrumental, version } => self.compose(&dir, &draft, length, instrumental, version).await?,
       SongRequest::Import { dir, file } => {
         let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("mp3").to_ascii_lowercase();
         let path = dir.join(format!("song_imported.{extension}"));
@@ -558,11 +561,11 @@ impl SongRun<'_> {
         });
         stream::iter(jobs).buffer_unordered(SYNCS_AT_ONCE).collect::<Vec<()>>().await;
       },
-      SongRequest::Cut { dir, audio, aspect, resolution, grade, fades, shots, version } => {
+      SongRequest::Cut { dir, audio, aspect, resolution, grade, fades, format, shots, version } => {
         std::fs::create_dir_all(&dir)?;
         let out = dir.join(format!("cut_v{version}.mp4"));
         let target = out.clone();
-        tokio::task::spawn_blocking(move || cut::assemble(&shots, &audio, aspect.size(&resolution), grade, fades, &target)).await??;
+        tokio::task::spawn_blocking(move || cut::assemble(&shots, &audio, format.size(aspect, &resolution), grade, fades, &target)).await??;
         let bytes = std::fs::read(&out)?;
         self.add_to_library(&out, &bytes, MediaClass::Video);
         self.send(SongUpdate::Cut(out));
@@ -571,14 +574,15 @@ impl SongRun<'_> {
     Ok(())
   }
 
-  async fn compose(&self, dir: &Path, draft: &Draft, clip: bool, instrumental: bool, version: u32) -> anyhow::Result<()> {
+  async fn compose(&self, dir: &Path, draft: &Draft, length: SongLength, instrumental: bool, version: u32) -> anyhow::Result<()> {
     let configured = self.engine.config.song_music_model.as_deref();
-    let models: Vec<&str> = match (clip, configured) {
+    // The 30-second piece has a model of its own; every other length is asked of the song model.
+    let models: Vec<&str> = match (length.is_clip(), configured) {
       (true, _) => vec![SONG_CLIP_MODEL],
       (false, Some(model)) => vec![model],
       (false, None) => self.engine.vertex.song_models().to_vec(),
     };
-    let song = self.engine.vertex.generate_song(&models, &music_prompt(draft, clip, instrumental)).await?;
+    let song = self.engine.vertex.generate_song(&models, &music_prompt(draft, length, instrumental)).await?;
     info!("Song made by {}", song.model);
     self.charge(Account::Vertex, self.engine.prices.lyria_song(&song.model), &song.model);
     let path = save(dir, &format!("song_v{version}.{}", song.file.extension), &song.file.bytes)?;
@@ -800,9 +804,8 @@ impl SongRun<'_> {
 }
 
 /// What Lyria is given: the direction first, then the lyrics under their own heading.
-fn music_prompt(draft: &Draft, clip: bool, instrumental: bool) -> String {
-  let length = if clip { "A 30-second piece." } else { "A complete song, two to three minutes long, with an intro and an ending." };
-  let mut prompt = format!("{}\n{length}", draft.style.trim());
+fn music_prompt(draft: &Draft, length: SongLength, instrumental: bool) -> String {
+  let mut prompt = format!("{}\n{}", draft.style.trim(), length.music_line());
   if instrumental || draft.lyrics.trim().is_empty() {
     prompt.push_str("\nInstrumental only, no vocals.");
   } else {
@@ -1128,7 +1131,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![text_reply(&draft.to_string(), 1000, 400)]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      engine.start_song(7, SongRequest::Write { idea: "the last bus home".into(), notes: String::new(), current: None, writer: Writer::Gemini }, tx, egui::Context::default());
+      engine.start_song(7, SongRequest::Write { idea: "the last bus home".into(), notes: String::new(), current: None, length: SongLength::TwoMinutes, writer: Writer::Gemini }, tx, egui::Context::default());
 
       let updates = finished(&rx, 7).await;
       assert!(matches!(&updates[0], SongUpdate::Written(d) if d.title == "Night Bus" && d.lyrics.contains("[Chorus]")), "{updates:?}");
@@ -1405,7 +1408,7 @@ mod tests {
       let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
       let (tx, rx) = std::sync::mpsc::channel();
       let draft = Draft { title: "Night Bus".into(), style: "slow, 90 BPM".into(), lyrics: "[Verse]\nline one".into() };
-      engine.start_song(4, SongRequest::Compose { dir: dir.join("p"), draft, clip: false, instrumental: false, version: 1 }, tx, egui::Context::default());
+      engine.start_song(4, SongRequest::Compose { dir: dir.join("p"), draft, length: SongLength::TwoMinutes, instrumental: false, version: 1 }, tx, egui::Context::default());
       let updates = finished(&rx, 4).await;
       assert!(matches!(updates.last(), Some(SongUpdate::Done(Ok(())))), "{updates:?}");
       assert!(updates.iter().any(|u| matches!(u, SongUpdate::Track { model, path, .. } if model == "lyria-3.5" && std::fs::read(path).unwrap() == [1, 2, 3])), "{updates:?}");
@@ -1444,10 +1447,11 @@ mod tests {
     #[test]
     fn the_music_prompt_leads_with_the_direction() {
       let draft = Draft { title: "T".into(), style: "Fast breakbeat, 140 BPM".into(), lyrics: "[Verse]\nla".into() };
-      let full = music_prompt(&draft, false, false);
-      assert!(full.starts_with("Fast breakbeat, 140 BPM\nA complete song"));
+      let full = music_prompt(&draft, SongLength::TwoMinutes, false);
+      assert!(full.starts_with("Fast breakbeat, 140 BPM\nA complete song about two minutes long"));
       assert!(full.ends_with("[Verse]\nla"));
-      let instrumental = music_prompt(&draft, true, true);
+      assert!(music_prompt(&draft, SongLength::Minute, false).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false).contains("about three minutes long"));
+      let instrumental = music_prompt(&draft, SongLength::Clip, true);
       assert!(instrumental.contains("A 30-second piece.") && instrumental.ends_with("Instrumental only, no vocals."));
       assert!(!instrumental.contains("la"));
     }
