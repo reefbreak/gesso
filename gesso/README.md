@@ -211,9 +211,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   counts and prices pictures, not scenes, and says how many are openings and how many endings.
 - **A copy for Instagram.** "Export for Instagram" on the Final Video stage makes a smaller copy
   of the cut film for uploading from a phone, beside it as `cut_vN_instagram.mp4` and in the
-  library: H.264 in two passes at a variable 12 Mbps (peaks to 15), AAC at 256 kbps, at most 1080
+  library: H.264 in two passes at a variable 6 Mbps (peaks to 7.5), AAC at 192 kbps, at most 1080
   pixels on the short side, ready to stream. A film whose own file is already below 12 Mbps is
-  encoded at its own rate, since a higher one adds size and no picture. It keeps the cut's shape,
+  encoded at half its own rate, so the copy is always well under the size of the cut. It keeps the cut's shape,
   so choose Reel, Feed or Square under Format first for a tall or square one. A newer cut marks
   the copy out of date.
 - **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric

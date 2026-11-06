@@ -1105,7 +1105,7 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
           }
         },
         None => {
-          ui.label(small(&format!("A smaller copy of the film for uploading from your phone: H.264 encoded in two passes at a variable {} Mbps (peaks to {}), AAC sound, 1080 pixels across at most. A film already below that rate keeps its own. Encoding takes a few minutes.", cut::SHARE_KBPS / 1000, cut::SHARE_PEAK_KBPS / 1000)));
+          ui.label(small(&format!("A smaller copy of the film for uploading from your phone: H.264 encoded in two passes at a variable {} Mbps (peaks to {:.1}), AAC sound, 1080 pixels across at most. A film already below that rate is brought down to half its own. Encoding takes a few minutes.", cut::SHARE_KBPS / 1000, f64::from(cut::SHARE_PEAK_KBPS) / 1000.0)));
         },
       }
       if format == Format::AsFilmed && page.project.aspect == Aspect::Wide {

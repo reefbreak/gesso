@@ -232,13 +232,13 @@ pub fn assemble(shots: &[CutShot], audio: &Path, size: (u32, u32), grade: Grade,
 
 /// A copy of the film sized for uploading from a phone and sharing: H.264 in two passes at a
 /// variable bitrate, AAC sound, at most 1080 pixels on its short side, ready to stream. Returns
-/// the bitrate aimed for, in kbit/s: [`SHARE_KBPS`], or the film's own when that is lower, since
-/// padding a file adds size and no picture.
+/// the bitrate aimed for, in kbit/s: [`SHARE_KBPS`], or half the film's own when that is lower,
+/// so the copy is always well under the size of the film it was made from.
 pub fn share_copy(film: &Path, out: &Path) -> anyhow::Result<u32> {
   anyhow::ensure!(video::ffmpeg_available(), "Exporting the video needs FFmpeg: install it with `brew install ffmpeg`.");
   let seconds = duration(film)?;
   let own_kbps = (std::fs::metadata(film)?.len() as f64 * 8.0 / seconds / 1000.0) as u32;
-  let kbps = SHARE_KBPS.min(own_kbps.max(SHARE_KBPS_FLOOR));
+  let kbps = SHARE_KBPS.min(own_kbps / 2).max(SHARE_KBPS_FLOOR);
   let peak = SHARE_PEAK_KBPS.min(kbps * 5 / 4);
   let dir = tempfile::tempdir()?;
   let log = dir.path().join("pass").to_string_lossy().into_owned();
@@ -296,11 +296,11 @@ pub fn slice_of_track(track: &Path, start: f64, end: f64) -> anyhow::Result<Vec<
 
 /// One encoding for every part, so the concat can copy.
 /// The share copy's picture: the bitrate aimed for and the most it may peak at, in kbit/s.
-pub const SHARE_KBPS: u32 = 12_000;
-pub const SHARE_PEAK_KBPS: u32 = 15_000;
+pub const SHARE_KBPS: u32 = 6_000;
+pub const SHARE_PEAK_KBPS: u32 = 7_500;
 /// The least the share copy aims for, however small the film's own file is.
-const SHARE_KBPS_FLOOR: u32 = 2_000;
-const SHARE_SOUND: &str = "256k";
+const SHARE_KBPS_FLOOR: u32 = 1_500;
+const SHARE_SOUND: &str = "192k";
 /// At most 1080 pixels on the short side, never enlarged, both sides even.
 const SHARE_SCALE: &str = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'";
 
@@ -406,7 +406,7 @@ mod tests {
   }
 
   /// The share copy is at most 1080 across, keeps its sound, and is no bigger than the bitrate
-  /// allows: a busy film is brought down to the target, a small one isn't padded up to it.
+  /// allows: a busy film is brought down to the target, a small one to half its own size.
   #[test]
   fn the_share_copy_is_sized_for_upload() {
     if !video::ffmpeg_available() {
@@ -429,7 +429,7 @@ mod tests {
     assert!(kbps_of(&busy) > f64::from(SHARE_PEAK_KBPS) && kbps_of(&shared) < f64::from(SHARE_PEAK_KBPS) + 300.0, "{} -> {}", kbps_of(&busy), kbps_of(&shared));
     let sound = video::command("ffprobe").args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(&shared).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&sound.stdout).trim(), "aac");
-    // A film already smaller than the target keeps its size and its shape.
+    // A film already smaller than the target is halved again, and keeps its shape.
     let calm = film("color=c=gray:size=640x360:rate=24:duration=3", "23", "calm.mp4");
     let shared = dir.path().join("calm_instagram.mp4");
     assert!(share_copy(&calm, &shared).unwrap() < SHARE_KBPS);
