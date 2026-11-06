@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use super::workshop::Target;
-use super::{Action, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
+use super::{Action, Frames, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{Aspect, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace};
@@ -617,7 +617,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         (Quality::Final, false) => format!("Redraw all {} again", targets.len()),
       };
       if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
-        actions.push(Action::Stills(targets.clone(), false));
+        actions.push(Action::Stills(targets.clone(), false, if only_missing { Frames::Due } else { Frames::Both }));
       }
       if only_missing && stale_stills > 0 {
         ui.label(small(&format!("{stale_stills} of these {} out of date: the draft still {} redrawn after the final one was made.", if stale_stills == 1 { "is" } else { "are" }, if stale_stills == 1 { "was" } else { "were" })));
@@ -634,7 +634,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     if !page.picked.is_empty() {
       field(ui, &format!("{} scene{} selected", page.picked.len(), plural(page.picked.len())));
       if run_button(ui, Icon::RotateCw, &format!("Redraw {} selected", chosen.len()), chosen_cost.map(estimate), !busy && !chosen.is_empty(), None) {
-        actions.push(Action::Stills(chosen.clone(), better));
+        actions.push(Action::Stills(chosen.clone(), better, Frames::Both));
       }
       if chosen.len() < page.picked.len() {
         ui.label(small("Some of the selected scenes have no draft still or no description yet, so they are left out."));
@@ -651,16 +651,19 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
       }
       ui.label(label("Opening frame"));
-      let before = (shot.image.clone(), shot.motion.clone(), shot.sing);
+      let before = (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone());
       prompt_field(ui, "mv-scene-image", &mut shot.image, "Who or what is in the frame, the framing, the place and the light");
       ui.add_space(6.0);
       ui.label(label("What moves"));
       prompt_field(ui, "mv-scene-motion", &mut shot.motion, "The performer's movement and the camera's");
+      ui.add_space(6.0);
+      ui.label(label("Ending frame (optional)")).on_hover_text("The video model is given only the opening frame and makes up the rest. When a shot has to end somewhere exact, such as a push-in that arrives on the performer's face, describe that last frame here: it is drawn from the reference images, and the clip is filmed from one frame to the other.");
+      prompt_field(ui, "mv-scene-ending", &mut shot.ending, "Where the shot must land, if it matters: the performer's face fills the frame, eyes to the lens");
       if lip_sync {
         ui.add_space(6.0);
         ui.checkbox(&mut shot.sing, "The performer sings this scene (lip-synced)").on_hover_text("Works best as a close-up with the face towards the camera and the mouth in view");
       }
-      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing);
+      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone());
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
       }
@@ -682,7 +685,25 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       }
       let can_draw = !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
       if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
-        actions.push(Action::Stills(vec![index], better));
+        actions.push(Action::Stills(vec![index], better, Frames::Opening));
+      }
+      if shot.wants_ending() {
+        // The ending frame is drawn beside the opening still, so it needs one; the final pass
+        // redraws the draft's ending.
+        let take = shot.take(quality);
+        let (has_opening, has_draft) = (take.still.is_some(), quality == Quality::Draft || shot.draft.end_still.is_some());
+        let state = match (take.end_still.is_some(), shot.end_stale(quality), has_opening, has_draft) {
+          (_, _, false, _) => "Draw the opening still first: the ending frame is drawn to match it.",
+          (_, _, _, false) => "The final pass redraws the draft's ending frame. Draw it in the Draft pass first.",
+          (true, true, ..) => "The ending frame is out of date: the opening still, or its draft, was redrawn since.",
+          (true, false, ..) => "The ending frame is drawn. The clip is filmed from the opening frame to it.",
+          (false, ..) => "The ending frame isn't drawn yet. The clip waits for it.",
+        };
+        ui.label(small(state));
+        let label = if take.end_still.is_some() { "Redraw the ending frame" } else { "Draw the ending frame" };
+        if run_button(ui, Icon::RotateCw, label, one.map(estimate), !busy && has_opening && has_draft, None) {
+          actions.push(Action::Stills(vec![index], better, Frames::Ending));
+        }
       }
     }
     next_button(ui, Stage::Shots, drawn, actions);
@@ -730,7 +751,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
   // Due: a still with no clip, or with a clip filmed before the still was redrawn.
   let missing: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.clip_due(quality)).map(|(i, _)| i).collect();
   let lineage = page.project.lineage(quality);
-  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.take(quality).still.is_some()).map(|(i, _)| i).collect();
+  let all: Vec<usize> = page.project.shots.iter().enumerate().filter(|(_, s)| s.clip_ready(quality)).map(|(i, _)| i).collect();
   let only_missing = !missing.is_empty();
   let targets = if only_missing { missing } else { all };
   let (tier, resolution) = (page.tier(), page.resolution().to_owned());
@@ -813,6 +834,13 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       let take = shot.take(quality);
       // The scene's lineage: still, then clip, then lip sync.
       let stale = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).size(12.0).color(theme::BADGE_BETA));
+      if shot.wants_ending() {
+        if shot.clip_ready(quality) {
+          ui.label(small("Filmed from its opening frame to its ending frame."));
+        } else if take.still.is_some() {
+          stale(ui, "This scene asks for an ending frame that isn't drawn yet. Draw it on the Scenes stage, then make the clip.");
+        }
+      }
       if shot.clip_stale(quality) {
         stale(ui, "This clip is out of date: the still was redrawn after it was filmed. Make the clip again to match.");
       }
@@ -831,7 +859,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       }
       let clip_seconds = u32::from(whole.unwrap_or_else(|| plan::clip_seconds(shot.slot.seconds())));
       let one = env.backend.estimate_song(&SongEstimate::Clips { seconds: clip_seconds, tier, resolution: resolution.clone() });
-      if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), can_clip && take.still.is_some(), None) {
+      if run_button(ui, Icon::RotateCw, if take.clip.is_some() { "Make this clip again" } else { "Make this clip" }, one.map(estimate), can_clip && shot.clip_ready(quality), None) {
         actions.push(Action::Clips(vec![index]));
       }
       if shot.sing && take.clip.is_some() {
@@ -994,6 +1022,16 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
         }
         let image = Rect::from_min_size(rect.min, picture);
         thumbnail(ui, image, cache, shot.still_for(quality).map(PathBuf::as_path), Icon::Image);
+        // A scene with an ending frame shows it small in the corner: where the shot lands.
+        if shot.wants_ending() {
+          let size = vec2(image.width() * 0.34, image.height() * 0.34);
+          let inset = Rect::from_min_size(image.right_bottom() - size - vec2(6.0, 6.0), size);
+          ui.painter().rect_filled(inset.expand(1.0), theme::RADIUS, Color32::from_black_alpha(200));
+          thumbnail(ui, inset, cache, take.end_still.as_deref().or(shot.draft.end_still.as_deref()), Icon::Image);
+          let stale = take.end_still.is_some() && shot.end_stale(quality);
+          ui.painter().rect_stroke(inset, theme::RADIUS, egui::Stroke::new(1.0, if stale || take.end_still.is_none() { theme::BADGE_BETA } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
+          ui.painter().text(inset.left_top() + vec2(4.0, 3.0), Align2::LEFT_TOP, "END", FontId::new(9.0, theme::mono()), Color32::WHITE);
+        }
         let selected = page.selected == Some(index) || (!clips && page.picked.contains(&index));
         if selected || resp.hovered() {
           ui.painter().rect_stroke(image, theme::RADIUS, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { theme::ACCENT } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);

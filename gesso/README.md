@@ -194,6 +194,14 @@ runs, and leaves everything it made editable before the next stage uses it.
   can be swapped, and the film is cut again on your Mac with the same frame-exact cut. A scene
   keeps its length, so the scenes around it stay on their beats; moving or removing one shifts
   what follows against the song.
+- **An ending frame, where a shot has to land somewhere exact.** Veo is given a scene's opening
+  still and makes up the rest, so a push-in from far away arrives at a face it invented. A scene
+  can have an "Ending frame" description: that frame is drawn from the reference images with the
+  scene's opening still beside it (same place, light and outfit), and the clip is filmed from one
+  frame to the other. The ending frame is part of the lineage: it waits for its opening still, a
+  redrawn opening puts it out of date, the clip waits for both and goes out of date when either
+  changes, and the final pass redraws it from the draft. Leave the description empty and the
+  scene works as before.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

@@ -155,6 +155,13 @@ pub struct Take {
   pub still_from: Option<PathBuf>,
   pub clip_from: Option<PathBuf>,
   pub synced_from: Option<PathBuf>,
+  /// The ending frame, for scenes that ask for one, with its own lineage: the opening still it
+  /// was drawn to match, the draft ending a final one was redrawn from, and the ending the clip
+  /// was filmed to.
+  pub end_still: Option<PathBuf>,
+  pub end_from: Option<PathBuf>,
+  pub end_still_from: Option<PathBuf>,
+  pub clip_end_from: Option<PathBuf>,
 }
 
 impl Take {
@@ -173,6 +180,12 @@ pub struct Shot {
   pub image: String,
   /// What moves, for the video model.
   pub motion: String,
+  /// The frame the shot must end on, for the image model (empty for none). The video model is
+  /// given the opening frame alone and invents the rest, which goes wrong when the shot ends
+  /// somewhere exact: a push-in from far away arrives at a face it made up. With an ending frame
+  /// drawn from the references, it is given both ends and fills in the move between.
+  #[serde(default)]
+  pub ending: String,
   /// The scene's feeling in a few words.
   pub beat: String,
   /// The performer sings this scene's line to the camera, so its clip is lip-synced.
@@ -248,8 +261,53 @@ impl Shot {
     if take.synced.is_some() && take.synced_from.is_none() {
       take.synced_from.clone_from(&take.clip);
     }
+    let ending = self.end_frame(quality).cloned();
+    let take = self.take_mut(quality);
     take.clip = Some(path);
     take.clip_from.clone_from(&take.still);
+    take.clip_end_from = ending;
+  }
+
+  /// Whether the scene asks for an ending frame.
+  pub fn wants_ending(&self) -> bool {
+    !self.ending.trim().is_empty()
+  }
+
+  /// The ending frame a pass's clip is filmed to: none unless the scene asks for one and it has
+  /// been drawn.
+  pub fn end_frame(&self, quality: Quality) -> Option<&PathBuf> {
+    self.take(quality).end_still.as_ref().filter(|_| self.wants_ending())
+  }
+
+  /// A new ending frame for a pass, drawn to match its opening still as that is now.
+  pub fn set_end_still(&mut self, quality: Quality, path: PathBuf) {
+    let guide = self.draft.end_still.clone();
+    let take = self.take_mut(quality);
+    take.end_still = Some(path);
+    take.end_from.clone_from(&take.still);
+    take.end_still_from = if quality == Quality::Final { guide } else { None };
+  }
+
+  /// Whether a pass's ending frame has been overtaken: its opening still was redrawn after it was
+  /// matched to it, or (in the final pass) the draft ending it was redrawn from has changed.
+  pub fn end_stale(&self, quality: Quality) -> bool {
+    let take = self.take(quality);
+    self.wants_ending() && take.end_still.is_some() && (take.end_from != take.still || (quality == Quality::Final && take.end_still_from != self.draft.end_still))
+  }
+
+  /// Whether a pass's ending frame needs (re)drawing. It waits for the opening still, which it is
+  /// drawn to match, and in the final pass for a draft ending to redraw.
+  pub fn end_due(&self, quality: Quality) -> bool {
+    let take = self.take(quality);
+    let drawable = take.still.is_some() && (quality == Quality::Draft || self.draft.end_still.is_some());
+    self.wants_ending() && drawable && (take.end_still.is_none() || self.end_stale(quality))
+  }
+
+  /// Whether a pass has what a clip is filmed from: the opening still, and the ending frame when
+  /// the scene asks for one.
+  pub fn clip_ready(&self, quality: Quality) -> bool {
+    let take = self.take(quality);
+    take.still.is_some() && (!self.wants_ending() || take.end_still.is_some())
   }
 
   /// A new lip sync for a pass, of its clip as it is now.
@@ -267,7 +325,8 @@ impl Shot {
   /// Whether a pass's clip was filmed from a still that has since been replaced.
   pub fn clip_stale(&self, quality: Quality) -> bool {
     let take = self.take(quality);
-    take.clip.is_some() && take.clip_from.is_some() && take.clip_from != take.still
+    // Or it was filmed to an ending frame that has since been added, redrawn or dropped.
+    take.clip.is_some() && take.clip_from.is_some() && (take.clip_from != take.still || take.clip_end_from.as_ref() != self.end_frame(quality))
   }
 
   /// Whether a pass's lip sync is of a clip that has since been replaced, or is itself out of date.
@@ -279,13 +338,17 @@ impl Shot {
   /// Whether a pass's still needs (re)drawing: the final pass redraws drafts, so its still is also
   /// due when the draft it came from has changed.
   pub fn still_due(&self, quality: Quality) -> bool {
+    self.opening_due(quality) || self.end_due(quality)
+  }
+
+  /// Whether a pass's opening still needs (re)drawing.
+  pub fn opening_due(&self, quality: Quality) -> bool {
     self.take(quality).still.is_none() || (quality == Quality::Final && self.still_stale())
   }
 
   /// Whether a pass's clip needs (re)making: there is a still, and no clip filmed from it.
   pub fn clip_due(&self, quality: Quality) -> bool {
-    let take = self.take(quality);
-    take.still.is_some() && (take.clip.is_none() || self.clip_stale(quality))
+    self.clip_ready(quality) && (self.take(quality).clip.is_none() || self.clip_stale(quality))
   }
 
   /// Whether a sung scene's lip sync needs (re)doing: there is a clip, and no sync of it.
@@ -689,6 +752,14 @@ impl SongProject {
         (true, true) => lineage.stills_stale += 1,
         _ => {},
       }
+      // An ending frame is a still too, with its own place in the count.
+      if shot.end_due(quality) {
+        if take.end_still.is_some() {
+          lineage.stills_stale += 1;
+        } else {
+          lineage.stills_missing += 1;
+        }
+      }
       if take.still.is_some() {
         match (take.clip.is_some(), shot.clip_stale(quality)) {
           (false, _) => lineage.clips_missing += 1,
@@ -745,7 +816,7 @@ impl SongProject {
   /// Seconds of video a pass's clips would take to generate, at the clip lengths Veo makes (or
   /// `whole_clips_of` seconds each, for resolutions that only come in one length).
   pub fn seconds_to_generate(&self, quality: Quality, only_missing: bool, whole_clips_of: Option<u16>) -> u32 {
-    self.shots.iter().filter(|s| s.take(quality).still.is_some() && (!only_missing || s.clip_due(quality))).map(|s| u32::from(whole_clips_of.unwrap_or_else(|| super::plan::clip_seconds(s.slot.seconds())))).sum()
+    self.shots.iter().filter(|s| s.clip_ready(quality) && (!only_missing || s.clip_due(quality))).map(|s| u32::from(whole_clips_of.unwrap_or_else(|| super::plan::clip_seconds(s.slot.seconds())))).sum()
   }
 
   /// The scenes of a pass that are sung and have a clip to sync, and how many seconds they run.
@@ -989,6 +1060,58 @@ mod tests {
     assert!(!older.clip_stale(Quality::Draft) && !older.sync_stale(Quality::Draft) && !older.still_stale());
     older.set_still(Quality::Draft, path("s2.png"));
     assert!(older.clip_stale(Quality::Draft) && older.sync_stale(Quality::Draft) && older.still_stale(), "the change upstream is noticed even so");
+  }
+
+  /// A scene with an ending frame: the ending waits for its opening still, the clip waits for
+  /// both, and a change to either end puts the clip out of date.
+  #[test]
+  fn an_ending_frame_takes_its_place_in_the_lineage() {
+    let path = |name: &str| PathBuf::from(name);
+    let mut shot = Shot { image: "A dock, the performer far off".into(), ending: "The performer's face fills the frame".into(), ..Default::default() };
+    assert!(shot.wants_ending() && !shot.end_due(Quality::Draft), "the ending is drawn to match the opening, so it waits for it");
+    shot.set_still(Quality::Draft, path("open1.png"));
+    assert!(shot.end_due(Quality::Draft) && shot.still_due(Quality::Draft) && !shot.opening_due(Quality::Draft));
+    assert!(!shot.clip_ready(Quality::Draft) && !shot.clip_due(Quality::Draft), "no clip until both ends exist");
+    shot.set_end_still(Quality::Draft, path("end1.png"));
+    assert!(!shot.end_due(Quality::Draft) && shot.clip_ready(Quality::Draft) && shot.clip_due(Quality::Draft));
+    assert_eq!(shot.end_frame(Quality::Draft), Some(&path("end1.png")));
+    shot.set_clip(Quality::Draft, path("c1.mp4"));
+    assert!(!shot.clip_stale(Quality::Draft) && !shot.clip_due(Quality::Draft));
+
+    // Redrawing the ending overtakes the clip; redrawing the opening overtakes the ending too.
+    shot.set_end_still(Quality::Draft, path("end2.png"));
+    assert!(shot.clip_stale(Quality::Draft));
+    shot.set_clip(Quality::Draft, path("c2.mp4"));
+    shot.set_still(Quality::Draft, path("open2.png"));
+    assert!(shot.end_stale(Quality::Draft) && shot.end_due(Quality::Draft) && shot.clip_stale(Quality::Draft));
+    shot.set_end_still(Quality::Draft, path("end3.png"));
+    shot.set_clip(Quality::Draft, path("c3.mp4"));
+    assert!(!shot.end_stale(Quality::Draft) && !shot.clip_stale(Quality::Draft));
+
+    // Dropping the ending leaves a clip that was filmed to one out of date, and nothing to draw.
+    shot.ending.clear();
+    assert!(shot.end_frame(Quality::Draft).is_none() && !shot.end_due(Quality::Draft) && shot.clip_stale(Quality::Draft) && shot.clip_ready(Quality::Draft));
+  }
+
+  /// The final pass redraws the draft's ending, after its own opening still.
+  #[test]
+  fn a_final_ending_follows_its_draft_and_its_own_opening() {
+    let path = |name: &str| PathBuf::from(name);
+    let mut shot = Shot { image: "A dock".into(), ending: "A face".into(), ..Default::default() };
+    shot.set_still(Quality::Draft, path("d_open.png"));
+    shot.set_still(Quality::Final, path("f_open.png"));
+    assert!(!shot.end_due(Quality::Final), "there is no draft ending to redraw yet");
+    shot.set_end_still(Quality::Draft, path("d_end.png"));
+    assert!(shot.end_due(Quality::Final));
+    shot.set_end_still(Quality::Final, path("f_end.png"));
+    assert!(!shot.end_due(Quality::Final) && !shot.end_stale(Quality::Final));
+    shot.set_end_still(Quality::Draft, path("d_end2.png"));
+    assert!(shot.end_stale(Quality::Final), "its draft was redrawn");
+
+    let mut project = SongProject::new();
+    project.shots = vec![shot];
+    let lineage = project.lineage(Quality::Final);
+    assert_eq!((lineage.stills_stale, lineage.stills_missing), (1, 0), "the final ending counts among the stills to redraw");
   }
 
   #[test]

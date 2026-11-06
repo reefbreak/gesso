@@ -105,8 +105,9 @@ pub(super) enum Action {
   /// Opens the film in Edit Video as its scenes and soundtrack.
   EditFilm,
   Plan,
-  /// Scenes whose stills to draw, by index; `true` to use the better model in the draft pass.
-  Stills(Vec<usize>, bool),
+  /// Scenes whose stills to draw, by index; `true` to use the better model in the draft pass;
+  /// and which of each scene's frames.
+  Stills(Vec<usize>, bool, Frames),
   /// Scenes whose clips to make, by index.
   Clips(Vec<usize>),
   /// Scenes whose clips to lip-sync, by index.
@@ -126,6 +127,18 @@ pub struct Notice {
   pub message: String,
   /// The library gained a file (the song, a reference image or the finished film).
   pub library_changed: bool,
+}
+
+/// Which of a scene's frames a run draws: a scene has an opening frame and, when it asks for
+/// one, an ending frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Frames {
+  /// Whatever is missing or out of date.
+  Due,
+  /// Both, again.
+  Both,
+  Opening,
+  Ending,
 }
 
 pub struct MusicVideoPage {
@@ -274,12 +287,16 @@ impl MusicVideoPage {
         self.selected = None;
         self.picked.clear();
       },
-      SongUpdate::Still { index, path } => {
+      SongUpdate::Still { index, path, ending } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
           // The clip and lip sync made from the old still stay, marked out of date, until they
           // are made again.
           self.project.in_library.insert(path.clone());
-          shot.set_still(quality, path);
+          if ending {
+            shot.set_end_still(quality, path);
+          } else {
+            shot.set_still(quality, path);
+          }
           shot.error = None;
           shot.clip_error = None;
         }
@@ -700,16 +717,42 @@ impl MusicVideoPage {
         self.pending_slots = slots.clone();
         self.start(backend, 0, &format!("Writing {} scenes\u{2026}", slots.len()), SongRequest::Plan { brief, style, slots, lip_sync: self.project.lip_sync, writer: self.writer });
       },
-      Action::Stills(indices, better) => {
+      Action::Stills(indices, better, frames) => {
         let quality = self.quality();
         let mut shots = Vec::new();
         for index in indices {
-          if let Some(shot) = self.project.shots.get_mut(index).filter(|s| !s.image.trim().is_empty()) {
+          let Some(shot) = self.project.shots.get_mut(index).filter(|s| !s.image.trim().is_empty()) else {
+            continue;
+          };
+          let opening = match frames {
+            Frames::Due => shot.opening_due(quality),
+            Frames::Both | Frames::Opening => true,
+            Frames::Ending => false,
+          };
+          // The final pass redraws drafts: without a draft still there is nothing to redraw.
+          let opening = opening && (quality == Quality::Draft || shot.draft.still.is_some());
+          if opening {
             shot.still_version += 1;
             shot.error = None;
             // The final pass recreates the approved draft frame, when there is one.
             let guide = if quality == Quality::Final { shot.draft.still.clone() } else { None };
-            shots.push(StillJob { index, version: shot.still_version, image: shot.image.clone(), guide });
+            shots.push(StillJob { index, version: shot.still_version, image: shot.image.clone(), guide, ending: false, opening: None });
+          }
+          let ending = shot.wants_ending()
+            && match frames {
+              Frames::Due => shot.end_due(quality),
+              Frames::Both | Frames::Ending => true,
+              Frames::Opening => false,
+            };
+          // The ending frame is drawn to match the opening still, so it waits for one that isn't
+          // being redrawn in this same run; it then shows as still to do.
+          let matched = shot.take(quality).still.clone().filter(|_| !opening);
+          let drawable = quality == Quality::Draft || shot.draft.end_still.is_some();
+          if let Some(matched) = matched.filter(|_| ending && drawable) {
+            shot.still_version += 1;
+            shot.error = None;
+            let guide = if quality == Quality::Final { shot.draft.end_still.clone() } else { None };
+            shots.push(StillJob { index, version: shot.still_version, image: shot.ending.clone(), guide, ending: true, opening: Some(matched) });
           }
         }
         if !shots.is_empty() {
@@ -726,10 +769,12 @@ impl MusicVideoPage {
             continue;
           }
           if let Some(shot) = self.project.shots.get_mut(index) {
-            if let Some(still) = shot.take(quality).still.clone() {
+            // A scene that asks for an ending frame is filmed once that frame is drawn.
+            if let Some(still) = shot.take(quality).still.clone().filter(|_| shot.clip_ready(quality)) {
               shot.clip_version += 1;
               shot.clip_error = None;
-              shots.push(ClipJob { index, version: shot.clip_version, still, motion: shot.motion.clone(), seconds: shot.slot.seconds(), sing: shot.sing });
+              let end_still = shot.end_frame(quality).cloned();
+              shots.push(ClipJob { index, version: shot.clip_version, still, end_still, motion: shot.motion.clone(), seconds: shot.slot.seconds(), sing: shot.sing });
             }
           }
         }

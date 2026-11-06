@@ -991,6 +991,12 @@ mod tests {
     let body = veo_body(&VeoRequest { model: "veo-3.1-fast-generate-001", prompt: "waves", start_frame: Some(&frame), end_frame: None, aspect_ratio: Some("9:16"), resolution: Some("1080p"), duration_seconds: Some(6), sample_count: 2, generate_audio: Some(false), extend: None });
     assert_eq!(body["instances"][0]["image"], json!({ "bytesBase64Encoded": "AQID", "mimeType": "image/png" }));
     assert!(body["instances"][0].get("lastFrame").is_none());
+    // With an ending frame, Veo is given both ends of the shot.
+    let last = RefImage { mime_type: "image/jpeg".into(), bytes: vec![4, 5] };
+    let both = veo_body(&VeoRequest { model: "veo-3.1-lite-generate-001", prompt: "push in", start_frame: Some(&frame), end_frame: Some(&last), aspect_ratio: Some("16:9"), resolution: Some("720p"), duration_seconds: Some(6), sample_count: 1, generate_audio: Some(false), extend: None });
+    assert_eq!(both["instances"][0]["image"]["bytesBase64Encoded"], "AQID");
+    assert_eq!(both["instances"][0]["lastFrame"], json!({ "bytesBase64Encoded": "BAU=", "mimeType": "image/jpeg" }));
+    assert_eq!(both["parameters"]["durationSeconds"], 6, "a last frame doesn't force a length");
     assert_eq!(body["parameters"], json!({ "sampleCount": 2, "aspectRatio": "9:16", "resolution": "1080p", "durationSeconds": 6, "generateAudio": false }));
   }
 }
