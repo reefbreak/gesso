@@ -83,6 +83,10 @@ pub(super) enum Action {
     rewrite: bool,
   },
   OwnLyrics,
+  /// Keep the lyrics as they stand among the earlier versions.
+  KeepLyrics,
+  /// Go back to an earlier version of the lyrics, by its place in the project's list.
+  RestoreLyrics(usize),
   Compose,
   Import(PathBuf),
   Analyse,
@@ -202,13 +206,15 @@ pub struct MusicVideoPage {
   dirty_since: Option<f64>,
   /// A project to open on the first frame (`ARTCRAFT_MUSIC_VIDEO`, for screenshots).
   open_on_start: Option<String>,
+  /// The earlier version of the lyrics that is open to read, by its place in the project's list.
+  pub(super) viewing_lyrics: Option<usize>,
   /// What each video's calls have cost, part by part, and when that was last read.
   costs: Option<(f64, BTreeMap<String, Vec<(String, f64)>>)>,
 }
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_lyrics: None, costs: None }
   }
 }
 
@@ -321,6 +327,7 @@ impl MusicVideoPage {
     let library = |message: &str| Some(Notice { error: false, message: message.to_owned(), library_changed: true });
     match update {
       SongUpdate::Written(draft) => {
+        self.project.keep_lyrics("Before a rewrite");
         self.project.title = draft.title;
         self.project.style = draft.style;
         self.project.lyrics = draft.lyrics;
@@ -713,8 +720,18 @@ impl MusicVideoPage {
         }
         self.go(Stage::Lyrics);
       },
+      Action::KeepLyrics => {
+        self.project.keep_lyrics("Kept by hand");
+        self.save(backend);
+      },
+      Action::RestoreLyrics(index) => {
+        self.project.restore_lyrics(index);
+        self.viewing_lyrics = None;
+        self.save(backend);
+      },
       Action::Compose => {
         let version = self.next_version();
+        self.project.keep_lyrics(&format!("Used for song take {version}"));
         self.start(backend, 0, "Lyria is making the song (a minute or two)\u{2026}", SongRequest::Compose { dir, draft: self.project.draft(), length: self.project.song_length, instrumental: self.instrumental, version });
         self.analyse_after();
       },

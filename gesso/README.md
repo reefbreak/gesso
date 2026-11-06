@@ -225,6 +225,10 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **Lyrics are written new.** The writer is told to carry over an idea's energy and structure, not
   the words of an existing song, and to describe music without artist or song names (Lyria refuses
   them).
+- **Earlier lyrics are kept.** A rewrite, a new song take or going back to an older version keeps
+  the title, music direction and lyrics as they were; "Keep this version" does it by hand. The
+  Lyrics stage lists them newest first: click one to read it, and "Go back to this version" swaps
+  it in, keeping the present words as a version too. The newest 40 are kept.
 - **Directions in the lyrics aren't sung.** Notes written among the words
   (`[Intro: guitar loop, drums kick in]`, `Outro [repeat to fade]`, `(Short Intro: ...)`) are taken
   out before the song is made and sent to Lyria as arrangement notes; the lyrics go as plain

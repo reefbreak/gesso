@@ -128,6 +128,8 @@ fn lyrics(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect,
     ui.label(label("Lyrics"));
     let rows = page.project.lyrics.lines().count().max(16) + 2;
     changed |= text_box(ui, "mv-lyrics", &mut page.project.lyrics, "[Verse 1]\n\u{2026}", rows);
+    ui.add_space(18.0);
+    earlier_lyrics(page, ui, busy, actions);
   });
   let has_lyrics = !page.project.lyrics.trim().is_empty();
   let line = page.progress_line().filter(|_| page.running_here());
@@ -147,6 +149,51 @@ fn lyrics(page: &mut MusicVideoPage, ui: &mut Ui, stage: Rect, panel_rect: Rect,
   });
   if changed {
     page.touch(ui);
+  }
+}
+
+/// The earlier versions of the words, newest first: click one to read it, then restore it or
+/// leave it. Restoring keeps the present words as a version too.
+fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &mut Vec<Action>) {
+  let kept = page.project.lyric_versions.iter().any(|v| v.title == page.project.title && v.style == page.project.style && v.lyrics == page.project.lyrics);
+  ui.horizontal(|ui| {
+    widgets::hud(ui, "Earlier versions", theme::FAINT);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+      if secondary(ui, Icon::Plus, if kept { "This version is kept" } else { "Keep this version" }, !kept && !page.project.lyrics.trim().is_empty()) {
+        actions.push(Action::KeepLyrics);
+      }
+    });
+  });
+  ui.add_space(6.0);
+  if page.project.lyric_versions.is_empty() {
+    ui.label(egui::RichText::new("A rewrite, a new song or going back to an older version keeps the words as they were, and they're listed here.").size(13.0).color(theme::FAINT));
+    return;
+  }
+  for (index, version) in page.project.lyric_versions.iter().enumerate().rev() {
+    let open = page.viewing_lyrics == Some(index);
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+    ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+    let first_line = version.lyrics.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('[')).unwrap_or_default();
+    let name: String = format!("{} \u{b7} {}", if version.title.trim().is_empty() { "Untitled" } else { version.title.trim() }, first_line).chars().take(70).collect();
+    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, name, FontId::new(13.5, theme::medium()), theme::INK);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {}", when(&version.at), version.why), FontId::new(11.5, theme::mono()), theme::MUTED);
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+      page.viewing_lyrics = if open { None } else { Some(index) };
+    }
+    ui.add_space(6.0);
+    if open {
+      card(ui, "Music direction".to_owned(), |ui| {
+        ui.label(body(&version.style));
+      });
+      card(ui, "Lyrics".to_owned(), |ui| {
+        ui.label(body(&version.lyrics));
+        ui.add_space(10.0);
+        if secondary(ui, Icon::RotateCw, "Go back to this version", !busy) {
+          actions.push(Action::RestoreLyrics(index));
+        }
+        ui.label(small("The words in the box now are kept as a version first."));
+      });
+    }
   }
 }
 
@@ -1439,6 +1486,11 @@ fn colour(hex: &str) -> Color32 {
 }
 
 /// The date of an RFC 3339 timestamp (`2026-11-05`).
+/// A saved time as the day and the minute, in the user's own time.
+fn when(timestamp: &str) -> String {
+  chrono::DateTime::parse_from_rfc3339(timestamp).map(|at| at.with_timezone(&chrono::Local).format("%-d %b %H:%M").to_string()).unwrap_or_else(|_| day(timestamp).to_owned())
+}
+
 fn day(timestamp: &str) -> &str {
   timestamp.get(..10).unwrap_or(timestamp)
 }

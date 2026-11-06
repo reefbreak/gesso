@@ -17,6 +17,8 @@ use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 /// Under the local library's folder.
 pub const DIRECTORY: &str = "songs";
 const FILENAME: &str = "project.json";
+/// How many earlier versions of the lyrics a project keeps.
+const LYRIC_VERSIONS_KEPT: usize = 40;
 const ID_PREFIX: &str = "song_";
 
 /// The workflow's stages, in order.
@@ -417,6 +419,22 @@ pub struct SongProject {
   /// The video's files that are in the library already, so opening it adds only the rest.
   #[serde(default)]
   pub in_library: BTreeSet<PathBuf>,
+  /// Earlier versions of the words, oldest first: kept whenever a rewrite, a restore or a new
+  /// song is about to move on from them.
+  #[serde(default)]
+  pub lyric_versions: Vec<LyricVersion>,
+}
+
+/// The song on paper as it stood at some point.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricVersion {
+  pub at: String,
+  /// Why it was kept ("Before a rewrite").
+  pub why: String,
+  pub title: String,
+  pub style: String,
+  pub lyrics: String,
 }
 
 /// What the film on file was cut from: the pass, and each scene's clip or still in order. A cut
@@ -621,6 +639,29 @@ impl SongProject {
     } else {
       idea
     }
+  }
+
+  /// Keeps the words as they stand among the earlier versions, unless they're empty or the same
+  /// as some version already kept. Only the newest [`LYRIC_VERSIONS_KEPT`] stay.
+  pub fn keep_lyrics(&mut self, why: &str) {
+    let same = |v: &LyricVersion| v.title == self.title && v.style == self.style && v.lyrics == self.lyrics;
+    if self.lyrics.trim().is_empty() || self.lyric_versions.iter().any(same) {
+      return;
+    }
+    self.lyric_versions.push(LyricVersion { at: chrono::Utc::now().to_rfc3339(), why: why.to_owned(), title: self.title.clone(), style: self.style.clone(), lyrics: self.lyrics.clone() });
+    let extra = self.lyric_versions.len().saturating_sub(LYRIC_VERSIONS_KEPT);
+    self.lyric_versions.drain(..extra);
+  }
+
+  /// Goes back to an earlier version of the words, keeping the present ones first.
+  pub fn restore_lyrics(&mut self, index: usize) {
+    let Some(version) = self.lyric_versions.get(index).cloned() else {
+      return;
+    };
+    self.keep_lyrics("Before going back to an earlier version");
+    self.title = version.title;
+    self.style = version.style;
+    self.lyrics = version.lyrics;
   }
 
   pub fn draft(&self) -> Draft {
@@ -1240,6 +1281,27 @@ mod tests {
     assert_eq!(made, Made { songs: 2, references: 2, stills: [3, 1], clips: [2, 1], clip_seconds: [4 + 6, 8], synced_seconds: [3.5, 0.0], separated_seconds: 0.0 });
     assert!(!made.is_empty() && SongProject::new().made(&dir.join("nowhere")).is_empty());
     let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn earlier_lyrics_are_kept_and_can_be_restored() {
+    let mut project = SongProject::new();
+    project.keep_lyrics("Before a rewrite");
+    assert!(project.lyric_versions.is_empty(), "nothing written, nothing kept");
+    project.lyrics = "first".into();
+    project.keep_lyrics("Before a rewrite");
+    project.keep_lyrics("Before a rewrite");
+    project.lyrics = "second".into();
+    assert_eq!(project.lyric_versions.iter().map(|v| v.lyrics.as_str()).collect::<Vec<_>>(), ["first"], "the same words are kept once");
+    // Going back keeps what was there, so nothing is lost either way.
+    project.restore_lyrics(0);
+    assert_eq!(project.lyrics, "first");
+    assert_eq!(project.lyric_versions.iter().map(|v| (v.lyrics.as_str(), v.why.as_str())).collect::<Vec<_>>(), [("first", "Before a rewrite"), ("second", "Before going back to an earlier version")]);
+    for n in 0..60 {
+      project.lyrics = format!("take {n}");
+      project.keep_lyrics("Before a rewrite");
+    }
+    assert_eq!((project.lyric_versions.len(), project.lyric_versions.last().map(|v| v.lyrics.clone())), (LYRIC_VERSIONS_KEPT, Some("take 59".into())));
   }
 
   #[test]
