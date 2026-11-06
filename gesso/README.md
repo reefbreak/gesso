@@ -157,7 +157,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   model, which holds a likeness better, while they stay draft stills at draft size.
 - **Clips and lip sync side by side.** Veo makes the clips and fal syncs the mouths, so a lip sync
   can be started while clips are being made, and clips while a lip sync runs. Each leaves alone
-  the scenes the other is working on. The clip and the vocal are put in fal's storage first,
+  the scenes the other is working on. A clip run films the sung scenes first, since lip sync
+  needs their clips; the lip-sync button opens when the last of them is in and can then run while
+  Veo makes the rest. The clip and the vocal are put in fal's storage first,
   because fal's models read files from links only.
 - **The words run under the pictures.** Each scene's card shows the line sung over it, so read
   across the grid the song's words run under the stills and clips like a track; the sung line is

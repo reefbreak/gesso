@@ -881,6 +881,9 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
         (true, true) => "No sung scene has a clip yet. Make the clips first.".to_owned(),
         (true, false) => format!("{} sung scene{}, {sync_seconds:.0} s in all. The mouth is redrawn to the vocal{}; expect to redo a few.", sync_targets.len(), plural(sync_targets.len()), if separate_seconds > 0.0 { ", which is separated from the track first" } else { "" }),
       };
+      // Sung scenes are filmed first; the sync opens once the last of them is in.
+      let filming = page.sung_being_filmed();
+      let note = if fal && filming > 0 { format!("Veo is filming {filming} sung scene{} first. Lip sync opens as soon as {} in, and can run while the other clips are made.", plural(filming), if filming == 1 { "it is" } else { "they are" }) } else { note };
       ui.label(small(&note));
       let label = match (sync_targets.is_empty(), sync_missing) {
         (true, _) => "Lip-sync sung scenes".to_owned(),
@@ -889,7 +892,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       };
       // Nothing to sync, nothing to price.
       let price = sync_cost.filter(|_| !sync_targets.is_empty()).map(estimate);
-      if run_button(ui, Icon::Mic, &label, price, fal && !sync_targets.is_empty() && can_sync, sync_line.as_deref()) {
+      if run_button(ui, Icon::Mic, &label, price, fal && !sync_targets.is_empty() && can_sync && filming == 0, sync_line.as_deref()) {
         actions.push(Action::LipSync(sync_targets.clone()));
       }
       if sync_line.is_some() && widgets::button(ui, Some(Icon::X), "Stop the lip sync", widgets::Kind::Secondary, 0.0, 30.0).clicked() {

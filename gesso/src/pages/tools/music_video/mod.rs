@@ -449,6 +449,10 @@ impl MusicVideoPage {
         if self.selected == Some(index) {
           self.player = None;
         }
+        // Its clip is in, so the scene is free to be lip-synced while the run goes on.
+        if let Some(run) = &mut self.run {
+          run.scenes.remove(&index);
+        }
         self.progress(sync);
       },
       SongUpdate::Synced { index, path } => {
@@ -475,6 +479,10 @@ impl MusicVideoPage {
           } else {
             shot.error = Some(message);
           }
+        }
+        // A clip that failed isn't being made any more.
+        if let Some(run) = self.slot(sync).as_mut().filter(|run| run.clips) {
+          run.scenes.remove(&index);
         }
         self.progress(sync);
       },
@@ -533,6 +541,11 @@ impl MusicVideoPage {
   /// Whether a lip sync can be started: none is running, and nothing else is but clips being made.
   pub(super) fn can_sync(&self) -> bool {
     self.sync.is_none() && self.run.as_ref().is_none_or(|run| run.clips)
+  }
+
+  /// The sung scenes whose clips the run in hand hasn't delivered yet. Lip sync waits for them.
+  pub(super) fn sung_being_filmed(&self) -> usize {
+    self.run.as_ref().filter(|run| run.clips).map_or(0, |run| run.scenes.iter().filter(|index| self.project.shots.get(**index).is_some_and(|shot| shot.sing)).count())
   }
 
   /// The lip sync's progress line, while one runs.
@@ -923,8 +936,12 @@ impl MusicVideoPage {
           }
         }
         if !shots.is_empty() && self.can_make_clips() {
+          // Sung scenes are filmed first: lip sync needs their clips, and can then run on fal
+          // while Veo makes the rest.
+          shots.sort_by_key(|job| !job.sing);
+          let sung_first = shots.first().is_some_and(|job| job.sing) && shots.last().is_some_and(|job| !job.sing);
           let scenes = shots.iter().map(|shot| shot.index).collect();
-          self.launch(backend, false, scenes, shots.len(), "Veo is making clips\u{2026}", SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: self.tier(), resolution: self.resolution().to_owned(), quality, shots });
+          self.launch(backend, false, scenes, shots.len(), if sung_first { "Veo is making clips, sung scenes first\u{2026}" } else { "Veo is making clips\u{2026}" }, SongRequest::Clips { dir, look: self.project.design().look, aspect: self.project.aspect, tier: self.tier(), resolution: self.resolution().to_owned(), quality, shots });
         }
       },
       Action::LipSync(indices) => {
