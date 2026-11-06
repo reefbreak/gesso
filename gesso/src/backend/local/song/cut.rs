@@ -230,6 +230,27 @@ pub fn assemble(shots: &[CutShot], audio: &Path, size: (u32, u32), grade: Grade,
   Ok(())
 }
 
+/// A copy of the film sized for uploading from a phone and sharing: H.264 in two passes at a
+/// variable bitrate, AAC sound, at most 1080 pixels on its short side, ready to stream. Returns
+/// the bitrate aimed for, in kbit/s: [`SHARE_KBPS`], or the film's own when that is lower, since
+/// padding a file adds size and no picture.
+pub fn share_copy(film: &Path, out: &Path) -> anyhow::Result<u32> {
+  anyhow::ensure!(video::ffmpeg_available(), "Exporting the video needs FFmpeg: install it with `brew install ffmpeg`.");
+  let seconds = duration(film)?;
+  let own_kbps = (std::fs::metadata(film)?.len() as f64 * 8.0 / seconds / 1000.0) as u32;
+  let kbps = SHARE_KBPS.min(own_kbps.max(SHARE_KBPS_FLOOR));
+  let peak = SHARE_PEAK_KBPS.min(kbps * 5 / 4);
+  let dir = tempfile::tempdir()?;
+  let log = dir.path().join("pass").to_string_lossy().into_owned();
+  let picture: Vec<String> = ["-c:v", "libx264", "-preset", "slow", "-profile:v", "high", "-pix_fmt", "yuv420p", "-vf", SHARE_SCALE].iter().map(|a| (*a).to_owned()).chain(["-b:v".into(), format!("{kbps}k"), "-maxrate".into(), format!("{peak}k"), "-bufsize".into(), format!("{}k", peak * 2), "-passlogfile".into(), log]).collect();
+  let source = ["-y".to_owned(), "-v".into(), "error".into(), "-i".into(), film.to_string_lossy().into_owned()];
+  // The first pass only measures the film; the second spends the bits where it found they matter.
+  run(&[&source[..], &picture[..], &["-pass", "1", "-an", "-f", "null", "-"].map(str::to_owned)].concat())?;
+  run(&[&source[..], &picture[..], &["-pass", "2", "-c:a", "aac", "-b:a", SHARE_SOUND, "-ar", "48000", "-movflags", "+faststart"].map(str::to_owned), &[out.to_string_lossy().into_owned()]].concat())?;
+  anyhow::ensure!(out.exists(), "FFmpeg didn't write the video");
+  Ok(kbps)
+}
+
 /// A track's length in seconds.
 pub fn duration(path: &Path) -> anyhow::Result<f64> {
   anyhow::ensure!(video::ffmpeg_available(), "Reading the track needs FFmpeg: install it with `brew install ffmpeg`.");
@@ -274,6 +295,15 @@ pub fn slice_of_track(track: &Path, start: f64, end: f64) -> anyhow::Result<Vec<
 }
 
 /// One encoding for every part, so the concat can copy.
+/// The share copy's picture: the bitrate aimed for and the most it may peak at, in kbit/s.
+pub const SHARE_KBPS: u32 = 12_000;
+pub const SHARE_PEAK_KBPS: u32 = 15_000;
+/// The least the share copy aims for, however small the film's own file is.
+const SHARE_KBPS_FLOOR: u32 = 2_000;
+const SHARE_SOUND: &str = "256k";
+/// At most 1080 pixels on the short side, never enlarged, both sides even.
+const SHARE_SCALE: &str = "scale='if(gt(iw,ih),-2,min(1080,iw))':'if(gt(iw,ih),min(1080,ih),-2)'";
+
 const ENCODE: [&str; 10] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-video_track_timescale", "12288"];
 
 /// Whole frames in `[start, end)`, counted from the song's start so rounding never accumulates.
@@ -373,6 +403,38 @@ mod tests {
     let (w, h, _, feed_seconds) = video::probe_file(&feed).unwrap();
     assert_eq!((w, h), (720, 900));
     assert!((feed_seconds - 5.5).abs() < 0.1, "the shape doesn't change the length ({feed_seconds:.2}s)");
+  }
+
+  /// The share copy is at most 1080 across, keeps its sound, and is no bigger than the bitrate
+  /// allows: a busy film is brought down to the target, a small one isn't padded up to it.
+  #[test]
+  fn the_share_copy_is_sized_for_upload() {
+    if !video::ffmpeg_available() {
+      return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let film = |source: &str, quality: &str, name: &str| -> PathBuf {
+      let path = dir.path().join(name);
+      run(&["-y", "-v", "error", "-f", "lavfi", "-i", source, "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:v", "libx264", "-preset", "ultrafast", "-crf", quality, "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", &path.to_string_lossy()].map(str::to_owned)).unwrap();
+      path
+    };
+    let kbps_of = |path: &Path| std::fs::metadata(path).unwrap().len() as f64 * 8.0 / duration(path).unwrap() / 1000.0;
+    // Noise is the hardest thing to encode: far over the target at this size.
+    let busy = film("nullsrc=size=1440x2560:rate=12:duration=3,geq=random(1)*255:128:128", "10", "busy.mp4");
+    let shared = dir.path().join("busy_instagram.mp4");
+    assert_eq!(share_copy(&busy, &shared).unwrap(), SHARE_KBPS);
+    let (w, h, _, seconds) = video::probe_file(&shared).unwrap();
+    assert_eq!((w, h), (1080, 1920));
+    assert!((seconds - 3.0).abs() < 0.2);
+    assert!(kbps_of(&busy) > f64::from(SHARE_PEAK_KBPS) && kbps_of(&shared) < f64::from(SHARE_PEAK_KBPS) + 300.0, "{} -> {}", kbps_of(&busy), kbps_of(&shared));
+    let sound = video::command("ffprobe").args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(&shared).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&sound.stdout).trim(), "aac");
+    // A film already smaller than the target keeps its size and its shape.
+    let calm = film("color=c=gray:size=640x360:rate=24:duration=3", "23", "calm.mp4");
+    let shared = dir.path().join("calm_instagram.mp4");
+    assert!(share_copy(&calm, &shared).unwrap() < SHARE_KBPS);
+    let (w, h, _, _) = video::probe_file(&shared).unwrap();
+    assert_eq!((w, h), (640, 360));
   }
 
   #[test]

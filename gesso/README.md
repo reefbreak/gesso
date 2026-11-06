@@ -209,6 +209,13 @@ runs, and leaves everything it made editable before the next stage uses it.
   An ending frame is a second still per scene, so the stills cost about twice as much. One run
   draws both: the openings first, then each ending matched to its new opening. The draw button
   counts and prices pictures, not scenes, and says how many are openings and how many endings.
+- **A copy for Instagram.** "Export for Instagram" on the Final Video stage makes a smaller copy
+  of the cut film for uploading from a phone, beside it as `cut_vN_instagram.mp4` and in the
+  library: H.264 in two passes at a variable 12 Mbps (peaks to 15), AAC at 256 kbps, at most 1080
+  pixels on the short side, ready to stream. A film whose own file is already below 12 Mbps is
+  encoded at its own rate, since a higher one adds size and no picture. It keeps the cut's shape,
+  so choose Reel, Feed or Square under Format first for a tall or square one. A newer cut marks
+  the copy out of date.
 - **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric
   writer is told how many verses and choruses to write for it, and Lyria how long to run. The
   length is asked for, not enforced: Lyria lands near it, and what is written decides most of it.

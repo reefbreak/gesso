@@ -232,6 +232,10 @@ pub enum SongRequest {
     lip_sync: bool,
     writer: Writer,
   },
+  /// Makes a copy of the cut film sized for uploading to Instagram from a phone.
+  Share {
+    film: PathBuf,
+  },
   /// An ending frame for each of `scenes`, which have none: a scene is its number, section,
   /// length, opening frame and movement.
   Endings {
@@ -352,6 +356,14 @@ pub enum SongUpdate {
     message: String,
   },
   Planned(Vec<PlannedShot>),
+  /// The film's Instagram copy: where it is, the cut it was made from, the bitrate it was
+  /// encoded for and its size.
+  Shared {
+    path: PathBuf,
+    of: PathBuf,
+    kbps: u32,
+    bytes: u64,
+  },
   /// Ending frames for scenes that had none, by scene.
   Endings(Vec<(usize, String)>),
   Still {
@@ -643,6 +655,14 @@ impl SongRun<'_> {
         let bytes = std::fs::read(&out)?;
         self.add_to_library(&out, &bytes, MediaClass::Video);
         self.send(SongUpdate::Cut(out));
+      },
+      SongRequest::Share { film } => {
+        let out = film.with_file_name(format!("{}_instagram.mp4", film.file_stem().unwrap_or_default().to_string_lossy()));
+        let (source, target) = (film.clone(), out.clone());
+        let kbps = tokio::task::spawn_blocking(move || cut::share_copy(&source, &target)).await??;
+        let bytes = std::fs::read(&out)?;
+        self.add_to_library(&out, &bytes, MediaClass::Video);
+        self.send(SongUpdate::Shared { path: out, of: film, kbps, bytes: bytes.len() as u64 });
       },
     }
     Ok(())
@@ -1130,6 +1150,7 @@ fn describe_asset(stem: &str) -> String {
   let notes: Vec<String> = words.filter_map(|word| match word {
     "draft" | "final" => Some(word.to_owned()),
     "synced" => Some("lip-synced".to_owned()),
+    "instagram" => Some("for Instagram".to_owned()),
     "imported" => Some("imported".to_owned()),
     version if version.starts_with('v') && version[1..].chars().all(|c| c.is_ascii_digit()) => Some(version.to_owned()),
     _ => None,

@@ -417,6 +417,8 @@ pub struct SongProject {
   pub pace: Pace,
   pub shots: Vec<Shot>,
   pub cut: Option<PathBuf>,
+  /// The cut's copy for Instagram, when one has been exported.
+  pub share: Option<Share>,
   pub cut_version: u32,
   /// Whether clip errors are kept apart from still errors (`Shot::clip_error`); projects saved
   /// before that are sorted out when they are opened.
@@ -432,6 +434,17 @@ pub struct SongProject {
   /// song is about to move on from them.
   #[serde(default)]
   pub lyric_versions: Vec<LyricVersion>,
+}
+
+/// The film's copy for uploading to Instagram.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Share {
+  pub path: PathBuf,
+  /// The cut it was made from: a newer cut leaves it out of date.
+  pub of: PathBuf,
+  pub kbps: u32,
+  pub bytes: u64,
 }
 
 /// The song on paper as it stood at some point.

@@ -8,7 +8,7 @@ use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 use super::workshop::Target;
 use super::{Action, Frames, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
-use crate::backend::local::song::cut::{Aspect, Format, Grade};
+use crate::backend::local::song::cut::{self, Aspect, Format, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace, SongLength};
 use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
 use crate::backend::local::song::writer::{Subject, Swatch};
@@ -1080,13 +1080,36 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
       ui.label(small(&format!("{unsynced} sung scene{} not lip-synced yet, so the mouth won't match there.", if unsynced == 1 { " is" } else { "s are" })));
     }
     error_line(ui, page.error.as_deref());
-    if run_button(ui, Icon::Film, if page.project.cut.is_some() { "Cut it again" } else { "Cut the film" }, Some("Free".to_owned()), blank == 0 && page.project.cut_shots(quality).is_some() && !busy, line.as_deref()) {
+    if run_button(ui, Icon::Film, if page.project.cut.is_some() { "Cut it again" } else { "Cut the film" }, Some("Free".to_owned()), blank == 0 && page.project.cut_shots(quality).is_some() && !busy, line.as_deref().filter(|line| !line.contains("Instagram"))) {
       actions.push(Action::Cut);
     }
     if let Some(cut) = &page.project.cut {
       ui.add_space(10.0);
       if secondary(ui, Icon::Folder, "Show the file", true) {
         actions.push(Action::Reveal(cut.clone()));
+      }
+    }
+    if let Some(cut) = &page.project.cut {
+      field(ui, "Instagram copy");
+      let share = page.project.share.as_ref().filter(|share| share.path.exists());
+      let current = share.is_some_and(|share| &share.of == cut);
+      if run_button(ui, Icon::Upload, if current { "Export it again" } else { "Export for Instagram" }, Some("Free".to_owned()), !busy, line.as_deref().filter(|line| line.contains("Instagram"))) {
+        actions.push(Action::Share);
+      }
+      match share {
+        Some(share) => {
+          let megabytes = share.bytes as f64 / 1_048_576.0;
+          ui.label(small(&format!("{megabytes:.0} MB at {:.1} Mbps{}", f64::from(share.kbps) / 1000.0, if current { "." } else { ", made from an earlier cut: export it again." })));
+          if secondary(ui, Icon::Folder, "Show the Instagram file", true) {
+            actions.push(Action::Reveal(share.path.clone()));
+          }
+        },
+        None => {
+          ui.label(small(&format!("A smaller copy of the film for uploading from your phone: H.264 encoded in two passes at a variable {} Mbps (peaks to {}), AAC sound, 1080 pixels across at most. A film already below that rate keeps its own. Encoding takes a few minutes.", cut::SHARE_KBPS / 1000, cut::SHARE_PEAK_KBPS / 1000)));
+        },
+      }
+      if format == Format::AsFilmed && page.project.aspect == Aspect::Wide {
+        ui.label(small("This film is wide, which Instagram shows small. Choose Reel or Feed under Format and cut it again for a tall one."));
       }
     }
     // The film as its parts, for changes the stages here don't make: reordering, dropping a

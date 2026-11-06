@@ -17,7 +17,7 @@ use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
 use crate::backend::local::song::plan::{self, Slot};
-use crate::backend::local::song::project::{CutOf, Made, Quality, Shot, ReferenceKind, SongProject, Stage, Summary, Track};
+use crate::backend::local::song::project::{CutOf, Made, Quality, Share, Shot, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{COST_PARTS, ClipJob, ReferenceJob, SongEstimate, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
 use crate::backend::local::song::cut::ShotMedia;
@@ -83,6 +83,8 @@ pub(super) enum Action {
     rewrite: bool,
   },
   OwnLyrics,
+  /// Export the cut film's copy for Instagram.
+  Share,
   /// Have the writer describe the ending frame of every scene that has none.
   Endings,
   /// Keep the lyrics as they stand among the earlier versions.
@@ -418,6 +420,11 @@ impl MusicVideoPage {
         self.progress(sync);
       },
       SongUpdate::Endings(endings) => self.project.set_endings(&endings),
+      SongUpdate::Shared { path, of, kbps, bytes } => {
+        self.project.in_library.insert(path.clone());
+        self.project.share = Some(Share { path, of, kbps, bytes });
+        notice = library("The Instagram copy is in your library");
+      },
       SongUpdate::Planned(scenes) => {
         let slots = std::mem::take(&mut self.pending_slots);
         self.project.set_plan(&slots, &scenes);
@@ -974,6 +981,11 @@ impl MusicVideoPage {
           self.project.quality = quality;
           self.player = None;
           self.touch_now();
+        }
+      },
+      Action::Share => {
+        if let Some(film) = self.project.cut.clone() {
+          self.start(backend, 0, "Encoding the Instagram copy on your Mac, in two passes\u{2026}", SongRequest::Share { film });
         }
       },
       Action::Cut => {
