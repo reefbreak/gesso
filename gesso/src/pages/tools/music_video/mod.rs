@@ -265,6 +265,7 @@ impl MusicVideoPage {
           take.clip = None;
           take.synced = None;
           shot.error = None;
+          shot.clip_error = None;
         }
         self.progress();
       },
@@ -274,7 +275,7 @@ impl MusicVideoPage {
           let take = shot.take_mut(quality);
           take.clip = Some(path);
           take.synced = None;
-          shot.error = None;
+          shot.clip_error = None;
         }
         if self.selected == Some(index) {
           self.player = None;
@@ -284,7 +285,7 @@ impl MusicVideoPage {
       SongUpdate::Synced { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
           shot.take_mut(quality).synced = Some(path);
-          shot.error = None;
+          shot.clip_error = None;
         }
         if self.selected == Some(index) {
           self.player = None;
@@ -293,8 +294,14 @@ impl MusicVideoPage {
       },
       SongUpdate::Vocals(path) => self.project.vocals = Some(path),
       SongUpdate::ShotFailed { index, message } => {
+        // A failed clip or lip sync belongs to the Shots stage; the scene's still is fine.
+        let on_clip = self.run.as_ref().is_some_and(|run| run.stage == Stage::Shots);
         if let Some(shot) = self.project.shots.get_mut(index) {
-          shot.error = Some(message);
+          if on_clip {
+            shot.clip_error = Some(message);
+          } else {
+            shot.error = Some(message);
+          }
         }
         self.progress();
       },
@@ -586,7 +593,7 @@ impl MusicVideoPage {
           if let Some(shot) = self.project.shots.get_mut(index) {
             if let Some(still) = shot.take(quality).still.clone() {
               shot.clip_version += 1;
-              shot.error = None;
+              shot.clip_error = None;
               shots.push(ClipJob { index, version: shot.clip_version, still, motion: shot.motion.clone(), seconds: shot.slot.seconds(), sing: shot.sing });
             }
           }
@@ -605,7 +612,7 @@ impl MusicVideoPage {
           if let Some(shot) = self.project.shots.get_mut(index) {
             if let Some(clip) = shot.take(quality).clip.clone() {
               shot.clip_version += 1;
-              shot.error = None;
+              shot.clip_error = None;
               shots.push(SyncJob { index, version: shot.clip_version, clip, start: shot.slot.start, end: shot.slot.end });
             }
           }

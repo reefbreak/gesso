@@ -757,7 +757,7 @@ fn shots(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect,
       if shot.sing {
         ui.label(small(if take.synced.is_some() { "Sung and lip-synced." } else { "Sung: not lip-synced yet." }));
       }
-      if let Some(error) = &shot.error {
+      if let Some(error) = &shot.clip_error {
         error_line(ui, Some(error));
       }
       let clip_seconds = u32::from(whole.unwrap_or_else(|| plan::clip_seconds(shot.slot.seconds())));
@@ -877,7 +877,8 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
         if quality == Quality::Final && take.still.is_none() && shot.draft.still.is_some() {
           tag(ui, image, "Draft");
         }
-        if let Some(error) = &shot.error {
+        // The storyboard shows what went wrong with a still; the Shots stage, with a clip.
+        if let Some(error) = if clips { &shot.clip_error } else { &shot.error } {
           failed_badge(ui, image, error);
         } else if clips && take.clip.is_some() {
           badge(ui, image, 0, Icon::Play, theme::ACCENT);

@@ -171,8 +171,12 @@ pub struct Shot {
   /// Count regenerations, so each one gets its own file name (the media cache keys on it).
   pub still_version: u32,
   pub clip_version: u32,
-  /// Why the last still, clip or lip sync failed.
+  /// Why the last still failed (shown on the storyboard).
   pub error: Option<String>,
+  /// Why the last clip or lip sync failed (shown on the Shots stage only: it says nothing about
+  /// the still).
+  #[serde(default)]
+  pub clip_error: Option<String>,
   /// Where the draft's media was kept before scenes had two passes; moved into `draft` on load.
   #[serde(rename = "still", skip_serializing)]
   old_still: Option<PathBuf>,
@@ -247,6 +251,10 @@ pub struct SongProject {
   pub shots: Vec<Shot>,
   pub cut: Option<PathBuf>,
   pub cut_version: u32,
+  /// Whether clip errors are kept apart from still errors (`Shot::clip_error`); projects saved
+  /// before that are sorted out when they are opened.
+  #[serde(default)]
+  errors_split: bool,
 }
 
 /// A saved project, for the list on the first stage.
@@ -262,7 +270,7 @@ pub struct Summary {
 impl SongProject {
   pub fn new() -> Self {
     let now = chrono::Utc::now().to_rfc3339();
-    Self { id: format!("{ID_PREFIX}{}", uuid::Uuid::new_v4().simple()), created_at: now.clone(), updated_at: now, ..Default::default() }
+    Self { id: format!("{ID_PREFIX}{}", uuid::Uuid::new_v4().simple()), created_at: now.clone(), updated_at: now, errors_split: true, ..Default::default() }
   }
 
   /// A saved project by id.
@@ -278,7 +286,13 @@ impl SongProject {
       if let Some(clip) = shot.old_clip.take() {
         shot.draft.clip.get_or_insert(clip);
       }
+      // One error used to cover stills and clips alike. On a scene that has its still, it came
+      // from the clip or the lip sync, so it belongs to the Shots stage.
+      if !project.errors_split && shot.has_still() && shot.clip_error.is_none() {
+        shot.clip_error = shot.error.take();
+      }
     }
+    project.errors_split = true;
     Some(project)
   }
 
@@ -573,6 +587,23 @@ mod tests {
     project.follow_edited_references();
     let brief = project.brief.as_ref().unwrap();
     assert_eq!((brief.character.description.as_str(), brief.venue.description.as_str(), brief.props[0].description.as_str()), ("Wiry, in a greatcoat.", "A brick tunnel.", "A brass compass."));
+  }
+
+  /// A project saved when one error covered stills and clips: the error on a scene that has its
+  /// still moves to the clip, and one on a scene without a still stays.
+  #[test]
+  fn old_clip_errors_leave_the_storyboard_when_a_project_is_opened() {
+    let dir = std::env::temp_dir().join(format!("gesso-project-{}", uuid::Uuid::new_v4()));
+    let mut project = SongProject::new();
+    project.errors_split = false;
+    project.shots = vec![Shot { draft: Take { still: Some(PathBuf::from("a.png")), ..Default::default() }, error: Some("Veo said no".into()), ..Default::default() }, Shot { error: Some("blocked".into()), ..Default::default() }];
+    project.idea = "x".into();
+    project.save(&dir).unwrap();
+    let opened = SongProject::load(&dir, &project.id).unwrap();
+    assert_eq!((opened.shots[0].error.as_deref(), opened.shots[0].clip_error.as_deref()), (None, Some("Veo said no")));
+    assert_eq!((opened.shots[1].error.as_deref(), opened.shots[1].clip_error.as_deref()), (Some("blocked"), None));
+    assert!(opened.errors_split);
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]
