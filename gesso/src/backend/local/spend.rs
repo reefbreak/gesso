@@ -24,10 +24,13 @@ pub enum Account {
   Bedrock,
   /// fal, with the user's own key (lip sync and vocal separation).
   Fal,
+  /// Google's Gemini API with the user's own key and its prepaid balance: songs, and pictures
+  /// Vertex had no capacity for.
+  GeminiApi,
 }
 
 impl Account {
-  pub const ALL: [Account; 4] = [Account::Vertex, Account::Bedrock, Account::Fal, Account::Jev];
+  pub const ALL: [Account; 5] = [Account::Vertex, Account::GeminiApi, Account::Bedrock, Account::Fal, Account::Jev];
 
   pub fn label(self) -> &'static str {
     match self {
@@ -35,6 +38,7 @@ impl Account {
       Account::Vertex => "Google Cloud",
       Account::Bedrock => "AWS Bedrock",
       Account::Fal => "fal",
+      Account::GeminiApi => "Gemini API key",
     }
   }
 }
@@ -63,11 +67,12 @@ pub struct Totals {
   pub vertex: f64,
   pub bedrock: f64,
   pub fal: f64,
+  pub gemini_api: f64,
 }
 
 impl Totals {
   pub fn total(&self) -> f64 {
-    self.jev + self.vertex + self.bedrock + self.fal
+    self.jev + self.vertex + self.bedrock + self.fal + self.gemini_api
   }
 
   pub fn of(&self, account: Account) -> f64 {
@@ -76,6 +81,7 @@ impl Totals {
       Account::Vertex => self.vertex,
       Account::Bedrock => self.bedrock,
       Account::Fal => self.fal,
+      Account::GeminiApi => self.gemini_api,
     }
   }
 
@@ -85,6 +91,7 @@ impl Totals {
       Account::Vertex => self.vertex += usd,
       Account::Bedrock => self.bedrock += usd,
       Account::Fal => self.fal += usd,
+      Account::GeminiApi => self.gemini_api += usd,
     }
   }
 }

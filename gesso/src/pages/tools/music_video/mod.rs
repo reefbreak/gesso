@@ -136,6 +136,23 @@ pub(super) enum Action {
   Reveal(PathBuf),
 }
 
+/// What every saved music video has cost, all time, by title: its counted calls plus the
+/// estimate for work done before they were counted. For the System Health page.
+pub fn video_costs(backend: &Backend) -> Vec<(String, f64)> {
+  let Some(library_dir) = backend.library_dir() else {
+    return Vec::new();
+  };
+  let counted = backend.song_costs();
+  SongProject::list(&library_dir)
+    .into_iter()
+    .map(|summary| {
+      let earlier = summary.earlier_cost.unwrap_or_else(|| price_made(backend, &summary.made));
+      let cost: f64 = counted.get(&summary.id).into_iter().flatten().chain(&earlier).map(|(_, usd)| usd).sum();
+      (summary.title, cost)
+    })
+    .collect()
+}
+
 /// Which of a scene's frames a run asked for `frames` draws in a pass: its opening still and
 /// its ending frame. The final pass redraws drafts, so each needs its draft. An ending frame is
 /// drawn to match the opening still, so it needs one (on file, or drawn first in the same run)
@@ -284,8 +301,7 @@ impl MusicVideoPage {
       self.endings_asked = true;
       actions.push(Action::Endings);
     }
-    let all = self.cost_of_all(env.backend);
-    self.rail(ui, rail, all, &mut actions);
+    self.rail(ui, rail, &mut actions);
     stages::show(self, ui, env, stage, panel, &mut actions);
     workshop::show(self, ui, &mut actions);
     for action in actions {
@@ -322,8 +338,9 @@ impl MusicVideoPage {
     COST_PARTS.iter().map(|part| (*part, counted.into_iter().flatten().chain(earlier).filter(|(name, _)| name == part).map(|(_, usd)| usd).sum::<f64>())).filter(|(_, usd)| *usd > 0.0).collect()
   }
 
-  /// The rail's cost block: this video's total, what it's made of, and every video together.
-  fn cost_block(&self, ui: &mut Ui, backend_all: f64) {
+  /// The rail's cost block: this video's total and what it's made of. Every video together is
+  /// on the System Health page.
+  fn cost_block(&self, ui: &mut Ui) {
     let earlier = self.project.earlier_cost.clone().unwrap_or_default();
     let parts = self.cost_of(&self.project.id, &earlier);
     let total: f64 = parts.iter().map(|(_, usd)| usd).sum();
@@ -342,10 +359,6 @@ impl MusicVideoPage {
     }
     ui.add_space(2.0);
     ui.label(egui::RichText::new(note).size(11.0).color(theme::FAINT));
-    ui.add_space(4.0);
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
-    ui.painter().text(row.left_center(), Align2::LEFT_CENTER, "All videos", FontId::new(11.5, theme::medium()), theme::SIDEBAR_INK);
-    ui.painter().text(row.right_center(), Align2::RIGHT_CENTER, usd(backend_all), FontId::new(11.5, theme::mono_bold()), theme::SIDEBAR_INK);
     ui.add_space(12.0);
   }
 
@@ -353,12 +366,6 @@ impl MusicVideoPage {
   pub(super) fn cost_of_saved(&self, backend: &Backend, summary: &Summary) -> f64 {
     let earlier = summary.earlier_cost.clone().unwrap_or_else(|| price_made(backend, &summary.made));
     self.cost_of(&summary.id, &earlier).iter().map(|(_, usd)| usd).sum()
-  }
-
-  /// Every video's cost together: the one on screen and the saved ones.
-  pub(super) fn cost_of_all(&self, backend: &Backend) -> f64 {
-    let open: f64 = self.cost_of(&self.project.id, self.project.earlier_cost.as_deref().unwrap_or_default()).iter().map(|(_, usd)| usd).sum();
-    open + self.recent.iter().flatten().filter(|summary| summary.id != self.project.id).map(|summary| self.cost_of_saved(backend, summary)).sum::<f64>()
   }
 
   /// Takes news from a run; `None` when it isn't this page's or needs no toast.
@@ -673,7 +680,7 @@ impl MusicVideoPage {
   }
 
   /// The left rail: the project's name and the stages, each with its state.
-  fn rail(&mut self, ui: &mut Ui, rect: Rect, all_videos: f64, actions: &mut Vec<Action>) {
+  fn rail(&mut self, ui: &mut Ui, rect: Rect, actions: &mut Vec<Action>) {
     ui.painter().rect(rect, theme::RADIUS, theme::PANEL, theme::hairline(), egui::StrokeKind::Inside);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(egui::Layout::top_down(egui::Align::Min)));
     let ui = &mut child;
@@ -731,7 +738,7 @@ impl MusicVideoPage {
       };
       ui.label(egui::RichText::new(hint).size(11.5).color(theme::FAINT));
       ui.add_space(12.0);
-      self.cost_block(ui, all_videos);
+      self.cost_block(ui);
       self.to_update(ui, actions);
       if let Some(line) = self.progress_line() {
         ui.label(egui::RichText::new(line).size(12.0).color(theme::MUTED));

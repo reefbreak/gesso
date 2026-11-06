@@ -159,7 +159,7 @@ fn stability_body(request: &StabilityRequest<'_>) -> Value {
 
 fn first_image(response: &Value) -> anyhow::Result<GeneratedFile> {
   if let Some(data) = response.get("images").and_then(Value::as_array).and_then(|images| images.first()).and_then(Value::as_str) {
-    return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: "png", usage: None });
+    return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: "png", usage: None, via_key: false });
   }
   let reason = response.get("finish_reasons").and_then(Value::as_array).and_then(|r| r.iter().find_map(Value::as_str)).unwrap_or("no image returned");
   anyhow::bail!("Stability returned no image: {reason}")

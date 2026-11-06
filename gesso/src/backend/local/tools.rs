@@ -216,7 +216,7 @@ pub fn extract_frames(video: &Path, times: &[f64]) -> anyhow::Result<Vec<Generat
   for (i, t) in times.iter().enumerate() {
     let frame = dir.path().join(format!("frame_{i}.png"));
     run_ffmpeg(&["-y", "-loglevel", "error", "-ss", &format!("{t:.3}"), "-i"], video, &["-frames:v", "1"], &frame)?;
-    out.push(GeneratedFile { bytes: std::fs::read(&frame)?, extension: "png", usage: None });
+    out.push(GeneratedFile { bytes: std::fs::read(&frame)?, extension: "png", usage: None, via_key: false });
   }
   Ok(out)
 }
@@ -227,7 +227,7 @@ pub fn trim_video(video: &Path, start: f64, end: f64) -> anyhow::Result<Generate
   let dir = tempfile::tempdir()?;
   let out = dir.path().join("trimmed.mp4");
   run_ffmpeg(&["-y", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"], video, &["-t", &format!("{:.3}", end - start), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"], &out)?;
-  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None, via_key: false })
 }
 
 /// A film as its parts, so it can be edited as one: the scenes in order, each a clip or a still
@@ -285,7 +285,7 @@ pub fn cut_film(film: &Film) -> anyhow::Result<GeneratedFile> {
   let dir = tempfile::tempdir()?;
   let out = dir.path().join("film.mp4");
   cut::assemble(&film.shots(), audio, film.size, film.grade, film.fades, &out)?;
-  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None, via_key: false })
 }
 
 /// Clips joined end to end at the first clip's frame size (others letterboxed), 24 fps. Sound is
@@ -322,7 +322,7 @@ pub fn join_videos(videos: &[PathBuf]) -> anyhow::Result<GeneratedFile> {
   args.push(out.to_string_lossy().into_owned());
   let status = video::command("ffmpeg").args(&args).stdout(Stdio::null()).stderr(Stdio::piped()).output()?;
   anyhow::ensure!(status.status.success(), "FFmpeg couldn't join the clips: {}", String::from_utf8_lossy(&status.stderr).lines().last().unwrap_or("unknown error"));
-  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None, via_key: false })
 }
 
 /// A clip made ready for Veo extension: MP4, 24 fps, 720p (landscape or portrait), at most 30 s.
@@ -401,12 +401,12 @@ pub fn assemble_omni(edited: Vec<Vec<u8>>, original: Option<&Path>) -> anyhow::R
     },
   };
   let Some(original) = original.filter(|o| has_audio(o)) else {
-    return Ok(GeneratedFile { bytes: std::fs::read(&joined)?, extension: "mp4", usage: None });
+    return Ok(GeneratedFile { bytes: std::fs::read(&joined)?, extension: "mp4", usage: None, via_key: false });
   };
   let out = dir.path().join("with_sound.mp4");
   let result = video::command("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&joined).arg("-i").arg(original).args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest", "-movflags", "+faststart"]).arg(&out).stdout(Stdio::null()).stderr(Stdio::piped()).output()?;
   anyhow::ensure!(result.status.success() && out.exists(), "FFmpeg couldn't put the sound back: {}", String::from_utf8_lossy(&result.stderr).lines().last().unwrap_or("unknown error"));
-  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None, via_key: false })
 }
 
 /// Gemini's request for an instruction edit: the image, the mask (if any), and the instruction.

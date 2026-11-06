@@ -152,13 +152,17 @@ impl VertexClient {
   /// Makes one image; an error explains a missing one (usually a safety block).
   pub async fn generate_image(&self, request: GeminiImageRequest<'_>) -> anyhow::Result<GeneratedFile> {
     let body = gemini_image_body(&request);
+    let mut via_key = false;
     let response = match (self.generate_content(request.model, &body, IMAGE_TIMEOUT).await, self.config.gemini_api_key.as_deref()) {
       // Vertex serves the image models from capacity shared between projects, with no quota of
       // their own to raise, and turns small projects away often. A Gemini API key has its own limit.
       (Err(err), Some(key)) if is_out_of_capacity(&err) => {
         info!("Vertex is out of capacity for {}; asking the Gemini API instead", request.model);
         match self.generate_content_with_key(key, request.model, &body, IMAGE_TIMEOUT).await {
-          Ok(response) => response,
+          Ok(response) => {
+            via_key = true;
+            response
+          },
           Err(other) => {
             warn!("The Gemini API couldn't make the picture either: {other:#}");
             return Err(err);
@@ -169,6 +173,7 @@ impl VertexClient {
     };
     let mut file = first_image(&response)?;
     file.usage = usage(&response);
+    file.via_key = via_key;
     Ok(file)
   }
 
@@ -380,9 +385,9 @@ impl VertexClient {
     let mut out = Vec::new();
     for video in videos {
       if let Some(data) = video.get("bytesBase64Encoded").and_then(Value::as_str) {
-        out.push(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None });
+        out.push(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None, via_key: false });
       } else if let Some(uri) = video.get("gcsUri").and_then(Value::as_str) {
-        out.push(GeneratedFile { bytes: self.download_gcs(uri).await?, extension: "mp4", usage: None });
+        out.push(GeneratedFile { bytes: self.download_gcs(uri).await?, extension: "mp4", usage: None, via_key: false });
       }
     }
     if out.is_empty() {
@@ -472,8 +477,8 @@ impl VertexClient {
   /// The video in a finished interaction: inline bytes or a `gs://` file.
   async fn omni_video(&self, interaction: &Value) -> anyhow::Result<GeneratedFile> {
     match find_video(interaction) {
-      Some(VideoOut::Inline(data)) => Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None }),
-      Some(VideoOut::Uri(uri)) if uri.starts_with("gs://") => Ok(GeneratedFile { bytes: self.download_gcs(&uri).await?, extension: "mp4", usage: None }),
+      Some(VideoOut::Inline(data)) => Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None, via_key: false }),
+      Some(VideoOut::Uri(uri)) if uri.starts_with("gs://") => Ok(GeneratedFile { bytes: self.download_gcs(&uri).await?, extension: "mp4", usage: None, via_key: false }),
       Some(VideoOut::Uri(uri)) => anyhow::bail!("Omni Flash returned a video at {uri}, which Gesso can't download"),
       None => anyhow::bail!("Omni Flash returned no video{}", interaction_error(interaction).map(|e| format!(": {e}")).unwrap_or_default()),
     }
@@ -485,7 +490,7 @@ impl VertexClient {
     let location = &self.config.gcp_video_location;
     let url = format!("{}v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict", self.host(location));
     let response = self.post_with_token(&url, &lyria_body(prompt, negative_prompt, count), IMAGE_TIMEOUT).await?;
-    let clips: Vec<GeneratedFile> = response.get("predictions").and_then(Value::as_array).into_iter().flatten().filter_map(|p| p.get("bytesBase64Encoded").and_then(Value::as_str)).filter_map(|data| BASE64.decode(data).ok()).map(|bytes| GeneratedFile { bytes, extension: "wav", usage: None }).collect();
+    let clips: Vec<GeneratedFile> = response.get("predictions").and_then(Value::as_array).into_iter().flatten().filter_map(|p| p.get("bytesBase64Encoded").and_then(Value::as_str)).filter_map(|data| BASE64.decode(data).ok()).map(|bytes| GeneratedFile { bytes, extension: "wav", usage: None, via_key: false }).collect();
     anyhow::ensure!(!clips.is_empty(), "Lyria returned no audio (the prompt may have been blocked)");
     Ok(clips)
   }
@@ -633,7 +638,8 @@ enum Route {
 
 /// The song and its text in a finished interaction.
 fn song_from(finished: &Value, model: &str, route: Route) -> anyhow::Result<Song> {
-  let file = song_audio(finished, route)?;
+  let mut file = song_audio(finished, route)?;
+  file.via_key = route == Route::GeminiApi;
   Ok(Song { file, text: interaction_text(finished), model: model.to_owned() })
 }
 
@@ -647,7 +653,7 @@ fn song_audio(interaction: &Value, route: Route) -> anyhow::Result<GeneratedFile
   let bytes = BASE64.decode(data)?;
   let mime = block.and_then(|b| b.get("mime_type")).and_then(Value::as_str).unwrap_or_default();
   let extension = if mime.contains("wav") || bytes.starts_with(b"RIFF") { "wav" } else { "mp3" };
-  Ok(GeneratedFile { bytes, extension, usage: None })
+  Ok(GeneratedFile { bytes, extension, usage: None, via_key: false })
 }
 
 /// Why a finished song has no audio: Google's error, Lyria's own words, or (a bare "completed"
@@ -799,7 +805,7 @@ fn first_image(response: &Value) -> anyhow::Result<GeneratedFile> {
       }
       if let Some(data) = part.pointer("/inlineData/data").and_then(Value::as_str) {
         let mime = part.pointer("/inlineData/mimeType").and_then(Value::as_str).unwrap_or("image/png");
-        return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: extension_for(mime), usage: None });
+        return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: extension_for(mime), usage: None, via_key: false });
       }
     }
   }

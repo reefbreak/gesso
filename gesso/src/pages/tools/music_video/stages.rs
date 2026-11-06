@@ -70,14 +70,7 @@ fn idea(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
     changed |= text_box(ui, "mv-idea", &mut page.project.idea, "A snarling big-beat anthem about the people who write prompts and wrangle agents all day\u{2026}", 6);
     ui.add_space(18.0);
     let others: Vec<_> = page.recent.iter().flatten().filter(|s| s.id != page.project.id).cloned().collect();
-    ui.horizontal(|ui| {
-      widgets::hud(ui, "Your videos", theme::FAINT);
-      if !others.is_empty() {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-          ui.label(egui::RichText::new(format!("{} spent on all videos so far", usd(page.cost_of_all(env.backend)))).size(11.5).family(theme::mono()).color(theme::MUTED));
-        });
-      }
-    });
+    widgets::hud(ui, "Your videos", theme::FAINT);
     ui.add_space(6.0);
     if others.is_empty() {
       ui.label(egui::RichText::new("Videos you start are saved as you go, and your other ones are listed here to come back to.").size(13.0).color(theme::FAINT));

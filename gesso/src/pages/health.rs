@@ -9,7 +9,9 @@ use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::local::health::{Check, HealthReport, Provider, State};
 use crate::backend::local::spend::{Account, ItemSpend, SpendSummary};
+use crate::backend::Backend;
 use crate::pages::common::Env;
+use crate::pages::tools::music_video::video_costs;
 use crate::shell::usd;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
@@ -22,6 +24,10 @@ const ROW_GAP: f32 = 10.0;
 const CONNECTION_COLUMNS: [f32; 4] = [0.12, 0.25, 0.25, 0.38];
 /// The cost table's columns: model, calls, today, this month, all time.
 const COST_COLUMNS: [f32; 5] = [0.44, 0.11, 0.15, 0.15, 0.15];
+/// The music video table's columns: video, all time.
+const VIDEO_COLUMNS: [f32; 2] = [0.8, 0.2];
+/// How often the music videos' costs are read again.
+const VIDEO_COSTS_EVERY_SECS: f64 = 5.0;
 /// Space between table columns.
 const COLUMN_GUTTER: f32 = 18.0;
 const GOOD: Color32 = Color32::from_rgb(0x4a, 0xde, 0x80);
@@ -53,6 +59,8 @@ impl HealthPage {
       let spend = env.backend.spend_report();
       // The headline figures first: they shouldn't sit under two dozen rows of connections.
       cost_totals(ui, spend.as_ref().map(|(summary, _)| summary));
+      ui.add_space(28.0);
+      cost_videos(ui, env.backend);
       ui.add_space(28.0);
       ui.label(widgets::heading("Model connections", 26.0));
       ui.add_space(14.0);
@@ -167,9 +175,10 @@ fn cost_totals(ui: &mut Ui, summary: Option<&SpendSummary>) {
     ui.label(egui::RichText::new("Costs are tracked in local mode, where Gesso runs on your own accounts.").size(13.0).color(theme::FAINT));
     return;
   };
-  let width = (ui.available_width() - ROW_GAP * 3.0) / 4.0;
-  ui.horizontal_top(|ui| {
-    ui.spacing_mut().item_spacing.x = ROW_GAP;
+  // Six cards, three to a row.
+  let width = (ui.available_width() - ROW_GAP * 2.0) / 3.0 - 1.0;
+  ui.horizontal_wrapped(|ui| {
+    ui.spacing_mut().item_spacing = vec2(ROW_GAP, ROW_GAP);
     total_card(ui, width, "All accounts", summary.today.total(), summary.month.total(), summary.all_time.total());
     for account in Account::ALL {
       total_card(ui, width, account.label(), summary.today.of(account), summary.month.of(account), summary.all_time.of(account));
@@ -212,6 +221,49 @@ fn cost_models(ui: &mut Ui, items: Option<&[ItemSpend]>) {
       }
     });
   }
+}
+
+/// What each music video has cost, all time, and all of them together. Read again every few
+/// seconds: it means opening every video's project file.
+fn cost_videos(ui: &mut Ui, backend: &Backend) {
+  let now = ui.input(|i| i.time);
+  let id = egui::Id::new("health-video-costs");
+  let cached: Option<(f64, Vec<(String, f64)>)> = ui.data(|data| data.get_temp(id));
+  let videos = match cached.filter(|(read, _)| now - read < VIDEO_COSTS_EVERY_SECS) {
+    Some((_, videos)) => videos,
+    None => {
+      let videos = video_costs(backend);
+      ui.data_mut(|data| data.insert_temp(id, (now, videos.clone())));
+      videos
+    },
+  };
+  ui.label(widgets::heading("Costs by music video", 26.0));
+  ui.add_space(4.0);
+  ui.label(egui::RichText::new("All time, for each video made on the Music Video page. Work done before Gesso counted each video's calls is an estimate from the files in its folder.").size(13.5).color(theme::MUTED));
+  ui.add_space(8.0);
+  if videos.is_empty() {
+    ui.label(egui::RichText::new("No music videos yet.").size(13.0).color(theme::FAINT));
+    return;
+  }
+  table(ui, |ui| {
+    header_row(ui, &VIDEO_COLUMNS, &["Video", "All time"], &[1]);
+    for (title, cost) in &videos {
+      divider(ui);
+      row(ui, &VIDEO_COLUMNS, |ui, column| match column {
+        0 => {
+          ui.label(egui::RichText::new(title).size(12.5).color(theme::INK));
+        },
+        _ => number(ui, money(*cost), theme::MUTED),
+      });
+    }
+    divider(ui);
+    row(ui, &VIDEO_COLUMNS, |ui, column| match column {
+      0 => {
+        ui.label(egui::RichText::new(if videos.len() == 1 { "Total".to_owned() } else { format!("All {} videos", videos.len()) }).size(12.5).family(theme::semibold()).color(theme::INK));
+      },
+      _ => number(ui, money(videos.iter().map(|(_, cost)| cost).sum()), theme::INK),
+    });
+  });
 }
 
 /// An account's three totals.

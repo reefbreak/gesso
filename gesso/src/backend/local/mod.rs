@@ -80,6 +80,9 @@ pub struct GeneratedFile {
   pub extension: &'static str,
   /// Gemini's reported token counts, for the spend meter.
   pub usage: Option<GeminiUsage>,
+  /// Made through the Gemini API key instead of the Google Cloud project, so it is billed to
+  /// the key's prepaid balance.
+  pub via_key: bool,
 }
 
 pub struct LocalEngine {
@@ -323,7 +326,9 @@ impl LocalEngine {
         let cost: f64 = files.iter().filter_map(|f| self.prices.gemini_call(upstream, f.usage, size)).sum();
         let image_tokens: u64 = files.iter().filter_map(|f| f.usage.and_then(|u| u.image_tokens)).sum();
         let basis = if image_tokens > 0 { format!("{} image{} \u{b7} {} image tokens", files.len(), plural(files.len()), group(image_tokens)) } else { format!("{} image{} at {} list price", files.len(), plural(files.len()), size.unwrap_or("1K")) };
-        (files, cost, basis, Account::Vertex, upstream)
+        // Pictures Vertex had no capacity for come from the Gemini API key and its balance.
+        let account = if !files.is_empty() && files.iter().all(|file| file.via_key) { Account::GeminiApi } else { Account::Vertex };
+        (files, cost, basis, account, upstream)
       },
       Route::Stability { model: upstream } => {
         let calls = (0..request.batch_count).map(|_| self.bedrock.generate_image(StabilityRequest { model: upstream, prompt: &request.prompt, aspect_ratio: aspect, image: images.first() }));
@@ -385,7 +390,7 @@ impl LocalEngine {
           let _ = tx.send(Event::Toast { error: false, message: "Downloading the background-removal model (179 MB, once)\u{2026}".to_owned() });
         }
         let png = self.remover.remove(&read(image)?).await?;
-        (vec![GeneratedFile { bytes: png, extension: "png", usage: None }], 0.0, "ISNet on your Mac, free".to_owned(), MediaClass::Image)
+        (vec![GeneratedFile { bytes: png, extension: "png", usage: None, via_key: false }], 0.0, "ISNet on your Mac, free".to_owned(), MediaClass::Image)
       },
       ToolRequest::RemoveBackground { image, engine: BackgroundEngine::Bedrock } => {
         let body = serde_json::json!({ "image": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, read(image)?), "output_format": "png" });
@@ -409,7 +414,7 @@ impl LocalEngine {
       },
       ToolRequest::SaveImage { image } => {
         let bytes = read(image)?;
-        (vec![GeneratedFile { bytes, extension: "png", usage: None }], 0.0, "Rendered on your Mac, free".to_owned(), MediaClass::Image)
+        (vec![GeneratedFile { bytes, extension: "png", usage: None, via_key: false }], 0.0, "Rendered on your Mac, free".to_owned(), MediaClass::Image)
       },
       ToolRequest::TrimVideo { video, start, end } => {
         let (video, start, end) = (video.clone(), *start, *end);
@@ -713,7 +718,7 @@ mod tests {
 
   #[test]
   fn a_partly_failed_batch_keeps_its_images() {
-    let ok = || Ok(GeneratedFile { bytes: vec![1], extension: "png", usage: None });
+    let ok = || Ok(GeneratedFile { bytes: vec![1], extension: "png", usage: None, via_key: false });
     assert_eq!(collect_batch(vec![ok(), Err(anyhow::anyhow!("blocked"))]).unwrap().len(), 1);
     assert!(collect_batch(vec![Err(anyhow::anyhow!("blocked"))]).is_err());
   }

@@ -263,12 +263,17 @@ runs, and leaves everything it made editable before the next stage uses it.
   moment later ("Input blocked"). Gesso resubmits once, then without the directions found in the
   lyrics, then with the lyrics as typed, before reporting the error. Refusals aren't billed.
 - **Cost per video.** The left rail shows what the open video has cost so far, split into
-  writing and planning, the song, reference images, scene images, clips and lip sync, with the
-  total for all videos under it; the list on the Idea stage shows each saved video's cost. Every
-  call is counted towards its video as it returns, at list prices (see `spend.json`). A video
-  started before this was counted is priced once from the files in its folder, every version
-  included, and that part is marked as an estimate: it leaves out the writer's calls and anything
-  that failed or was deleted, and prices clips at the default model for their pass.
+  writing and planning, the song, reference images, scene images, clips and lip sync; the list on
+  the Idea stage shows each saved video's cost. The all-time total for all videos, with a row per
+  video, is on System Health. Every call is counted towards its video as it returns, at list
+  prices (see `spend.json`). A video started before this was counted is priced once from the
+  files in its folder, every version included, and that part is marked as an estimate: it leaves
+  out the writer's calls and anything that failed or was deleted, and prices clips at the default
+  model for their pass.
+- **The Gemini API key is an account of its own.** Songs made through the key, and pictures it
+  makes when Vertex has no capacity, are charged to "Gemini API key" on System Health and in the
+  top bar's spend list, apart from Google Cloud, so the key's prepaid balance can be watched.
+  The price per call is the same on both.
 - **Draft, then final.** The Quality switch in the left rail picks the pass. **Draft** uses the
   cheap, fast models (Nano Banana 2 at 1K, Veo 3.1 Lite) to settle the direction. **Final** runs
   the same scenes again with the best ones: each still is redrawn by Nano Banana Pro at 2K with

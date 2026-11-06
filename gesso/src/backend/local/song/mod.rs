@@ -711,7 +711,7 @@ impl SongRun<'_> {
       (None, None) => anyhow::bail!("The song wasn't made"),
     };
     info!("Song made by {}", song.model);
-    self.charge(Account::Vertex, self.engine.prices.lyria_song(&song.model), &song.model);
+    self.charge(google_account(&song.file), self.engine.prices.lyria_song(&song.model), &song.model);
     let path = save(dir, &format!("song_v{version}.{}", song.file.extension), &song.file.bytes)?;
     self.add_to_library(&path, &song.file.bytes, MediaClass::Audio);
     self.send(SongUpdate::Track { path, model: song.model, sung: song.text });
@@ -777,7 +777,7 @@ impl SongRun<'_> {
       ReferenceKind::Prop => PROP_RATIO,
     };
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(ratio), image_size: Some(STILL_SIZE) })).await?;
-    self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
+    self.charge(google_account(&file), self.engine.prices.gemini_call(model, file.usage, Some(STILL_SIZE)).unwrap_or(0.0), model);
     let file = in_keeping(file, look);
     let path = save_picture(dir, &format!("{}_{:02}_v{}.{}", job.kind.label(), job.index + 1, job.version, file.extension), &file.bytes)?;
     self.add_to_library(&path, &file.bytes, MediaClass::Image);
@@ -798,7 +798,7 @@ impl SongRun<'_> {
     let prompt = still_prompt(design, &job.image, &kinds, guide.is_some(), opening.is_some());
     let images: Vec<RefImage> = guide.into_iter().chain(opening).chain(references.iter().map(|(_, image)| image.clone())).collect();
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
-    self.charge(Account::Vertex, self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
+    self.charge(google_account(&file), self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
     let file = in_keeping(file, &design.look);
     let path = save_picture(dir, &format!("shot_{:03}_{}{}_v{}.{}", job.index + 1, quality.tag(), if job.ending { "_end" } else { "" }, job.version, file.extension), &file.bytes)?;
     self.add_to_library(&path, &file.bytes, MediaClass::Image);
@@ -957,6 +957,12 @@ impl Wording {
   }
 }
 
+/// Which of the user's Google accounts paid for a file: the Cloud project, or the Gemini API
+/// key's prepaid balance when Vertex had no capacity and the key was used.
+fn google_account(file: &GeneratedFile) -> Account {
+  if file.via_key { Account::GeminiApi } else { Account::Vertex }
+}
+
 /// Whether a provider refused the prompt itself (nothing was made or billed).
 fn is_blocked(err: &anyhow::Error) -> bool {
   let message = format!("{err:#}").to_lowercase();
@@ -1025,7 +1031,7 @@ fn in_keeping(file: GeneratedFile, look: &str) -> GeneratedFile {
     Ok(out)
   });
   match grey {
-    Ok(bytes) => GeneratedFile { bytes, extension: "png", usage: file.usage },
+    Ok(bytes) => GeneratedFile { bytes, extension: "png", usage: file.usage, via_key: file.via_key },
     Err(err) => {
       warn!("Couldn't take the colour out of a picture: {err:#}");
       file
@@ -1667,6 +1673,9 @@ mod tests {
       assert!(updates.iter().any(|u| matches!(u, SongUpdate::Track { model, path, .. } if model == "lyria-3.5" && std::fs::read(path).unwrap() == [1, 2, 3])), "{updates:?}");
       // The song is counted towards the video it was made for.
       assert_eq!(engine.spend_by_project().get("song_a"), Some(&vec![("Song".to_owned(), 0.08)]));
+      // It came through the key, so it is the key's balance that paid, not the Cloud project.
+      let all_time = engine.spend.summary().all_time;
+      assert_eq!((all_time.gemini_api, all_time.vertex), (0.08, 0.0));
       let requests = requests.lock().unwrap();
       assert_eq!(requests[0].0, "POST /v1beta/interactions HTTP/1.1");
       let body: Value = serde_json::from_str(&requests[0].1).unwrap();
@@ -1746,7 +1755,7 @@ mod tests {
       assert!(!is_monochrome("neon colour, wet streets"));
       let mut red = Vec::new();
       image::RgbImage::from_pixel(4, 4, image::Rgb([220, 20, 20])).write_to(&mut std::io::Cursor::new(&mut red), image::ImageFormat::Png).unwrap();
-      let kept = in_keeping(GeneratedFile { bytes: red.clone(), extension: "png", usage: None }, "neon colour");
+      let kept = in_keeping(GeneratedFile { bytes: red.clone(), extension: "png", usage: None, via_key: false }, "neon colour");
       assert_eq!(kept.bytes, red, "a colour look is left alone");
     }
 
@@ -1754,7 +1763,7 @@ mod tests {
     async fn a_colour_picture_for_a_black_and_white_film_loses_its_colour() {
       let mut red = Vec::new();
       image::RgbImage::from_pixel(4, 4, image::Rgb([220, 20, 20])).write_to(&mut std::io::Cursor::new(&mut red), image::ImageFormat::Jpeg).unwrap();
-      let grey = in_keeping(GeneratedFile { bytes: red, extension: "jpg", usage: None }, "grainy black and white");
+      let grey = in_keeping(GeneratedFile { bytes: red, extension: "jpg", usage: None, via_key: false }, "grainy black and white");
       assert_eq!(grey.extension, "png");
       let pixel = image::load_from_memory(&grey.bytes).unwrap().to_rgb8().get_pixel(1, 1).0;
       assert!(pixel[0] == pixel[1] && pixel[1] == pixel[2], "{pixel:?}");
