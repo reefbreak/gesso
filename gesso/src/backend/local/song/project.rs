@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::beats::BeatGrid;
 use super::cut::{Aspect, CutShot, Grade, ShotMedia};
-use super::plan::{Pace, Section, Slot};
+use super::plan::{self, Pace, Section, Slot};
 use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 
 /// Under the local library's folder.
@@ -293,6 +293,7 @@ impl SongProject {
       }
     }
     project.errors_split = true;
+    project.place_lyrics();
     Some(project)
   }
 
@@ -387,6 +388,27 @@ impl SongProject {
       .collect();
     self.references = references;
     self.brief = Some(brief);
+  }
+
+  /// Puts each sung line on the scene it is sung over, leaving the scenes, their stills and their
+  /// clips as they are: by the lines' timings when listening to the track gave any, else by the
+  /// sections, when planning again would still cut the same scenes.
+  pub fn place_lyrics(&mut self) {
+    let mut slots: Vec<Slot> = self.shots.iter().map(|shot| shot.slot.clone()).collect();
+    if self.lines.iter().any(|line| !line.text.trim().is_empty()) {
+      plan::place_lines(&mut slots, &self.lines);
+    } else if let Some(grid) = &self.grid {
+      let fresh = plan::slots(grid, &self.sections, self.pace);
+      if fresh.len() != slots.len() {
+        return;
+      }
+      slots = fresh;
+    } else {
+      return;
+    }
+    for (shot, slot) in self.shots.iter_mut().zip(slots) {
+      shot.slot.lyric = slot.lyric;
+    }
   }
 
   /// After the brief was edited by hand: the references take its names and wording and keep their
@@ -603,6 +625,23 @@ mod tests {
     assert_eq!((opened.shots[0].error.as_deref(), opened.shots[0].clip_error.as_deref()), (None, Some("Veo said no")));
     assert_eq!((opened.shots[1].error.as_deref(), opened.shots[1].clip_error.as_deref()), (Some("blocked"), None));
     assert!(opened.errors_split);
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  /// A project whose sung lines sit a scene late is put right when it is opened, by the lines'
+  /// timings, and keeps its stills.
+  #[test]
+  fn late_lyrics_are_moved_to_their_scenes_when_a_project_is_opened() {
+    let dir = std::env::temp_dir().join(format!("gesso-project-{}", uuid::Uuid::new_v4()));
+    let mut project = SongProject::new();
+    project.idea = "x".into();
+    let scene = |index: usize, start: f64, lyric: &str| Shot { slot: Slot { lyric: lyric.to_owned(), ..slot(index, start, start + 4.0) }, draft: Take { still: Some(PathBuf::from(format!("{index}.png"))), ..Default::default() }, ..Default::default() };
+    project.shots = vec![scene(0, 0.0, ""), scene(1, 4.0, "one"), scene(2, 8.0, "two")];
+    project.lines = vec![TimedLine { time: 1.0, text: "one".into() }, TimedLine { time: 5.0, text: "two".into() }];
+    project.save(&dir).unwrap();
+    let opened = SongProject::load(&dir, &project.id).unwrap();
+    assert_eq!(opened.shots.iter().map(|s| s.slot.lyric.as_str()).collect::<Vec<_>>(), ["one", "two", ""]);
+    assert!(opened.shots.iter().all(|s| s.draft.still.is_some()), "nothing but the words moves");
     let _ = std::fs::remove_dir_all(dir);
   }
 

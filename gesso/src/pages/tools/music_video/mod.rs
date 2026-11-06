@@ -596,7 +596,9 @@ impl MusicVideoPage {
         let (Some(grid), Some(brief), Some(style)) = (&self.project.grid, self.project.brief.clone(), self.project.visual.clone()) else {
           return;
         };
-        let slots = plan::slots(grid, &self.project.sections, self.project.pace);
+        let mut slots = plan::slots(grid, &self.project.sections, self.project.pace);
+        // Each line goes on the scene it is sung over, where listening to the track timed them.
+        plan::place_lines(&mut slots, &self.project.lines);
         self.pending_slots = slots.clone();
         self.start(backend, 0, &format!("Writing {} scenes\u{2026}", slots.len()), SongRequest::Plan { brief, style, slots, lip_sync: self.project.lip_sync, writer: self.writer });
       },

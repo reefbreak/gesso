@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::beats::BeatGrid;
+use super::writer::TimedLine;
 
 /// Veo makes clips of these lengths; a shot is generated at the shortest that covers it.
 pub const CLIP_SECONDS: [u16; 3] = [4, 6, 8];
@@ -115,6 +116,9 @@ impl Slot {
   }
 }
 
+/// How close to a cut a line can start and still count as sung over the next shot.
+const LINE_LEAD: f64 = 0.3;
+
 /// The shortest clip length that covers a shot of `seconds`.
 pub fn clip_seconds(seconds: f64) -> u16 {
   CLIP_SECONDS.into_iter().find(|c| f64::from(*c) + 0.01 >= seconds).unwrap_or(CLIP_SECONDS[CLIP_SECONDS.len() - 1])
@@ -137,10 +141,14 @@ pub fn slots(grid: &BeatGrid, sections: &[Section], pace: Pace) -> Vec<Slot> {
     let cuts = cuts_within(grid, start, end, hold);
     let lines: Vec<&str> = section.lyrics.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let count = cuts.len() - 1;
-    for (n, pair) in cuts.windows(2).enumerate() {
-      // The section's lines are shared out across its shots in order.
-      let (from, to) = (n * lines.len() / count, (n + 1) * lines.len() / count);
-      out.push(Slot { index: 0, start: pair[0], end: pair[1], section: section.name.clone(), energy: section.energy, lyric: lines[from..to].join(" / ") });
+    // Without timings, the section's lines are shared out across its shots in order, starting at
+    // its first shot: with fewer lines than shots, it is the last shots that go without.
+    let mut shared = vec![Vec::new(); count];
+    for (k, line) in lines.iter().enumerate() {
+      shared[k * count / lines.len()].push(*line);
+    }
+    for (pair, lines) in cuts.windows(2).zip(shared) {
+      out.push(Slot { index: 0, start: pair[0], end: pair[1], section: section.name.clone(), energy: section.energy, lyric: lines.join(" / ") });
     }
   }
   if out.is_empty() && grid.duration > 0.0 {
@@ -150,6 +158,28 @@ pub fn slots(grid: &BeatGrid, sections: &[Section], pace: Pace) -> Vec<Slot> {
     slot.index = index;
   }
   out
+}
+
+/// Puts each sung line on the shot it is sung over, by the time it starts (`lines` from listening
+/// to the track), replacing the guess `slots` makes from the sections. A line that starts just
+/// before a cut is mostly sung after it, so it goes to the next shot. Without timings the guess
+/// stays.
+pub fn place_lines(slots: &mut [Slot], lines: &[TimedLine]) {
+  if slots.is_empty() || lines.iter().all(|line| line.text.trim().is_empty()) {
+    return;
+  }
+  for slot in slots.iter_mut() {
+    slot.lyric.clear();
+  }
+  let last = slots.len() - 1;
+  for line in lines.iter().filter(|line| !line.text.trim().is_empty()) {
+    let at = line.time + LINE_LEAD;
+    let slot = &mut slots[slots.iter().position(|slot| at < slot.end).unwrap_or(last)];
+    if !slot.lyric.is_empty() {
+      slot.lyric.push_str(" / ");
+    }
+    slot.lyric.push_str(line.text.trim());
+  }
 }
 
 /// Sections guessed from the lyrics' `[Verse]`-style tags, sized by how many lines each has. Used
@@ -296,6 +326,30 @@ mod tests {
       }
       // The section change at 30.2 s moves to the bar start at 30 s.
       assert!(slots.iter().any(|s| s.section == "Chorus" && (s.start - 30.0).abs() < 1e-6));
+    }
+
+    /// With fewer lines than shots, the lines start on the section's first shot. (They used to
+    /// start on its second, so every line sat one shot late.)
+    #[test]
+    fn a_sections_lines_start_on_its_first_shot() {
+      let grid = BeatGrid::steady(120.0, 16.0);
+      let mut verse = section("Verse", 0.0, 16.0, Energy::Medium);
+      verse.lyrics = "one\ntwo\nthree".to_owned();
+      let slots = slots(&grid, &[verse], Pace::Steady);
+      assert_eq!(slots.iter().map(|s| s.lyric.as_str()).collect::<Vec<_>>(), ["one", "two", "three", ""]);
+    }
+
+    #[test]
+    fn timed_lines_go_on_the_shot_they_are_sung_over() {
+      let slot = |start: f64, end: f64| Slot { index: 0, start, end, section: "Verse".to_owned(), energy: Energy::Medium, lyric: "a guess".to_owned() };
+      let line = |time: f64, text: &str| TimedLine { time, text: text.to_owned() };
+      let mut slots = vec![slot(0.0, 4.0), slot(4.0, 8.0), slot(8.0, 12.0)];
+      place_lines(&mut slots, &[line(0.5, "first"), line(2.0, "second"), line(7.8, "just before the cut"), line(9.0, " "), line(40.0, "after the end")]);
+      assert_eq!(slots.iter().map(|s| s.lyric.as_str()).collect::<Vec<_>>(), ["first / second", "", "just before the cut / after the end"]);
+      // No timings: the guess from the sections stays.
+      let mut guessed = vec![slot(0.0, 4.0)];
+      place_lines(&mut guessed, &[]);
+      assert_eq!(guessed[0].lyric, "a guess");
     }
 
     #[test]
