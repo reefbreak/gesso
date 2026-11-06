@@ -169,7 +169,12 @@ runs, and leaves everything it made editable before the next stage uses it.
   little to go on. The Face reference is a head-and-shoulders portrait drawn from the sheet, so it
   is the same person, and it goes with every still along with the sheet, the location and up to
   two props. It stays through edits to the brief and goes only when a rewritten brief replaces the
-  performer. A picture of your own can be uploaded to the card instead.
+  performer. It works the other way too: upload a head shot to the Face card and it leads. The
+  sheet's three poses are then drawn of that person (the card's redraw button, or the bulk draw),
+  with build and clothes from the description; drawing everything again leaves the head shot
+  alone, and it stays even when a rewritten brief replaces the performer's description. With a
+  drawn head shot, the person button on the sheet's card makes it lead. Uploading a sheet, or
+  redrawing the head shot from the sheet, hands the lead back to the sheet.
 - **Everything a video makes is in the library.** Every version of every asset goes in as it is
   made, draft and final alike: the song, the vocal stem, reference images, stills, clips,
   lip-synced clips and each cut, plus tracks and pictures you bring in. Each is titled with the

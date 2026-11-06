@@ -552,6 +552,9 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   let mut download = None;
   page.reference_changes.resize(page.project.references.len(), String::new());
   let has_sheet = page.project.references.iter().any(|r| r.kind == ReferenceKind::Look && r.image.is_some());
+  let has_face = page.project.references.iter().any(|r| r.kind == ReferenceKind::Face && r.image.is_some());
+  let face_leads = page.project.leading_face().is_some();
+  let mut from_face = None;
   column_wide(ui, stage, "references", |ui| {
     heading(ui, Stage::References, "Reference images", "The performer, the location and the signature details. Every scene is drawn from these, so they stay the same from shot to shot.");
     if page.project.references.is_empty() {
@@ -580,18 +583,28 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
             // The name has a line to itself, cut short if need be: beside the buttons a long one ran under them.
             ui.add(egui::Label::new(egui::RichText::new(&reference.name).size(14.0).family(theme::semibold()).color(theme::INK)).truncate()).on_hover_text(&reference.name);
             ui.horizontal(|ui| {
-              ui.label(egui::RichText::new(kind_title(reference.kind)).size(11.0).family(theme::mono()).color(theme::FAINT));
+              let kind = match (reference.kind, face_leads) {
+                (ReferenceKind::Face, true) => format!("{} \u{b7} leads", kind_title(reference.kind)),
+                (ReferenceKind::Look, true) => format!("{} \u{b7} from the face", kind_title(reference.kind)),
+                (kind, _) => kind_title(kind).to_owned(),
+              };
+              ui.label(egui::RichText::new(kind).size(11.0).family(theme::mono()).color(theme::FAINT));
               ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                   let draw_tip = match (reference.kind, has_sheet) {
                     (ReferenceKind::Face, true) => "Draw the head shot from the performer's picture, so it is the same person",
-                    (ReferenceKind::Face, false) => "Draw or upload the performer's picture first: the head shot is made from it",
+                    (ReferenceKind::Face, false) => "Upload a head shot here, or draw or upload the performer's picture first and the head shot is made from it",
+                    (ReferenceKind::Look, _) if face_leads => "Draw the performer's three poses again from the head shot",
                     _ => "Draw this one again from its description",
                   };
                   // Without the sheet a head shot would be someone new.
                   let can_draw = reference.kind != ReferenceKind::Face || has_sheet;
                   if ui.add_enabled_ui(can_draw, |ui| widgets::ghost(ui, Icon::RotateCw, None, draw_tip, false).clicked()).inner {
                     redraw = Some(index);
+                  }
+                  // The other direction: the sheet drawn from a head shot that is there.
+                  if reference.kind == ReferenceKind::Look && has_face && !face_leads && widgets::ghost(ui, Icon::User, None, "Draw the three poses from the head shot, so the sheet is that person. The head shot then leads.", false).clicked() {
+                    from_face = Some(index);
                   }
                   if widgets::ghost(ui, Icon::Upload, None, "Upload a picture: your own, or this one after editing it elsewhere", false).clicked() {
                     upload = Some(index);
@@ -632,6 +645,9 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
   if let Some(index) = redraw {
     actions.push(Action::References(vec![index]));
   }
+  if let Some(index) = from_face {
+    actions.push(Action::SheetFromFace(index));
+  }
   if let Some(index) = download {
     let reference = &page.project.references[index];
     let extension = reference.image.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str()).unwrap_or("png");
@@ -644,16 +660,18 @@ fn references(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: 
     actions.push(Action::UploadReference(upload.unwrap_or_default(), file));
   }
   let missing: Vec<usize> = page.project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
-  let all: Vec<usize> = (0..page.project.references.len()).collect();
+  // A head shot that leads is the performer's own picture: drawing everything leaves it be.
+  let all: Vec<usize> = (0..page.project.references.len()).filter(|index| !(face_leads && page.project.references[*index].kind == ReferenceKind::Face)).collect();
+  let all_count = all.len();
   let targets = if missing.is_empty() { all } else { missing };
   let cost = env.backend.estimate_song(&SongEstimate::Stills { count: targets.len(), pro: page.pro(), large: false });
   let line = page.progress_line().filter(|_| page.running_here());
   let any = page.project.references.iter().any(|r| r.image.is_some());
   let pro = page.pro();
-  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, work on the description with AI, write a change to the picture, or save the picture, edit it in another app and upload it back to the same card. The Face card is a head shot drawn from the performer's picture, for close-ups. Names, and adding or removing props, are on the Creative Brief.", |ui| {
+  panel(ui, panel_rect, "Reference Images", "For each one: draw it from its description, work on the description with AI, write a change to the picture, or save the picture, edit it in another app and upload it back to the same card. The performer has two pictures, the three-pose sheet and the Face head shot for close-ups, and either can be made from the other: draw the head shot from the sheet, or upload a head shot and the sheet is drawn from it. Names, and adding or removing props, are on the Creative Brief.", |ui| {
     picture_model(ui, pro);
     error_line(ui, page.error.as_deref());
-    let label = if any && targets.len() == page.project.references.len() { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };
+    let label = if any && targets.len() == all_count { format!("Draw all {} again", targets.len()) } else { format!("Draw {} image{}", targets.len(), plural(targets.len())) };
     if run_button(ui, Icon::Image, &label, cost.map(estimate), !targets.is_empty() && !busy, line.as_deref()) {
       actions.push(Action::References(targets.clone()));
     }

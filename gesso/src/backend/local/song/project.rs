@@ -108,6 +108,9 @@ pub struct Reference {
   /// Counts regenerations, so each one gets its own file name (the media cache keys on it).
   pub version: u32,
   pub error: Option<String>,
+  /// For the head shot: it is the performer's likeness and the sheet is drawn from it, not the
+  /// other way round. Set when a head shot is uploaded or chosen to lead.
+  pub leads: bool,
 }
 
 /// Which pass over the pictures and clips is being worked on. The scenes, their wording and
@@ -805,14 +808,28 @@ impl SongProject {
         let old = self.references.iter().find(|r| r.kind == kind && r.name == subject.name);
         let version = old.map_or(0, |r| r.version);
         let image = old.filter(|r| r.description == subject.description).and_then(|r| r.image.clone());
-        Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image, version, error: None }
+        Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image, version, ..Default::default() }
       })
       .collect();
-    // The head shot is of the sheet's performer: it stays only while the sheet does.
+    // A head shot drawn from the sheet is of the sheet's performer: it stays only while the
+    // sheet does. One that leads is the performer, whatever the brief now says about them.
     let face = self.references.iter().find(|r| r.kind == ReferenceKind::Face).cloned();
     self.references = references;
     self.brief = Some(brief);
-    self.keep_face(face.filter(|_| self.references.iter().any(|r| r.kind == ReferenceKind::Look && r.image.is_some())));
+    self.keep_face(face.filter(|face| (face.leads && face.image.is_some()) || self.references.iter().any(|r| r.kind == ReferenceKind::Look && r.image.is_some())));
+  }
+
+  /// The head shot the performer's sheet is drawn from, when the head shot leads.
+  pub fn leading_face(&self) -> Option<PathBuf> {
+    self.references.iter().find(|r| r.kind == ReferenceKind::Face && r.leads).and_then(|r| r.image.clone())
+  }
+
+  /// Says which of the performer's two pictures the other follows: the head shot (`true`), as
+  /// when one is uploaded, or the sheet.
+  pub fn set_face_leads(&mut self, leads: bool) {
+    for reference in self.references.iter_mut().filter(|r| r.kind == ReferenceKind::Face) {
+      reference.leads = leads;
+    }
   }
 
   /// Gives the performer a head-shot reference beside their sheet: `kept` (the one there was) with
@@ -825,7 +842,7 @@ impl SongProject {
     let (name, description) = (self.references[sheet].name.clone(), self.references[sheet].description.clone());
     let face = match kept {
       Some(face) => Reference { name, ..face },
-      None => Reference { kind: ReferenceKind::Face, name, description, image: None, version: 0, error: None },
+      None => Reference { kind: ReferenceKind::Face, name, description, ..Default::default() },
     };
     self.references.insert(sheet + 1, face);
   }
@@ -872,7 +889,7 @@ impl SongProject {
         // The performer and the venue are one of a kind; a prop is found by whichever half wasn't edited.
         let found = old.iter().position(|r| r.kind == kind && (kind != ReferenceKind::Prop || r.name == subject.name || r.description == subject.description));
         let kept = found.map(|i| old.remove(i));
-        Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image: kept.as_ref().and_then(|r| r.image.clone()), version: kept.as_ref().map_or(0, |r| r.version), error: kept.and_then(|r| r.error) }
+        Reference { kind, name: subject.name.clone(), description: subject.description.clone(), image: kept.as_ref().and_then(|r| r.image.clone()), version: kept.as_ref().map_or(0, |r| r.version), error: kept.and_then(|r| r.error), leads: false }
       })
       .collect();
     let face = old.into_iter().find(|r| r.kind == ReferenceKind::Face);
@@ -1137,6 +1154,15 @@ mod tests {
     recast.character.description = "Broad, shaven head.".to_owned();
     project.set_brief(recast);
     assert_eq!((project.references[0].image.clone(), project.references[1].kind, project.references[1].image.clone()), (None, ReferenceKind::Face, None));
+    // An uploaded head shot is the performer: it leads, and outlives a rewritten description.
+    project.references[1].image = Some(PathBuf::from("me.png"));
+    assert_eq!(project.leading_face(), None, "a head shot drawn from the sheet follows it");
+    project.set_face_leads(true);
+    assert_eq!(project.leading_face(), Some(PathBuf::from("me.png")));
+    let mut again = brief();
+    again.character.description = "Tall, in a long coat.".to_owned();
+    project.set_brief(again);
+    assert_eq!((project.references[0].image.clone(), project.references[1].image.clone(), project.references[1].leads), (None, Some(PathBuf::from("me.png")), true));
   }
 
   #[test]

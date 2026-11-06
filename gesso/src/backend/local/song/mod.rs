@@ -124,7 +124,8 @@ pub struct ReferenceJob {
   pub description: String,
   /// Instead of drawing from the description: the picture to change, and how.
   pub change: Option<(PathBuf, String)>,
-  /// For the head shot: the performer's sheet, so the face is that person's and not a new one.
+  /// The performer's other picture, so this one is the same person and not a new one: for the
+  /// head shot, the sheet; for the sheet, the head shot it is to be drawn from.
   pub sheet: Option<PathBuf>,
 }
 
@@ -758,12 +759,14 @@ impl SongRun<'_> {
 
   async fn reference(&self, dir: &Path, look: &str, aspect: Aspect, pro: bool, job: ReferenceJob) -> anyhow::Result<PathBuf> {
     let model = still_model(pro);
-    // One picture goes with the request at most: the one to change, or the sheet a head shot is drawn from.
-    let from_sheet = job.kind == ReferenceKind::Face && job.change.is_none() && job.sheet.is_some();
-    let picture = job.change.as_ref().map(|(path, _)| path).or(job.sheet.as_ref().filter(|_| from_sheet)).map(|path| self.engine.load_path(path)).transpose()?;
+    // One picture goes with the request at most: the one to change, or the performer's other
+    // picture (the sheet a head shot is drawn from, or the head shot a sheet is).
+    let likeness = matches!(job.kind, ReferenceKind::Face | ReferenceKind::Look) && job.change.is_none() && job.sheet.is_some();
+    let picture = job.change.as_ref().map(|(path, _)| path).or(job.sheet.as_ref().filter(|_| likeness)).map(|path| self.engine.load_path(path)).transpose()?;
     let prompt = match &job.change {
       Some((_, change)) => change_prompt(change),
-      None if from_sheet => face_from_sheet_prompt(look),
+      None if likeness && job.kind == ReferenceKind::Face => face_from_sheet_prompt(look),
+      None if likeness => sheet_from_face_prompt(&job.name, &job.description, look),
       None => reference_prompt(job.kind, &job.name, &job.description, look),
     };
     let images: Vec<RefImage> = picture.into_iter().collect();
@@ -1033,6 +1036,21 @@ fn in_keeping(file: GeneratedFile, look: &str) -> GeneratedFile {
 /// The performer's head shot, drawn from their sheet so it is the same person.
 fn face_from_sheet_prompt(look: &str) -> String {
   format!("The attached picture is a performer's reference sheet for a music video. Draw a head-and-shoulders portrait of this exact person: the same face, hair, skin, age and clothes as on the sheet, changing nothing about them. They face the camera with a neutral expression, the face filling most of the frame, evenly lit and sharp, on a plain white background. One picture of one person; don't copy the sheet's layout. The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look))
+}
+
+/// The performer's sheet, drawn from their head shot so it is the same person. The head shot
+/// settles the face; the description settles what it doesn't show.
+fn sheet_from_face_prompt(name: &str, description: &str, look: &str) -> String {
+  format!(
+    "The attached picture is a head shot of a music video's performer. Draw a character reference sheet of this exact person, on a plain white background: the same face, hair, skin and age as in the head shot, changing nothing about them. \
+     On the left, a large head-and-shoulders portrait facing the camera, the face evenly lit and sharp. On the right, the same person shown full-length three times side by side, from the front, the side and the back, the whole figure in frame from head to shoes each time. \
+     It is one person throughout, with the same face, hair and clothes in every view. For what the head shot doesn't show, their build, clothes and shoes, follow this description of the performer, {}, and ignore anything in it about the face or hair that differs from the head shot: {} \
+     The video's look, which this picture must match: {}{} No text, captions or logos.",
+    name.trim(),
+    sentence(description),
+    sentence(look),
+    no_colour(look)
+  )
 }
 
 /// A written change to a reference picture the user already has.
@@ -1431,6 +1449,27 @@ mod tests {
       let prompt = body["contents"][0]["parts"][1]["text"].as_str().unwrap();
       assert!(prompt.contains("Draw a head-and-shoulders portrait of this exact person") && !prompt.contains("Wiry, cable hair"), "{prompt}");
       assert_eq!(body["generationConfig"]["imageConfig"]["aspectRatio"], "1:1");
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The other way round: with a head shot given, the three-pose sheet is drawn of that person,
+    /// taking the build and clothes from the description.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_sheet_is_drawn_from_a_head_shot() {
+      let (base_url, requests) = fake_vertex(vec![image_reply()]);
+      let (engine, dir) = engine(base_url);
+      let project = dir.join("project");
+      let face = save(&project.join("references"), "face_02_v1.png", &tiny_png()).unwrap();
+      let (tx, rx) = std::sync::mpsc::channel();
+      let items = vec![ReferenceJob { index: 0, version: 1, kind: ReferenceKind::Look, name: "The Captain".into(), description: "Wiry, in a long coat".into(), change: None, sheet: Some(face) }];
+      engine.start_song(14, SongRequest::References { dir: project, look: "grainy".into(), aspect: Aspect::Wide, pro: false, items }, tx, egui::Context::default());
+      let updates = finished(&rx, 14).await;
+      assert!(matches!(updates.first(), Some(SongUpdate::Reference { index: 0, path }) if path.ends_with("references/look_01_v1.png")), "{updates:?}");
+      let requests = requests.lock().unwrap();
+      let body: Value = serde_json::from_str(&requests[0].1).unwrap();
+      assert!(body["contents"][0]["parts"][0]["inlineData"]["data"].is_string(), "the head shot is attached");
+      let prompt = body["contents"][0]["parts"][1]["text"].as_str().unwrap();
+      assert!(prompt.contains("Draw a character reference sheet of this exact person") && prompt.contains("from the front, the side and the back") && prompt.contains("Wiry, in a long coat."), "{prompt}");
       let _ = std::fs::remove_dir_all(dir);
     }
 

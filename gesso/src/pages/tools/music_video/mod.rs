@@ -83,6 +83,8 @@ pub(super) enum Action {
     rewrite: bool,
   },
   OwnLyrics,
+  /// Draw the performer's sheet (the reference at this place) from their head shot.
+  SheetFromFace(usize),
   /// Go back to an earlier take of the song, by its place in the project's list.
   UseTake(usize),
   /// Export the cut film's copy for Instagram.
@@ -816,14 +818,24 @@ impl MusicVideoPage {
         let sheet = self.project.references.iter().position(|r| r.kind == ReferenceKind::Look);
         let sheet_picture = sheet.and_then(|i| self.project.references[i].image.clone());
         let sheet_in_this_run = sheet.is_some_and(|i| indices.contains(&i));
+        // It also works the other way: a head shot that leads (an uploaded one) is the
+        // performer, and the sheet is drawn from it. Drawing everything then leaves it alone.
+        let leading_face = self.project.leading_face();
+        let several = indices.len() > 1;
         for index in indices {
           if let Some(reference) = self.project.references.get_mut(index) {
-            if reference.kind == ReferenceKind::Face && sheet_in_this_run {
+            if reference.kind == ReferenceKind::Face && (sheet_in_this_run || (several && leading_face.is_some())) {
               continue;
             }
             reference.version += 1;
             reference.error = None;
-            let sheet = sheet_picture.clone().filter(|_| reference.kind == ReferenceKind::Face);
+            // A head shot drawn again from the sheet follows the sheet from then on.
+            reference.leads = false;
+            let sheet = match reference.kind {
+              ReferenceKind::Face => sheet_picture.clone(),
+              ReferenceKind::Look => leading_face.clone(),
+              _ => None,
+            };
             items.push(ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: None, sheet });
           }
         }
@@ -862,7 +874,18 @@ impl MusicVideoPage {
           }
         }
       },
+      Action::SheetFromFace(index) => {
+        self.project.set_face_leads(true);
+        self.apply(env, Action::References(vec![index]));
+      },
       Action::UploadReference(index, file) => {
+        // An uploaded head shot is the performer, so the sheet follows it; an uploaded sheet
+        // is, so the head shot follows that.
+        match self.project.references.get(index).map(|reference| reference.kind) {
+          Some(ReferenceKind::Face) => self.project.set_face_leads(true),
+          Some(ReferenceKind::Look) => self.project.set_face_leads(false),
+          _ => {},
+        }
         if let Some(reference) = self.project.references.get_mut(index) {
           reference.version += 1;
           reference.error = None;
