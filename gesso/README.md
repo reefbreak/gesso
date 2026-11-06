@@ -183,6 +183,10 @@ runs, and leaves everything it made editable before the next stage uses it.
   are marked out of date; the left rail counts what each stage has to make or make again, the
   cards are tagged, and each stage's main button takes the out-of-date ones along with the
   missing ones. Nothing is thrown away until its replacement is made.
+- **Fades.** The film can fade in from black and out to black (half a second to three seconds
+  each), set on the Final Video stage. A fade runs smoothly across scene cuts. The sound fades
+  with the picture only if asked, so a song with its own intro and ending is left as it is.
+  Changing the fades or the finish marks the film as out of date until it is cut again.
 - **Timing is arithmetic, not a model's guess.** The beat grid comes from the track itself (onset
   envelope, autocorrelation, comb search), and every cut lands on a beat, on bar lines where the
   tempo allows. Higher-energy sections cut faster; Pace (Relaxed, Steady, Fast) scales the lot. The

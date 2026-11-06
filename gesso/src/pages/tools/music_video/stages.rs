@@ -28,6 +28,9 @@ use crate::ui::widgets;
 const CARD_GAP: f32 = 12.0;
 /// Scene and reference cards are at least this wide; the grid fits as many columns as it can.
 const CARD_MIN_WIDTH: f32 = 210.0;
+/// The fade lengths offered on the Final Video stage, in seconds, and their labels.
+const FADE_SECONDS: [f64; 5] = [0.0, 0.5, 1.0, 2.0, 3.0];
+const FADE_LABELS: [&str; 5] = ["Off", "\u{bd} s", "1 s", "2 s", "3 s"];
 const CARD_TEXT_HEIGHT: f32 = 54.0;
 /// The line under a scene's card for what is sung over it: read across the grid, the song's words
 /// run under the pictures like a track.
@@ -913,6 +916,19 @@ fn final_video(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage:
       changed = true;
     }
     ui.label(small("Applied to every shot when the film is cut, so clips from different generations sit together."));
+    field(ui, "Fade in from black");
+    if let Some(i) = segmented(ui, &FADE_LABELS, FADE_SECONDS.iter().position(|secs| (*secs - page.project.fades.fade_in).abs() < 0.01).unwrap_or(0)) {
+      page.project.fades.fade_in = FADE_SECONDS[i];
+      changed = true;
+    }
+    field(ui, "Fade out to black");
+    if let Some(i) = segmented(ui, &FADE_LABELS, FADE_SECONDS.iter().position(|secs| (*secs - page.project.fades.fade_out).abs() < 0.01).unwrap_or(0)) {
+      page.project.fades.fade_out = FADE_SECONDS[i];
+      changed = true;
+    }
+    if page.project.fades.fade_in > 0.0 || page.project.fades.fade_out > 0.0 {
+      changed |= ui.checkbox(&mut page.project.fades.audio, "Fade the sound with the picture").on_hover_text("Off leaves the song exactly as it is, which suits a track with its own intro and ending").changed();
+    }
     field(ui, "Resolution");
     if let Some(i) = segmented(ui, &RESOLUTIONS, page.resolution[pass]) {
       page.resolution[pass] = i;

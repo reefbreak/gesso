@@ -10,7 +10,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 
 use super::beats::BeatGrid;
-use super::cut::{Aspect, CutShot, Grade, ShotMedia};
+use super::cut::{Aspect, CutShot, Fades, Grade, ShotMedia};
 use super::plan::{self, Pace, Section, Slot};
 use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 
@@ -328,6 +328,9 @@ pub struct SongProject {
   pub vocals: Option<PathBuf>,
   pub aspect: Aspect,
   pub grade: Grade,
+  /// The film's fades from and to black.
+  #[serde(default)]
+  pub fades: Fades,
   pub pace: Pace,
   pub shots: Vec<Shot>,
   pub cut: Option<PathBuf>,
@@ -346,11 +349,14 @@ pub struct SongProject {
 
 /// What the film on file was cut from: the pass, and each scene's clip or still in order. A cut
 /// goes out of date without anyone seeing it, when clips are made after it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CutOf {
   pub quality: Quality,
   pub media: Vec<PathBuf>,
+  /// The finish and fades it was cut with (`None` for a film cut before they were recorded,
+  /// which isn't held against it).
+  pub finish: Option<(Grade, Fades)>,
 }
 
 /// What in a pass is waiting to be made or has been overtaken by a change upstream of it: the
@@ -712,7 +718,8 @@ impl SongProject {
   /// film, or it was cut before its sources were recorded.
   pub fn cut_is_current(&self, quality: Quality) -> Option<bool> {
     let made = self.cut.as_ref().and(self.cut_of.as_ref())?;
-    Some(made.quality == quality && Some(&made.media) == self.cut_media(quality).as_ref())
+    let same_finish = made.finish.is_none_or(|finish| finish == (self.grade, self.fades));
+    Some(made.quality == quality && same_finish && Some(&made.media) == self.cut_media(quality).as_ref())
   }
 
   /// What a cut in `quality` would be made of, scene by scene: that pass's own clips, clips
@@ -933,8 +940,11 @@ mod tests {
     assert_eq!(project.cut_is_current(Quality::Draft), None, "nothing cut yet");
     project.cut = Some(PathBuf::from("cut_v1.mp4"));
     assert_eq!(project.cut_is_current(Quality::Draft), None, "a film from before its sources were recorded");
-    project.cut_of = Some(CutOf { quality: Quality::Draft, media: project.cut_media(Quality::Draft).unwrap() });
+    project.cut_of = Some(CutOf { quality: Quality::Draft, media: project.cut_media(Quality::Draft).unwrap(), finish: Some((project.grade, project.fades)) });
     assert_eq!(project.cut_is_current(Quality::Draft), Some(true));
+    project.fades.fade_out = 2.0;
+    assert_eq!(project.cut_is_current(Quality::Draft), Some(false), "the fades were changed since");
+    project.fades = Fades::default();
     assert_eq!(project.cut_is_current(Quality::Final), Some(false), "it was cut in the other pass");
     project.shots[0].draft.synced = Some(PathBuf::from("d1_synced.mp4"));
     assert_eq!(project.cut_is_current(Quality::Draft), Some(false), "a lip sync has been made since");

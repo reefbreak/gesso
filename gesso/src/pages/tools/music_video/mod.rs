@@ -751,8 +751,8 @@ impl MusicVideoPage {
       Action::Cut => {
         if let (Some(track), Some(shots)) = (&self.project.track, self.project.cut_shots(self.quality())) {
           self.project.cut_version += 1;
-          self.pending_cut = self.project.cut_media(self.quality()).map(|media| CutOf { quality: self.quality(), media });
-          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, shots, version: self.project.cut_version };
+          self.pending_cut = self.project.cut_media(self.quality()).map(|media| CutOf { quality: self.quality(), media, finish: Some((self.project.grade, self.project.fades)) });
+          let request = SongRequest::Cut { dir, audio: track.path.clone(), aspect: self.project.aspect, resolution: self.resolution().to_owned(), grade: self.project.grade, fades: self.project.fades, shots, version: self.project.cut_version };
           self.start(backend, 0, "Cutting the film on your Mac\u{2026}", request);
         }
       },

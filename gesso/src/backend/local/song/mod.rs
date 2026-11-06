@@ -48,7 +48,7 @@ use super::vertex::{GeminiImageRequest, SONG_CLIP_MODEL, TEXT_MODELS, TextReques
 use super::{GeneratedFile, LocalEngine, RefImage};
 use crate::backend::Event;
 use beats::BeatGrid;
-use cut::{Aspect, CutShot, Grade};
+use cut::{Aspect, CutShot, Fades, Grade};
 use plan::{Section, Slot};
 use project::{Quality, ReferenceKind};
 use writer::{Brief, Design, Draft, PlannedShot, Read, Revision, Style, TimedLine, Turn};
@@ -286,6 +286,7 @@ pub enum SongRequest {
     aspect: Aspect,
     resolution: String,
     grade: Grade,
+    fades: Fades,
     shots: Vec<CutShot>,
     version: u32,
   },
@@ -549,11 +550,11 @@ impl SongRun<'_> {
         });
         stream::iter(jobs).buffer_unordered(SYNCS_AT_ONCE).collect::<Vec<()>>().await;
       },
-      SongRequest::Cut { dir, audio, aspect, resolution, grade, shots, version } => {
+      SongRequest::Cut { dir, audio, aspect, resolution, grade, fades, shots, version } => {
         std::fs::create_dir_all(&dir)?;
         let out = dir.join(format!("cut_v{version}.mp4"));
         let target = out.clone();
-        tokio::task::spawn_blocking(move || cut::assemble(&shots, &audio, aspect.size(&resolution), grade, &target)).await??;
+        tokio::task::spawn_blocking(move || cut::assemble(&shots, &audio, aspect.size(&resolution), grade, fades, &target)).await??;
         let bytes = std::fs::read(&out)?;
         self.add_to_library(&out, &bytes, MediaClass::Video);
         self.send(SongUpdate::Cut(out));
