@@ -665,6 +665,14 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     if run_button(ui, Icon::List, if planned { "Plan again" } else { "Plan the scenes" }, Some(A_CENT.to_owned()), page.project.brief.is_some() && page.project.grid.is_some() && !busy, None) {
       actions.push(Action::Plan);
     }
+    let without_ending = page.project.scenes_without_ending().len();
+    if without_ending > 0 {
+      ui.add_space(8.0);
+      if secondary(ui, Icon::Sparkles, &format!("Write the missing ending frame{} ({without_ending})", plural(without_ending)), !busy && page.project.brief.is_some()) {
+        actions.push(Action::Endings);
+      }
+      ui.label(small("Every scene is filmed from an opening frame to an ending frame. The writer describes the ending of each scene that has none."));
+    }
     if planned {
       field(ui, &format!("Stills \u{b7} {} pass", quality.label().to_lowercase()));
       picture_model(ui, pro);
@@ -709,19 +717,22 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
         ui.label(small(&format!("Sung: {}", shot.slot.lyric)));
       }
       ui.label(label("Opening frame"));
-      let before = (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone());
+      let before = (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending);
       prompt_field(ui, "mv-scene-image", &mut shot.image, "Who or what is in the frame, the framing, the place and the light");
       ui.add_space(6.0);
       ui.label(label("What moves"));
       prompt_field(ui, "mv-scene-motion", &mut shot.motion, "The performer's movement and the camera's");
       ui.add_space(6.0);
-      ui.label(label("Ending frame (optional)")).on_hover_text("The video model is given only the opening frame and makes up the rest. When a shot has to end somewhere exact, such as a push-in that arrives on the performer's face, describe that last frame here: it is drawn from the reference images, and the clip is filmed from one frame to the other.");
-      prompt_field(ui, "mv-scene-ending", &mut shot.ending, "Where the shot must land, if it matters: the performer's face fills the frame, eyes to the lens");
+      ui.label(label("Ending frame")).on_hover_text("Where the shot lands. It is drawn from the reference images to match the opening frame, and the clip is filmed from one frame to the other, so the video model can't make up where it ends. The writer describes one for every scene; edit it here. If you empty it, use \"Write the missing ending frames\" to have it written again.");
+      prompt_field(ui, "mv-scene-ending", &mut shot.ending, "Where the shot lands: the framing the camera arrives at, and where the performer is");
+      let mut draw_ending = !shot.skip_ending;
+      ui.checkbox(&mut draw_ending, "Draw the ending frame and film to it").on_hover_text("On for every scene. Turn it off for a scene to leave its ending undrawn: the clip is then filmed from the opening frame alone and the video model decides where it ends. The description is kept.");
+      shot.skip_ending = !draw_ending;
       if lip_sync {
         ui.add_space(6.0);
         ui.checkbox(&mut shot.sing, "The performer sings this scene (lip-synced)").on_hover_text("Works best as a close-up with the face towards the camera and the mouth in view");
       }
-      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone());
+      changed |= before != (shot.image.clone(), shot.motion.clone(), shot.sing, shot.ending.clone(), shot.skip_ending);
       if let Some(error) = &shot.error {
         error_line(ui, Some(error));
       }

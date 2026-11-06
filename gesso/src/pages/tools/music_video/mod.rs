@@ -83,6 +83,8 @@ pub(super) enum Action {
     rewrite: bool,
   },
   OwnLyrics,
+  /// Have the writer describe the ending frame of every scene that has none.
+  Endings,
   /// Keep the lyrics as they stand among the earlier versions.
   KeepLyrics,
   /// Go back to an earlier version of the lyrics, by its place in the project's list.
@@ -206,6 +208,9 @@ pub struct MusicVideoPage {
   dirty_since: Option<f64>,
   /// A project to open on the first frame (`ARTCRAFT_MUSIC_VIDEO`, for screenshots).
   open_on_start: Option<String>,
+  /// Whether the writer has been asked for the ending frames this video's scenes lack, so a
+  /// failed attempt isn't repeated on every frame.
+  endings_asked: bool,
   /// The earlier version of the lyrics that is open to read, by its place in the project's list.
   pub(super) viewing_lyrics: Option<usize>,
   /// What each video's calls have cost, part by part, and when that was last read.
@@ -214,7 +219,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_lyrics: None, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -238,6 +243,12 @@ impl MusicVideoPage {
     }
     self.count_costs(ui, env.backend);
     let mut actions = Vec::new();
+    // Every scene has an ending frame: ones planned before that was so are given theirs when
+    // the storyboard is next opened.
+    if self.stage == Stage::Scenes && !self.endings_asked && !self.busy() && self.project.brief.is_some() && !self.project.scenes_without_ending().is_empty() {
+      self.endings_asked = true;
+      actions.push(Action::Endings);
+    }
     let all = self.cost_of_all(env.backend);
     self.rail(ui, rail, all, &mut actions);
     stages::show(self, ui, env, stage, panel, &mut actions);
@@ -379,6 +390,7 @@ impl MusicVideoPage {
         }
         self.progress(sync);
       },
+      SongUpdate::Endings(endings) => self.project.set_endings(&endings),
       SongUpdate::Planned(scenes) => {
         let slots = std::mem::take(&mut self.pending_slots);
         self.project.set_plan(&slots, &scenes);
@@ -814,6 +826,15 @@ impl MusicVideoPage {
           let item = ReferenceJob { index, version: reference.version, kind: reference.kind, name: reference.name.clone(), description: reference.description.clone(), change: Some((picture, change)), sheet: None };
           let look = self.project.design().look;
           self.start(backend, 1, "Changing the picture\u{2026}", SongRequest::References { dir, look, aspect: self.project.aspect, pro: self.pro(), items: vec![item] });
+        }
+      },
+      Action::Endings => {
+        let Some(brief) = self.project.brief.clone() else {
+          return;
+        };
+        let scenes: Vec<_> = self.project.scenes_without_ending().into_iter().map(|index| (index, &self.project.shots[index])).map(|(index, shot)| (index, shot.slot.section.clone(), shot.slot.seconds(), shot.image.clone(), shot.motion.clone())).collect();
+        if !scenes.is_empty() {
+          self.start(backend, 0, &format!("Writing ending frames for {} scene{}\u{2026}", scenes.len(), if scenes.len() == 1 { "" } else { "s" }), SongRequest::Endings { brief, scenes, writer: self.writer });
         }
       },
       Action::Plan => {

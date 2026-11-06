@@ -231,6 +231,13 @@ pub enum SongRequest {
     lip_sync: bool,
     writer: Writer,
   },
+  /// An ending frame for each of `scenes`, which have none: a scene is its number, section,
+  /// length, opening frame and movement.
+  Endings {
+    brief: Brief,
+    scenes: Vec<(usize, String, f64, String, String)>,
+    writer: Writer,
+  },
   /// Each scene's opening frame, drawn from `references` (the performer's sheet first). The
   /// draft pass draws with Nano Banana 2 at 1K; the final pass redraws each approved draft still
   /// with Nano Banana Pro at 2K.
@@ -344,6 +351,8 @@ pub enum SongUpdate {
     message: String,
   },
   Planned(Vec<PlannedShot>),
+  /// Ending frames for scenes that had none, by scene.
+  Endings(Vec<(usize, String)>),
   Still {
     index: usize,
     path: PathBuf,
@@ -372,6 +381,9 @@ pub enum SongUpdate {
   Note(String),
   Done(Result<(), String>),
 }
+
+/// How many scenes one call to the writer is asked to give ending frames.
+const ENDINGS_PER_CALL: usize = 30;
 
 /// What a video's cost is made of, in the order it's shown.
 pub const COST_PARTS: [&str; 6] = ["Writing and planning", "Song", "Reference images", "Scene images", "Clips", "Lip sync"];
@@ -515,8 +527,26 @@ impl SongRun<'_> {
         if missing > 0 {
           self.send(SongUpdate::Note(format!("The writer left out {missing} of {} scenes; they have stand-in descriptions you can edit.", slots.len())));
         }
-        let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).collect();
+        // Every scene ends somewhere: one the writer gave no ending frame gets its movement's.
+        let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).map(|scene| if scene.ending.is_empty() { PlannedShot { ending: writer::fallback_ending(&scene.image, &scene.motion), ..scene } } else { scene }).collect();
         self.send(SongUpdate::Planned(scenes));
+      },
+      SongRequest::Endings { brief, scenes, writer } => {
+        // A long film is asked for in parts, so no reply is cut short; a failed part falls back
+        // to each scene's own movement and the rest carry on.
+        let mut endings = Vec::new();
+        for part in scenes.chunks(ENDINGS_PER_CALL) {
+          let written = match self.write(writer, writer::DIRECTOR, &writer::endings_prompt(&brief, part)).await {
+            Ok(reply) => writer::parse_endings(&reply),
+            Err(err) => {
+              warn!("Writing ending frames failed: {err:#}");
+              Vec::new()
+            },
+          };
+          endings.extend(part.iter().map(|(index, _, _, image, motion)| (*index, written.iter().find(|(i, _)| i == index).map_or_else(|| writer::fallback_ending(image, motion), |(_, ending)| ending.clone()))));
+          self.send(SongUpdate::Note(format!("Writing ending frames\u{2026} {} of {}", endings.len(), scenes.len())));
+        }
+        self.send(SongUpdate::Endings(endings));
       },
       SongRequest::Stills { dir, design, references, aspect, quality, better, shots } => {
         let references: Vec<(ReferenceKind, RefImage)> = references.iter().take(REFERENCES_PER_STILL).map(|(kind, path)| Ok((*kind, self.engine.load_path(path)?))).collect::<anyhow::Result<_>>()?;
@@ -1260,7 +1290,26 @@ mod tests {
       assert_eq!(planned.len(), 2);
       assert!(planned[0].image.contains("wide shot"), "the skipped low-energy slot gets a stand-in");
       assert_eq!(planned[1].image, "A close-up of hands on a keyboard");
+      assert!(planned.iter().all(|scene| !scene.ending.is_empty()), "every scene ends somewhere, written or not: {planned:?}");
       assert!(updates.iter().any(|u| matches!(u, SongUpdate::Note(n) if n.contains("left out 1 of 2"))));
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Scenes planned without ending frames are given them: the writer's where it answers, the
+    /// scene's own movement where it doesn't.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_ending_frames_are_written() {
+      let reply = json!({ "scenes": [{ "index": 4, "ending": "The dock fills the frame" }] });
+      let (base_url, requests) = fake_vertex(vec![text_reply(&reply.to_string(), 10, 10)]);
+      let (engine, dir) = engine(base_url);
+      let scenes = vec![(4, "Verse 1".to_owned(), 4.0, "A dock, far off.".to_owned(), "The camera pushes in.".to_owned()), (7, "Chorus".to_owned(), 6.0, "A hull.".to_owned(), "The performer turns.".to_owned())];
+      let (tx, rx) = std::sync::mpsc::channel();
+      engine.start_song(11, SongRequest::Endings { brief: Brief::default(), scenes, writer: Writer::Gemini }, tx, egui::Context::default());
+      let updates = finished(&rx, 11).await;
+      let endings = updates.iter().find_map(|u| if let SongUpdate::Endings(endings) = u { Some(endings.clone()) } else { None }).unwrap();
+      assert_eq!(endings[0], (4, "The dock fills the frame".to_owned()));
+      assert!(endings[1].0 == 7 && endings[1].1.contains("The performer turns"), "{endings:?}");
+      assert_eq!(requests.lock().unwrap().len(), 1);
       let _ = std::fs::remove_dir_all(dir);
     }
 

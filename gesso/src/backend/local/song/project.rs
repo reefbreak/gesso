@@ -188,6 +188,9 @@ pub struct Shot {
   /// drawn from the references, it is given both ends and fills in the move between.
   #[serde(default)]
   pub ending: String,
+  /// Leave the ending frame undrawn and let the video model end the shot where it likes.
+  /// Drawing is on unless this is set.
+  pub skip_ending: bool,
   /// The scene's feeling in a few words.
   pub beat: String,
   /// The performer sings this scene's line to the camera, so its clip is lip-synced.
@@ -270,8 +273,14 @@ impl Shot {
     take.clip_end_from = ending;
   }
 
-  /// Whether the scene asks for an ending frame.
+  /// Whether the scene asks for an ending frame: it has one described and drawing it hasn't
+  /// been turned off for the scene.
   pub fn wants_ending(&self) -> bool {
+    self.has_ending() && !self.skip_ending
+  }
+
+  /// Whether the scene's ending frame is described (it is drawn only if the scene asks).
+  pub fn has_ending(&self) -> bool {
     !self.ending.trim().is_empty()
   }
 
@@ -827,10 +836,24 @@ impl SongProject {
       .map(|slot| {
         let scene = planned.iter().find(|p| p.index == slot.index);
         let (still_version, clip_version) = self.shots.get(slot.index).map_or((0, 0), |old| (old.still_version, old.clip_version));
-        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
+        Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), ending: scene.map(|p| p.ending.clone()).unwrap_or_default(), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
       })
       .collect();
     self.cut = None;
+  }
+
+  /// The described scenes that have no ending frame described yet.
+  pub fn scenes_without_ending(&self) -> Vec<usize> {
+    self.shots.iter().enumerate().filter(|(_, shot)| !shot.image.trim().is_empty() && !shot.has_ending()).map(|(index, _)| index).collect()
+  }
+
+  /// Gives scenes the ending frames a writer described; a scene that already has one keeps it.
+  pub fn set_endings(&mut self, endings: &[(usize, String)]) {
+    for (index, ending) in endings {
+      if let Some(shot) = self.shots.get_mut(*index).filter(|shot| !shot.has_ending()) {
+        shot.ending = ending.trim().to_owned();
+      }
+    }
   }
 
   /// The cut's shots for a pass. Each slot takes that pass's clip (lip-synced when there is
@@ -1305,12 +1328,26 @@ mod tests {
   }
 
   #[test]
+  fn scenes_without_an_ending_frame_are_given_one() {
+    let mut project = SongProject::new();
+    project.shots = vec![Shot { image: "A dock".into(), ..Default::default() }, Shot { image: "A hull".into(), ending: "Mine".into(), ..Default::default() }, Shot::default()];
+    assert_eq!(project.scenes_without_ending(), [0], "a scene with nothing described has nothing to end");
+    project.set_endings(&[(0, " The dock, closer ".into()), (1, "Theirs".into()), (9, "nowhere".into())]);
+    assert_eq!((project.shots[0].ending.as_str(), project.shots[1].ending.as_str()), ("The dock, closer", "Mine"), "an ending already written is kept");
+    assert!(project.scenes_without_ending().is_empty());
+    // Drawing it is on for every scene and can be turned off for one, which keeps its words.
+    assert!(project.shots[0].wants_ending());
+    project.shots[0].skip_ending = true;
+    assert!(!project.shots[0].wants_ending() && project.shots[0].has_ending() && project.scenes_without_ending().is_empty());
+  }
+
+  #[test]
   fn a_new_plan_keeps_version_counters_and_drops_old_media() {
     let mut project = SongProject::new();
     project.shots = vec![Shot { draft: Take { still: Some(PathBuf::from("old.png")), clip: Some(PathBuf::from("old.mp4")), synced: None, ..Default::default() }, still_version: 3, clip_version: 2, ..Default::default() }];
     project.cut = Some(PathBuf::from("cut.mp4"));
     let slots = [slot(0, 0.0, 2.0), slot(1, 2.0, 4.0)];
-    let scene = PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into(), sing: true };
+    let scene = PlannedShot { index: 1, image: "B".into(), motion: "m".into(), beat: "manic".into(), sing: true, ending: "B, closer".into() };
     project.set_plan(&slots, std::slice::from_ref(&scene));
     assert_eq!(project.shots.len(), 2);
     assert_eq!((project.shots[0].draft.clone(), project.shots[0].still_version, project.shots[0].clip_version), (Take::default(), 3, 2));

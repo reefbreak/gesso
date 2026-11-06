@@ -194,14 +194,17 @@ runs, and leaves everything it made editable before the next stage uses it.
   can be swapped, and the film is cut again on your Mac with the same frame-exact cut. A scene
   keeps its length, so the scenes around it stay on their beats; moving or removing one shifts
   what follows against the song.
-- **An ending frame, where a shot has to land somewhere exact.** Veo is given a scene's opening
-  still and makes up the rest, so a push-in from far away arrives at a face it invented. A scene
-  can have an "Ending frame" description: that frame is drawn from the reference images with the
-  scene's opening still beside it (same place, light and outfit), and the clip is filmed from one
-  frame to the other. The ending frame is part of the lineage: it waits for its opening still, a
-  redrawn opening puts it out of date, the clip waits for both and goes out of date when either
-  changes, and the final pass redraws it from the draft. Leave the description empty and the
-  scene works as before.
+- **Every scene has an ending frame.** Veo is given a scene's opening still and makes up the
+  rest, so a push-in from far away arrives at a face it invented. The planner therefore writes
+  each scene's last frame as well as its first, and scenes planned before it did are given theirs
+  the next time the Scenes stage is opened (or with "Write the missing ending frames"). The
+  ending is drawn from the reference images with the scene's opening still beside it (same
+  place, light and outfit), and the clip is filmed from one frame to the other. It is part of
+  the lineage: it waits for its opening still, a redrawn opening puts it out of date, the clip
+  waits for both and goes out of date when either changes, and the final pass redraws it from
+  the draft. Drawing it is on for every scene; "Draw the ending frame and film to it" turns it
+  off for one scene, which keeps its description and is filmed from the opening frame alone.
+  An ending frame is a second still per scene, so the stills cost about twice as much.
 - **Song length.** 30 seconds, 1, 1½, 2 or 3 minutes, set on the Idea or Song stage. The lyric
   writer is told how many verses and choruses to write for it, and Lyria how long to run. The
   length is asked for, not enforced: Lyria lands near it, and what is written decides most of it.

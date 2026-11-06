@@ -131,6 +131,8 @@ pub struct PlannedShot {
   pub beat: String,
   /// The performer sings the scene's line to the camera.
   pub sing: bool,
+  /// The frame the scene ends on, for the image model.
+  pub ending: String,
 }
 
 pub const SONGWRITER: &str = "You are a songwriter and music producer. You write wholly original songs. \
@@ -138,6 +140,13 @@ Never quote or closely paraphrase the lyrics of an existing song: when an idea l
 carry over only its general energy, structure and attitude, with entirely new words. \
 Describe music by genre, era, tempo, instruments, production and vocal delivery, and never by the name of an artist, band or song, \
 because the music model refuses those. Reply with JSON only.";
+
+/// What an ending frame is, for the writer: the scenes prompt and the endings prompt share it.
+const ENDING_RULES: &str = "the last frame of the scene in one or two sentences: what the camera sees once the movement has finished. \
+Same place, same light and the same performer as the opening frame, changed only by what the movement does in the scene's few seconds: \
+where the camera has arrived (name the framing: wide, medium, close-up, detail), where the performer now is and their pose. \
+It must be reachable from the opening frame in one continuous shot, with no cut and no change of location. \
+When the performer sings the scene, their face stays towards the camera with the mouth in view. Never describe the performer's face, hair, build or clothes.";
 
 pub const DIRECTOR: &str = "You are a music video director. You invent original performers and settings: \
 no real people, no existing characters, no brand names. You write for image and video models, so you describe what the camera sees, \
@@ -274,6 +283,7 @@ pub fn scenes_prompt(brief: &Brief, style: &Style, slots: &[Slot], lip_sync: boo
      - \"index\": the scene's number from the list.\n\
      - \"image\": the opening frame in one or two sentences: who or what is in it, the framing (wide, medium, close-up, detail), where in the venue, and the light. Don't restate the overall look; it is added to every scene. Call the performer \"the performer\" and say what they are doing and where; never describe their face, hair, build or clothes, which come from their reference picture.\n\
      - \"motion\": what happens over the scene in one sentence: the performer's movement and the camera's.\n\
+     - \"ending\": {ENDING_RULES}\n\
      - \"beat\": the scene's feeling in two to four words.{}\n\n\
      Follow the arc from the first scene to the last. Vary the framing from scene to scene, keep the performer in most of them, and bring the motifs and props back. \
      Match the energy: low is stillness and slow moves, high is fast, abrupt movement. \
@@ -350,9 +360,46 @@ pub fn parse_scenes(reply: &str) -> Vec<PlannedShot> {
     .filter_map(|(position, item)| {
       let index = item["index"].as_u64().map_or(position, |i| i as usize);
       let image = text(&item["image"]);
-      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]), sing: item["sing"].as_bool().unwrap_or(false) })
+      (!image.is_empty()).then(|| PlannedShot { index, image, motion: text(&item["motion"]), beat: text(&item["beat"]), sing: item["sing"].as_bool().unwrap_or(false), ending: text(&item["ending"]) })
     })
     .collect()
+}
+
+/// Asks for the ending frame of scenes that have none. Each scene is its number, the section it
+/// falls in, how long it runs, its opening frame and what moves.
+pub fn endings_prompt(brief: &Brief, scenes: &[(usize, String, f64, String, String)]) -> String {
+  let mut list = String::new();
+  for (index, section, seconds, image, motion) in scenes {
+    list.push_str(&format!("{index}. {section} \u{b7} {seconds:.1}s long\n   Opening frame: {}\n   What moves: {}\n", image.trim(), motion.trim()));
+  }
+  format!(
+    "The film is \"{}\". The performer is {}; the venue is {}.\n\nThese scenes each have an opening frame and a movement, and need the frame they end on:\n{list}\n\
+     Reply with a JSON object with one key, \"scenes\": an array with one item per scene, in order. Each item has:\n\
+     - \"index\": the scene's number from the list.\n\
+     - \"ending\": {ENDING_RULES}",
+    brief.title.trim(),
+    brief.character.name.trim(),
+    brief.venue.name.trim()
+  )
+}
+
+/// The endings a writer described, by scene number.
+pub fn parse_endings(reply: &str) -> Vec<(usize, String)> {
+  let Some(json) = find_json(reply) else {
+    return Vec::new();
+  };
+  array(&json, "scenes").iter().enumerate().map(|(position, item)| (item["index"].as_u64().map_or(position, |i| i as usize), text(&item["ending"]))).filter(|(_, ending)| !ending.is_empty()).collect()
+}
+
+/// An ending frame for a scene the writer gave none, so every scene has one: where its own
+/// movement leaves it.
+pub fn fallback_ending(image: &str, motion: &str) -> String {
+  let (image, motion) = (image.trim().trim_end_matches('.'), motion.trim().trim_end_matches('.'));
+  if motion.is_empty() {
+    format!("{image}, a moment later: the same place, light and framing, the performer's pose slightly changed.")
+  } else {
+    format!("The last frame of this movement, in the same place and light as the opening frame: {motion}. The opening frame was: {image}.")
+  }
 }
 
 /// A scene for a slot the writer left out, so the storyboard has no holes.
@@ -362,7 +409,8 @@ pub fn fallback_scene(slot: &Slot) -> PlannedShot {
     Energy::Medium => ("A medium shot of the performer moving through the venue", "The performer walks toward the camera, which tracks backward.", "Driving forward"),
     Energy::High => ("A close, low-angle shot of the performer mid-movement", "The performer lunges at the lens with fast, abrupt movement; the handheld camera shakes.", "Confrontational"),
   };
-  PlannedShot { index: slot.index, image: format!("{framing}."), motion: motion.to_owned(), beat: beat.to_owned(), sing: false }
+  let image = format!("{framing}.");
+  PlannedShot { index: slot.index, ending: fallback_ending(&image, motion), image, motion: motion.to_owned(), beat: beat.to_owned(), sing: false }
 }
 
 /// The writer's reply about a section. A field it left out, emptied or sent as something other
@@ -540,6 +588,23 @@ mod tests {
       let reply = r#"{"scenes":[{"index":2,"image":"A","motion":"m","beat":"manic","sing":true},{"image":"B"},{"index":5,"image":""}]}"#;
       let scenes = parse_scenes(reply);
       assert_eq!(scenes.iter().map(|s| (s.index, s.image.as_str(), s.beat.as_str(), s.sing)).collect::<Vec<_>>(), [(2, "A", "manic", true), (1, "B", "", false)]);
+    }
+
+    /// Every scene ends somewhere: the planner is asked for each one's last frame, scenes that
+    /// lack one can be asked about on their own, and a scene the writer skips ends where its
+    /// own movement leaves it.
+    #[test]
+    fn every_scene_gets_an_ending_frame() {
+      let scenes = parse_scenes(r#"{"scenes":[{"index":0,"image":"A","motion":"m","ending":"A, closer"}]}"#);
+      assert_eq!(scenes[0].ending, "A, closer");
+      let slot = Slot { index: 3, section: "Verse 1".into(), ..Default::default() };
+      assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"ending\": the last frame of the scene"));
+      assert!(!fallback_scene(&slot).ending.is_empty());
+      let prompt = endings_prompt(&Brief::default(), &[(3, "Verse 1".into(), 4.0, "A dock, far off.".into(), "The camera pushes in.".into())]);
+      assert!(prompt.contains("3. Verse 1 \u{b7} 4.0s long\n   Opening frame: A dock, far off.\n   What moves: The camera pushes in.") && prompt.contains("- \"ending\": the last frame of the scene"), "{prompt}");
+      assert_eq!(parse_endings(r#"{"scenes":[{"index":3,"ending":"The dock fills the frame"},{"index":4,"ending":""}]}"#), [(3, "The dock fills the frame".to_owned())]);
+      assert_eq!(fallback_ending("A dock.", "The camera pushes in."), "The last frame of this movement, in the same place and light as the opening frame: The camera pushes in. The opening frame was: A dock.");
+      assert!(fallback_ending("A dock.", "").starts_with("A dock, a moment later"));
     }
   }
 
