@@ -17,6 +17,8 @@ use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 /// Under the local library's folder.
 pub const DIRECTORY: &str = "songs";
 const FILENAME: &str = "project.json";
+/// How many earlier plans of the scenes a project keeps.
+const PLANS_KEPT: usize = 10;
 /// How many earlier versions of the lyrics a project keeps.
 const LYRIC_VERSIONS_KEPT: usize = 40;
 const ID_PREFIX: &str = "song_";
@@ -437,6 +439,10 @@ pub struct SongProject {
   /// The video's files that are in the library already, so opening it adds only the rest.
   #[serde(default)]
   pub in_library: BTreeSet<PathBuf>,
+  /// Earlier plans of the scenes, oldest first: each is the storyboard as it stood, stills and
+  /// clips included, before planning again replaced it. The newest [`PLANS_KEPT`] stay.
+  #[serde(default)]
+  pub plan_versions: Vec<PlanVersion>,
   /// Earlier takes of the song, oldest first, each with the work that was timed to it.
   #[serde(default)]
   pub song_takes: Vec<SongTake>,
@@ -444,6 +450,16 @@ pub struct SongProject {
   /// song is about to move on from them.
   #[serde(default)]
   pub lyric_versions: Vec<LyricVersion>,
+}
+
+/// The storyboard as it stood before a plan replaced it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanVersion {
+  pub at: String,
+  pub shots: Vec<Shot>,
+  pub cut: Option<PathBuf>,
+  pub cut_of: Option<CutOf>,
 }
 
 /// An earlier take of the song, set aside when another took its place. Its file is never
@@ -937,7 +953,7 @@ impl SongProject {
   /// Replaces the storyboard with the writer's scenes for `slots`. Stills and clips made for the
   /// old storyboard no longer match, so they're dropped (their files stay on disk).
   pub fn set_plan(&mut self, slots: &[Slot], planned: &[PlannedShot]) {
-    self.shots = slots
+    let shots = slots
       .iter()
       .map(|slot| {
         let scene = planned.iter().find(|p| p.index == slot.index);
@@ -945,7 +961,89 @@ impl SongProject {
         Shot { slot: slot.clone(), image: scene.map(|p| p.image.clone()).unwrap_or_default(), motion: scene.map(|p| p.motion.clone()).unwrap_or_default(), beat: scene.map(|p| p.beat.clone()).unwrap_or_default(), ending: scene.map(|p| p.ending.clone()).unwrap_or_default(), flows: scene.is_some_and(|p| p.flows), sing: self.lip_sync && scene.is_some_and(|p| p.sing), still_version, clip_version, ..Default::default() }
       })
       .collect();
+    self.shelve_plan();
+    self.shots = shots;
     self.cut = None;
+  }
+
+  /// Gives one scene the writer's new description, keeping its place, its pictures and whether
+  /// it flows; the pictures were drawn to the old words, so they are for redrawing.
+  pub fn set_scene(&mut self, index: usize, planned: &PlannedShot) {
+    let lip_sync = self.lip_sync;
+    if let Some(shot) = self.shots.get_mut(index) {
+      shot.image.clone_from(&planned.image);
+      shot.motion.clone_from(&planned.motion);
+      shot.beat.clone_from(&planned.beat);
+      shot.ending.clone_from(&planned.ending);
+      shot.sing = lip_sync && planned.sing;
+    }
+  }
+
+  /// Goes back to an earlier plan of the scenes, pictures and all; the plan in place is kept the
+  /// same way.
+  pub fn use_plan(&mut self, index: usize) {
+    if index >= self.plan_versions.len() {
+      return;
+    }
+    let plan = self.plan_versions.remove(index);
+    self.shelve_plan();
+    self.shots = plan.shots;
+    self.cut = plan.cut;
+    self.cut_of = plan.cut_of;
+  }
+
+  /// Keeps the storyboard as it stands among the earlier plans, when there is one.
+  fn shelve_plan(&mut self) {
+    if self.shots.iter().all(|shot| shot.image.trim().is_empty() && shot.draft.still.is_none()) {
+      return;
+    }
+    self.plan_versions.push(PlanVersion { at: chrono::Utc::now().to_rfc3339(), shots: std::mem::take(&mut self.shots), cut: self.cut.take(), cut_of: self.cut_of.take() });
+    let extra = self.plan_versions.len().saturating_sub(PLANS_KEPT);
+    self.plan_versions.drain(..extra);
+  }
+
+  /// Gives scenes the pictures still in the folder from before: a plan made before earlier plans
+  /// were kept dropped them from the storyboard without deleting them. For each scene without a
+  /// still, clip or lip sync in a pass, the newest file of that scene's number is taken. Returns
+  /// how many pictures came back.
+  pub fn reattach_media(&mut self, dir: &Path) -> usize {
+    let mut found = 0;
+    for (index, shot) in self.shots.iter_mut().enumerate() {
+      for quality in [Quality::Draft, Quality::Final] {
+        let tag = quality.tag();
+        let number = format!("{:03}", index + 1);
+        let newest = |folder: &str, prefix: String, suffix: &str| -> Option<(u32, PathBuf)> {
+          std::fs::read_dir(dir.join(folder)).into_iter().flatten().flatten().map(|entry| entry.path()).filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let version = name.strip_prefix(&prefix)?.strip_suffix(suffix)?.parse::<u32>().ok()?;
+            Some((version, path))
+          }).max()
+        };
+        let still = newest("shots", format!("shot_{number}_{tag}_v"), ".png");
+        let end = newest("shots", format!("shot_{number}_{tag}_end_v"), ".png");
+        let clip = newest("clips", format!("clip_{number}_{tag}_v"), ".mp4");
+        let synced = newest("clips", format!("clip_{number}_{tag}_synced_v"), ".mp4");
+        if let Some((version, path)) = still.filter(|_| shot.take(quality).still.is_none()) {
+          shot.still_version = shot.still_version.max(version).max(end.as_ref().map_or(0, |(v, _)| *v));
+          shot.set_still(quality, path);
+          found += 1;
+        }
+        if let Some((_, path)) = end.filter(|_| shot.take(quality).end_still.is_none() && shot.take(quality).still.is_some()) {
+          shot.set_end_still(quality, path);
+          found += 1;
+        }
+        if let Some((version, path)) = clip.filter(|_| shot.take(quality).clip.is_none() && shot.take(quality).still.is_some()) {
+          shot.clip_version = shot.clip_version.max(version);
+          shot.set_clip(quality, path);
+          found += 1;
+        }
+        if let Some((_, path)) = synced.filter(|_| shot.take(quality).synced.is_none() && shot.take(quality).clip.is_some()) {
+          shot.set_synced(quality, path);
+          found += 1;
+        }
+      }
+    }
+    found
   }
 
   /// Whether a scene carries on from the one before it: it is set to flow, and that scene has an
@@ -1560,6 +1658,49 @@ mod tests {
     // With its ending frame switched off, the scene before has nothing to hand on: a cut again.
     project.shots[0].skip_ending = true;
     assert!(!project.flows_from(1));
+  }
+
+  /// Planning again keeps the storyboard it replaces, pictures and all, and it can be gone
+  /// back to; a single scene can be given new words without touching the others.
+  #[test]
+  fn an_earlier_plan_comes_back_with_its_pictures() {
+    let mut project = SongProject::new();
+    let slots = vec![slot(0, 0.0, 4.0), slot(1, 4.0, 8.0)];
+    let planned = |image: &str| PlannedShot { index: 0, image: image.into(), motion: "m".into(), beat: String::new(), sing: false, ending: "e".into(), flows: false };
+    project.set_plan(&slots, &[planned("First")]);
+    assert!(project.plan_versions.is_empty(), "an empty storyboard isn't worth keeping");
+    project.shots[0].set_still(Quality::Draft, PathBuf::from("a.png"));
+    project.cut = Some(PathBuf::from("cut.mp4"));
+    project.set_plan(&slots, &[planned("Second")]);
+    assert_eq!((project.shots[0].image.as_str(), project.shots[0].draft.still.clone(), project.cut.clone()), ("Second", None, None));
+    assert_eq!(project.plan_versions.len(), 1);
+    project.use_plan(0);
+    assert_eq!((project.shots[0].image.as_str(), project.shots[0].draft.still.clone(), project.cut.clone()), ("First", Some(PathBuf::from("a.png")), Some(PathBuf::from("cut.mp4"))));
+    assert_eq!(project.plan_versions[0].shots[0].image, "Second");
+    // One scene replanned: new words, same picture and place.
+    project.set_scene(0, &PlannedShot { sing: true, ..planned("Third") });
+    assert_eq!((project.shots[0].image.as_str(), project.shots[0].draft.still.clone(), project.shots[0].sing), ("Third", Some(PathBuf::from("a.png")), false));
+  }
+
+  /// Pictures a plan dropped from the storyboard are found again in the folder by scene number.
+  #[test]
+  fn pictures_left_in_the_folder_are_reattached() {
+    let dir = std::env::temp_dir().join(format!("gesso-reattach-{}", uuid::Uuid::new_v4()));
+    for (folder, names) in [("shots", vec!["shot_001_draft_v1.png", "shot_001_draft_v3.png", "shot_001_draft_end_v2.png", "shot_002_final_v1.png"]), ("clips", vec!["clip_001_draft_v2.mp4", "clip_001_draft_synced_v2.mp4", "clip_002_draft_v1.mp4"])] {
+      std::fs::create_dir_all(dir.join(folder)).unwrap();
+      for name in names {
+        std::fs::write(dir.join(folder).join(name), b"x").unwrap();
+      }
+    }
+    let mut project = SongProject::new();
+    project.shots = vec![Shot::default(), Shot::default(), Shot::default()];
+    assert_eq!(project.reattach_media(&dir), 5);
+    let first = &project.shots[0];
+    assert_eq!((first.draft.still.clone(), first.draft.end_still.clone(), first.draft.clip.clone(), first.draft.synced.clone()), (Some(dir.join("shots/shot_001_draft_v3.png")), Some(dir.join("shots/shot_001_draft_end_v2.png")), Some(dir.join("clips/clip_001_draft_v2.mp4")), Some(dir.join("clips/clip_001_draft_synced_v2.mp4"))));
+    assert_eq!((first.still_version, first.clip_version), (3, 2), "new pictures get fresh names");
+    assert!(project.shots[1].draft.clip.is_none() && project.shots[1].finished.still.is_some(), "a clip with no still stays off; a final still on its own comes back: {:?}", project.shots[1]);
+    assert_eq!(project.reattach_media(&dir), 0);
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]

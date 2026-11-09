@@ -190,6 +190,40 @@ fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &
   }
 }
 
+/// Earlier plans of the scenes, newest first: open one to see what it held, and go back to it.
+fn earlier_plans(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &mut Vec<Action>) {
+  widgets::hud(ui, "Earlier plans", theme::FAINT);
+  ui.add_space(6.0);
+  for (index, plan) in page.project.plan_versions.iter().enumerate().rev() {
+    let open = page.viewing_plan == Some(index);
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+    ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+    let stills = plan.shots.iter().filter(|shot| shot.draft.still.is_some()).count();
+    let clips = plan.shots.iter().filter(|shot| shot.draft.clip.is_some()).count();
+    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, format!("{} scenes", plan.shots.len()), FontId::new(13.5, theme::medium()), theme::INK);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {stills} still{}, {clips} clip{}{}", when(&plan.at), plural(stills), plural(clips), if plan.cut.is_some() { ", and the film" } else { "" }), FontId::new(11.5, theme::mono()), theme::MUTED);
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+      page.viewing_plan = if open { None } else { Some(index) };
+    }
+    ui.add_space(6.0);
+    if open {
+      card(ui, "Its scenes".to_owned(), |ui| {
+        for (n, shot) in plan.shots.iter().enumerate().take(6) {
+          ui.label(small(&format!("{}. {}", n + 1, shot.image.chars().take(90).collect::<String>())));
+        }
+        if plan.shots.len() > 6 {
+          ui.label(small(&format!("\u{2026} and {} more", plan.shots.len() - 6)));
+        }
+        ui.add_space(8.0);
+        if secondary(ui, Icon::RotateCw, "Go back to this plan", !busy) {
+          actions.push(Action::UsePlan(index));
+        }
+        ui.label(small("The plan in use now is kept here the same way."));
+      });
+    }
+  }
+}
+
 // --- Song ------------------------------------------------------------------------------------
 
 /// The song's earlier takes, newest first: click one to listen, then go back to it or leave it.
@@ -719,7 +753,7 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
   let sung = page.project.shots.iter().filter(|s| s.sing).count();
   let fal = env.backend.fal_connected();
   let mut changed = false;
-  panel(ui, panel_rect, "Scenes", "Planning again replaces the scenes and their stills, in both passes.", |ui| {
+  panel(ui, panel_rect, "Scenes", "Planning again starts a new storyboard; the one it replaces is kept under Earlier plans. To change one scene, open it and use \"Write this scene again\".", |ui| {
     field(ui, "Pace");
     if let Some(i) = segmented(ui, &Pace::ALL.map(Pace::label), Pace::ALL.iter().position(|p| *p == page.project.pace).unwrap_or(1)) {
       page.project.pace = Pace::ALL[i];
@@ -733,6 +767,19 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
     error_line(ui, page.error.as_deref());
     if run_button(ui, Icon::List, if planned { "Plan again" } else { "Plan the scenes" }, Some(A_CENT.to_owned()), page.project.brief.is_some() && page.project.grid.is_some() && !busy, None) {
       actions.push(Action::Plan);
+    }
+    // Pictures from before earlier plans were kept are still in the folder.
+    let unpictured = page.project.shots.iter().any(|shot| !shot.image.trim().is_empty() && shot.draft.still.is_none());
+    if planned && unpictured && !page.project.plan_versions.iter().any(|plan| plan.shots.iter().any(|shot| shot.draft.still.is_some())) {
+      ui.add_space(8.0);
+      if secondary(ui, Icon::Image, "Bring back drawn pictures", !busy) {
+        actions.push(Action::Reattach);
+      }
+      ui.label(small("Stills and clips drawn before a plan replaced the storyboard are still in the video's folder. This gives each scene the newest ones of its number, so they can be kept or redrawn one by one."));
+    }
+    if !page.project.plan_versions.is_empty() {
+      ui.add_space(14.0);
+      earlier_plans(page, ui, busy, actions);
     }
     let without_ending = page.project.scenes_without_ending().len();
     if without_ending > 0 {
@@ -863,6 +910,15 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
       if let Some(downstream) = downstream {
         ui.label(small(&format!("Redrawing this still puts {downstream} out of date. They stay until you make them again, and the left rail keeps count.")));
       }
+      // One scene written again by the writer, with the rest of the film untouched.
+      ui.add_space(6.0);
+      field(ui, "Write this scene again");
+      prompt_field(ui, "mv-scene-note", &mut page.scene_note, "What you want from it, if anything: closer, calmer, no microphone\u{2026}");
+      if run_button(ui, Icon::Sparkles, "Write this scene again", Some(A_CENT.to_owned()), !busy && page.project.brief.is_some(), None) {
+        actions.push(Action::PlanScene(index));
+      }
+      ui.label(small("Keeps every other scene as it is. This scene's pictures stay until you redraw them."));
+      let shot = &mut page.project.shots[index];
       let can_draw = !flowing && !shot.image.trim().is_empty() && (quality == Quality::Draft || shot.draft.still.is_some());
       if run_button(ui, Icon::RotateCw, if quality == Quality::Final { "Redraw this still" } else { "Draw this still" }, one.map(estimate), !busy && can_draw, None) {
         actions.push(Action::Stills(vec![index], better, Frames::Opening));

@@ -201,6 +201,14 @@ runs, and leaves everything it made editable before the next stage uses it.
   can be swapped, and the film is cut again on your Mac with the same frame-exact cut. A scene
   keeps its length, so the scenes around it stay on their beats; moving or removing one shifts
   what follows against the song.
+- **Earlier plans are kept, and one scene can be written again.** "Plan again" starts a new
+  storyboard and keeps the one it replaces, stills, clips and cut included, under Earlier plans
+  on the Scenes stage; "Go back to this plan" swaps it back and keeps the current one the same
+  way (the newest ten are kept). To fix a single scene, open it and use "Write this scene again",
+  with an optional note to the writer: it is rewritten in the company of its neighbours and
+  nothing else changes; its pictures stay until redrawn. For a plan made before earlier plans
+  were kept, "Bring back drawn pictures" gives each scene the newest still, ending, clip and lip
+  sync of its number still in the folder.
 - **Every scene has an ending frame.** Veo is given a scene's opening still and makes up the
   rest, so a push-in from far away arrives at a face it invented. The planner therefore writes
   each scene's last frame as well as its first, and scenes planned before it did are given theirs

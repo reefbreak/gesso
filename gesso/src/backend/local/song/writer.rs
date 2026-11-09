@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::plan::{Energy, Section, Slot, SongLength};
+use super::sentence;
 
 /// A song on paper: what the music model is given.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -370,6 +371,26 @@ pub fn parse_scenes(reply: &str) -> Vec<PlannedShot> {
     .collect()
 }
 
+/// Asks for one scene again, in the company of its neighbours so it cuts with them. `before` and
+/// `after` are the scenes either side as (opening frame, ending frame), where there are any.
+pub fn scene_prompt(brief: &Brief, style: &Style, slot: &Slot, before: Option<(&str, &str)>, after: Option<(&str, &str)>, lip_sync: bool, note: &str) -> String {
+  let mut prompt = scenes_prompt(brief, style, std::slice::from_ref(slot), lip_sync);
+  let mut context = String::new();
+  if let Some((image, ending)) = before {
+    context.push_str(&format!("\nThe scene before it opens on: {} It ends on: {}", sentence(image), sentence(ending)));
+  }
+  if let Some((image, ending)) = after {
+    context.push_str(&format!("\nThe scene after it opens on: {} It ends on: {}", sentence(image), sentence(ending)));
+  }
+  if !context.is_empty() {
+    prompt.push_str(&format!("\n\nThis one scene is being written again; the rest of the film stays as it is, so it has to cut with its neighbours:{context}"));
+  }
+  if !note.trim().is_empty() {
+    prompt.push_str(&format!("\n\nThe director asks for this scene: {}", sentence(note)));
+  }
+  prompt
+}
+
 /// Asks for the ending frame of scenes that have none. Each scene is its number, the section it
 /// falls in, how long it runs, its opening frame and what moves.
 pub fn endings_prompt(brief: &Brief, scenes: &[(usize, String, f64, String, String)]) -> String {
@@ -607,6 +628,8 @@ mod tests {
       assert_eq!(flowing.iter().map(|s| s.flows).collect::<Vec<_>>(), [false, true, false]);
       let slot = Slot { index: 3, section: "Verse 1".into(), ..Default::default() };
       assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"ending\": the last frame of the scene"));
+      let one = scene_prompt(&Brief::default(), &Style::default(), &slot, Some(("A dock.", "The deck.")), None, false, "make it rain");
+      assert!(one.contains("The scene before it opens on: A dock. It ends on: The deck.") && !one.contains("The scene after") && one.ends_with("The director asks for this scene: make it rain."), "{one}");
       assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"flows\": true when the scene carries on from the scene before it without a cut"));
       assert!(!fallback_scene(&slot).ending.is_empty());
       let prompt = endings_prompt(&Brief::default(), &[(3, "Verse 1".into(), 4.0, "A dock, far off.".into(), "The camera pushes in.".into())]);

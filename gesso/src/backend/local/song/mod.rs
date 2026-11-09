@@ -239,6 +239,17 @@ pub enum SongRequest {
     lip_sync: bool,
     writer: Writer,
   },
+  /// Writes one scene again, in the company of its neighbours (each an opening and ending frame).
+  PlanScene {
+    brief: Brief,
+    style: Style,
+    slot: Slot,
+    before: Option<(String, String)>,
+    after: Option<(String, String)>,
+    lip_sync: bool,
+    note: String,
+    writer: Writer,
+  },
   /// Makes a copy of the cut film sized for uploading to Instagram from a phone.
   Share {
     film: PathBuf,
@@ -371,6 +382,8 @@ pub enum SongUpdate {
     kbps: u32,
     bytes: u64,
   },
+  /// One scene written again, by its place in the storyboard.
+  Replanned(usize, PlannedShot),
   /// Ending frames for scenes that had none, by scene.
   Endings(Vec<(usize, String)>),
   Still {
@@ -553,6 +566,15 @@ impl SongRun<'_> {
         // Every scene ends somewhere: one the writer gave no ending frame gets its movement's.
         let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).map(|scene| if scene.ending.is_empty() { PlannedShot { ending: writer::fallback_ending(&scene.image, &scene.motion), ..scene } } else { scene }).collect();
         self.send(SongUpdate::Planned(scenes));
+      },
+      SongRequest::PlanScene { brief, style, slot, before, after, lip_sync, note, writer } => {
+        fn as_refs(pair: &Option<(String, String)>) -> Option<(&str, &str)> {
+          pair.as_ref().map(|(image, ending)| (image.as_str(), ending.as_str()))
+        }
+        let reply = self.write(writer, writer::DIRECTOR, &writer::scene_prompt(&brief, &style, &slot, as_refs(&before), as_refs(&after), lip_sync, &note)).await?;
+        let scene = writer::parse_scenes(&reply).into_iter().find(|scene| scene.index == slot.index).or_else(|| writer::parse_scenes(&reply).into_iter().next()).ok_or_else(|| anyhow::anyhow!("The writer didn't describe the scene"))?;
+        let scene = if scene.ending.is_empty() { PlannedShot { ending: writer::fallback_ending(&scene.image, &scene.motion), ..scene } } else { scene };
+        self.send(SongUpdate::Replanned(slot.index, scene));
       },
       SongRequest::Endings { brief, scenes, writer } => {
         // A long film is asked for in parts, so no reply is cut short; a failed part falls back
@@ -1140,7 +1162,7 @@ fn clip_prompt(look: &str, motion: &str, sing: bool, ends: bool) -> String {
 }
 
 /// `text` trimmed, ending in a full stop.
-fn sentence(text: &str) -> String {
+pub(super) fn sentence(text: &str) -> String {
   let text = text.trim();
   if text.is_empty() || text.ends_with(['.', '!', '?']) {
     text.to_owned()

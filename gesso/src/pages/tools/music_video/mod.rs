@@ -85,6 +85,12 @@ pub(super) enum Action {
   OwnLyrics,
   /// Draw the performer's sheet (the reference at this place) from their head shot.
   SheetFromFace(usize),
+  /// Have the writer describe one scene again, keeping the rest.
+  PlanScene(usize),
+  /// Go back to an earlier plan of the scenes, by its place in the project's list.
+  UsePlan(usize),
+  /// Give scenes the pictures still in the folder from an earlier plan.
+  Reattach,
   /// Go back to an earlier take of the song, by its place in the project's list.
   UseTake(usize),
   /// Export the cut film's copy for Instagram.
@@ -293,6 +299,10 @@ pub struct MusicVideoPage {
   /// Whether the writer has been asked for the ending frames this video's scenes lack, so a
   /// failed attempt isn't repeated on every frame.
   endings_asked: bool,
+  /// What the director asks of the scene being written again.
+  pub(super) scene_note: String,
+  /// The earlier plan of the scenes that is open, by its place in the project's list.
+  pub(super) viewing_plan: Option<usize>,
   /// The earlier take of the song that is open to listen to, by its place in the project's list.
   pub(super) viewing_take: Option<usize>,
   /// The earlier version of the lyrics that is open to read, by its place in the project's list.
@@ -303,7 +313,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, scene_note: String::new(), viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -466,6 +476,10 @@ impl MusicVideoPage {
         self.progress(sync);
       },
       SongUpdate::Endings(endings) => self.project.set_endings(&endings),
+      SongUpdate::Replanned(index, scene) => {
+        self.project.set_scene(index, &scene);
+        notice = Some(Notice { error: false, message: format!("Scene {} is rewritten. Its pictures were drawn to the old words: redraw them when you're happy with it.", index + 1), library_changed: false });
+      },
       SongUpdate::Shared { path, of, kbps, bytes } => {
         self.project.in_library.insert(path.clone());
         self.project.share = Some(Share { path, of, kbps, bytes });
@@ -953,6 +967,28 @@ impl MusicVideoPage {
         if !scenes.is_empty() {
           self.start(backend, 0, &format!("Writing ending frames for {} scene{}\u{2026}", scenes.len(), if scenes.len() == 1 { "" } else { "s" }), SongRequest::Endings { brief, scenes, writer: self.writer });
         }
+      },
+      Action::PlanScene(index) => {
+        let (Some(brief), Some(style), Some(shot)) = (self.project.brief.clone(), self.project.visual.clone(), self.project.shots.get(index)) else {
+          return;
+        };
+        let neighbour = |shot: Option<&Shot>| shot.filter(|s| !s.image.trim().is_empty()).map(|s| (s.image.clone(), s.ending.clone()));
+        let before = neighbour(index.checked_sub(1).and_then(|i| self.project.shots.get(i)));
+        let after = neighbour(self.project.shots.get(index + 1));
+        let note = std::mem::take(&mut self.scene_note);
+        self.start(backend, 0, &format!("Writing scene {} again\u{2026}", index + 1), SongRequest::PlanScene { brief, style, slot: shot.slot.clone(), before, after, lip_sync: self.project.lip_sync, note, writer: self.writer });
+      },
+      Action::UsePlan(index) => {
+        self.project.use_plan(index);
+        self.selected = None;
+        self.picked.clear();
+        self.viewing_plan = None;
+        self.save(backend);
+      },
+      Action::Reattach => {
+        let found = self.project.reattach_media(&dir);
+        self.save(backend);
+        self.error = Some(if found == 0 { "No pictures in the folder match these scenes.".to_owned() } else { format!("{found} picture{} brought back from the folder.", if found == 1 { "" } else { "s" }) });
       },
       Action::Plan => {
         let (Some(grid), Some(brief), Some(style)) = (&self.project.grid, self.project.brief.clone(), self.project.visual.clone()) else {
