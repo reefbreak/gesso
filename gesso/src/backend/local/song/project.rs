@@ -17,6 +17,8 @@ use super::writer::{Brief, Design, Draft, PlannedShot, Read, Style, TimedLine};
 /// Under the local library's folder.
 pub const DIRECTORY: &str = "songs";
 const FILENAME: &str = "project.json";
+/// How many earlier versions a scene keeps.
+const SCENE_VERSIONS_KEPT: usize = 20;
 /// How many earlier plans of the scenes a project keeps.
 const PLANS_KEPT: usize = 10;
 /// How many earlier versions of the lyrics a project keeps.
@@ -211,6 +213,10 @@ pub struct Shot {
   pub clip_version: u32,
   /// Why the last still failed (shown on the storyboard).
   pub error: Option<String>,
+  /// The scene as it stood before each change to its words or pictures, oldest first. The
+  /// newest [`SCENE_VERSIONS_KEPT`] stay; nothing a version points at is deleted.
+  #[serde(default)]
+  pub versions: Vec<SceneVersion>,
   /// Why the last clip or lip sync failed (shown on the Shots stage only: it says nothing about
   /// the still).
   #[serde(default)]
@@ -253,6 +259,40 @@ impl Shot {
 
   /// A new still for a pass. The clip filmed from the old still stays, now out of date; so does
   /// a final still that was redrawn from the old draft.
+  /// Keeps the scene as it stands among its earlier versions, unless it is the same as the last
+  /// one kept or has neither words nor pictures yet.
+  pub fn keep(&mut self, why: &str) {
+    let version = SceneVersion { at: chrono::Utc::now().to_rfc3339(), why: why.to_owned(), image: self.image.clone(), motion: self.motion.clone(), ending: self.ending.clone(), beat: self.beat.clone(), sing: self.sing, flows: self.flows, skip_ending: self.skip_ending, draft: self.draft.clone(), finished: self.finished.clone() };
+    let same = |kept: &SceneVersion| (&kept.image, &kept.motion, &kept.ending, &kept.beat, kept.sing, kept.flows, kept.skip_ending, &kept.draft, &kept.finished) == (&version.image, &version.motion, &version.ending, &version.beat, version.sing, version.flows, version.skip_ending, &version.draft, &version.finished);
+    if (self.image.trim().is_empty() && self.draft.still.is_none()) || self.versions.last().is_some_and(same) {
+      return;
+    }
+    self.versions.push(version);
+    let extra = self.versions.len().saturating_sub(SCENE_VERSIONS_KEPT);
+    self.versions.drain(..extra);
+  }
+
+  /// Goes back to an earlier version of the scene, words and pictures, keeping the present one
+  /// first. The version goes out of the list, since it is now the scene.
+  pub fn restore(&mut self, index: usize) {
+    if index >= self.versions.len() {
+      return;
+    }
+    let version = self.versions.remove(index);
+    self.keep("Before going back to an earlier version");
+    self.image = version.image;
+    self.motion = version.motion;
+    self.ending = version.ending;
+    self.beat = version.beat;
+    self.sing = version.sing;
+    self.flows = version.flows;
+    self.skip_ending = version.skip_ending;
+    self.draft = version.draft;
+    self.finished = version.finished;
+    self.error = None;
+    self.clip_error = None;
+  }
+
   pub fn set_still(&mut self, quality: Quality, path: PathBuf) {
     let guide = self.draft.still.clone();
     if quality == Quality::Draft && self.finished.still.is_some() && self.finished.still_from.is_none() {
@@ -450,6 +490,24 @@ pub struct SongProject {
   /// song is about to move on from them.
   #[serde(default)]
   pub lyric_versions: Vec<LyricVersion>,
+}
+
+/// A scene as it stood at some point: its words and its pictures in both passes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SceneVersion {
+  pub at: String,
+  /// Why it was kept ("Before a new opening frame").
+  pub why: String,
+  pub image: String,
+  pub motion: String,
+  pub ending: String,
+  pub beat: String,
+  pub sing: bool,
+  pub flows: bool,
+  pub skip_ending: bool,
+  pub draft: Take,
+  pub finished: Take,
 }
 
 /// The storyboard as it stood before a plan replaced it.
@@ -971,6 +1029,7 @@ impl SongProject {
   pub fn set_scene(&mut self, index: usize, planned: &PlannedShot) {
     let lip_sync = self.lip_sync;
     if let Some(shot) = self.shots.get_mut(index) {
+      shot.keep("Before the writer rewrote it");
       shot.image.clone_from(&planned.image);
       shot.motion.clone_from(&planned.motion);
       shot.beat.clone_from(&planned.beat);
@@ -1701,6 +1760,30 @@ mod tests {
     assert!(project.shots[1].draft.clip.is_none() && project.shots[1].finished.still.is_some(), "a clip with no still stays off; a final still on its own comes back: {:?}", project.shots[1]);
     assert_eq!(project.reattach_media(&dir), 0);
     let _ = std::fs::remove_dir_all(dir);
+  }
+
+  /// A scene keeps its earlier selves, words and pictures together, and can go back to one.
+  #[test]
+  fn a_scene_keeps_its_earlier_versions() {
+    let mut shot = Shot::default();
+    shot.keep("Before a new opening frame");
+    assert!(shot.versions.is_empty(), "nothing to keep yet");
+    shot.image = "A dock".into();
+    shot.set_still(Quality::Draft, PathBuf::from("a.png"));
+    shot.keep("Before a new opening frame");
+    shot.keep("Before a new opening frame");
+    assert_eq!(shot.versions.len(), 1, "the same state is kept once");
+    shot.set_still(Quality::Draft, PathBuf::from("b.png"));
+    shot.keep("Before the writer rewrote it");
+    shot.image = "A quay".into();
+    shot.restore(0);
+    assert_eq!((shot.image.as_str(), shot.draft.still.clone()), ("A dock", Some(PathBuf::from("a.png"))));
+    assert_eq!(shot.versions.iter().map(|v| (v.image.as_str(), v.draft.still.clone(), v.why.as_str())).collect::<Vec<_>>(), [("A dock", Some(PathBuf::from("b.png")), "Before the writer rewrote it"), ("A quay", Some(PathBuf::from("b.png")), "Before going back to an earlier version")]);
+    for n in 0..30 {
+      shot.image = format!("take {n}");
+      shot.keep("Before a new opening frame");
+    }
+    assert_eq!(shot.versions.len(), SCENE_VERSIONS_KEPT);
   }
 
   #[test]

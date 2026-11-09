@@ -190,6 +190,60 @@ fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &
   }
 }
 
+/// A scene's earlier versions, newest first: each is its words and pictures as they stood
+/// before a change. Click one to read it, then go back to it or leave it.
+fn scene_versions(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, index: usize, busy: bool, actions: &mut Vec<Action>) {
+  let shot = &page.project.shots[index];
+  ui.horizontal(|ui| {
+    widgets::hud(ui, "Earlier versions of this scene", theme::FAINT);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+      if secondary(ui, Icon::Plus, "Keep this version", !shot.image.trim().is_empty()) {
+        actions.push(Action::KeepScene(index));
+      }
+    });
+  });
+  ui.add_space(6.0);
+  if shot.versions.is_empty() {
+    ui.label(small("Every redraw, new clip, lip sync or rewrite keeps the scene as it was, words and pictures together, and it's listed here to go back to."));
+    return;
+  }
+  for (n, version) in shot.versions.iter().enumerate().rev() {
+    let open = page.viewing_scene_version == Some(n);
+    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::click());
+    ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+    let picture = Rect::from_min_size(pos2(row.left() + 8.0, row.top() + 8.0), vec2(85.0, 48.0));
+    thumbnail(ui, picture, cache, version.draft.still.as_deref().or(version.finished.still.as_deref()), Icon::Image);
+    let text_left = picture.right() + 12.0;
+    let words: String = version.image.chars().take(60).collect();
+    ui.painter().text(pos2(text_left, row.top() + 18.0), Align2::LEFT_CENTER, words, FontId::new(13.0, theme::medium()), theme::INK);
+    let has = [version.draft.still.is_some().then_some("still"), version.draft.end_still.is_some().then_some("ending"), version.draft.clip.is_some().then_some("clip"), version.draft.synced.is_some().then_some("lip sync"), version.finished.still.is_some().then_some("final")].into_iter().flatten().collect::<Vec<_>>().join(", ");
+    ui.painter().text(pos2(text_left, row.bottom() - 16.0), Align2::LEFT_CENTER, format!("{} \u{b7} {}{}", when(&version.at), version.why, if has.is_empty() { String::new() } else { format!(" \u{b7} {has}") }), FontId::new(11.0, theme::mono()), theme::MUTED);
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+      page.viewing_scene_version = if open { None } else { Some(n) };
+    }
+    ui.add_space(6.0);
+    if open {
+      card(ui, "As it was".to_owned(), |ui| {
+        ui.label(small("Opening frame"));
+        ui.label(body(&version.image));
+        if !version.motion.trim().is_empty() {
+          ui.label(small("What moves"));
+          ui.label(body(&version.motion));
+        }
+        if !version.ending.trim().is_empty() {
+          ui.label(small("Ending frame"));
+          ui.label(body(&version.ending));
+        }
+        ui.add_space(8.0);
+        if secondary(ui, Icon::RotateCw, "Go back to this version", !busy) {
+          actions.push(Action::RestoreScene(index, n));
+        }
+        ui.label(small("Brings back its words and pictures. The scene as it is now is kept as a version first."));
+      });
+    }
+  }
+}
+
 /// Earlier plans of the scenes, newest first: open one to see what it held, and go back to it.
 fn earlier_plans(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &mut Vec<Action>) {
   widgets::hud(ui, "Earlier plans", theme::FAINT);
@@ -942,6 +996,8 @@ fn scenes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect
           actions.push(Action::Stills(vec![index], better, Frames::Ending));
         }
       }
+      ui.add_space(14.0);
+      scene_versions(page, ui, env.cache, index, busy, actions);
     }
     next_button(ui, Stage::Shots, drawn, actions);
   });

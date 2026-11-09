@@ -209,6 +209,12 @@ runs, and leaves everything it made editable before the next stage uses it.
   nothing else changes; its pictures stay until redrawn. For a plan made before earlier plans
   were kept, "Bring back drawn pictures" gives each scene the newest still, ending, clip and lip
   sync of its number still in the folder.
+- **Every scene keeps its versions.** Before each change to a scene, a new opening or ending
+  frame, clip, lip sync or a rewrite by the writer, the scene as it stood is kept: its words and
+  its pictures in both passes together. "Keep this version" does it by hand. The scene editor
+  lists them newest first with a thumbnail; click one to read it, and "Go back to this version"
+  brings back its words and pictures (the scene as it is now is kept first). The newest twenty
+  are kept, and no picture a version points at is deleted.
 - **Every scene has an ending frame.** Veo is given a scene's opening still and makes up the
   rest, so a push-in from far away arrives at a face it invented. The planner therefore writes
   each scene's last frame as well as its first, and scenes planned before it did are given theirs

@@ -87,6 +87,10 @@ pub(super) enum Action {
   SheetFromFace(usize),
   /// Have the writer describe one scene again, keeping the rest.
   PlanScene(usize),
+  /// Keep a scene as it stands among its earlier versions.
+  KeepScene(usize),
+  /// Go back to an earlier version of a scene (the scene, then the version's place in its list).
+  RestoreScene(usize, usize),
   /// Go back to an earlier plan of the scenes, by its place in the project's list.
   UsePlan(usize),
   /// Give scenes the pictures still in the folder from an earlier plan.
@@ -301,6 +305,8 @@ pub struct MusicVideoPage {
   endings_asked: bool,
   /// What the director asks of the scene being written again.
   pub(super) scene_note: String,
+  /// The earlier version of the selected scene that is open, by its place in the scene's list.
+  pub(super) viewing_scene_version: Option<usize>,
   /// The earlier plan of the scenes that is open, by its place in the project's list.
   pub(super) viewing_plan: Option<usize>,
   /// The earlier take of the song that is open to listen to, by its place in the project's list.
@@ -313,7 +319,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, scene_note: String::new(), viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -334,6 +340,8 @@ impl MusicVideoPage {
     }
     if let Some(id) = std::mem::take(&mut self.open_on_start) {
       self.apply(env, Action::Open(id));
+      // For screenshots: a scene to open in the editor.
+      self.selected = std::env::var("ARTCRAFT_MUSIC_VIDEO_SCENE").ok().and_then(|n| n.parse::<usize>().ok()).and_then(|n| n.checked_sub(1)).filter(|n| *n < self.project.shots.len());
     }
     self.count_costs(ui, env.backend);
     // A flowing scene opens on the ending frame before it, whenever that frame is new.
@@ -496,6 +504,7 @@ impl MusicVideoPage {
           // The clip and lip sync made from the old still stay, marked out of date, until they
           // are made again.
           self.project.in_library.insert(path.clone());
+          shot.keep(if ending { "Before a new ending frame" } else { "Before a new opening frame" });
           if ending {
             shot.set_end_still(quality, path);
           } else {
@@ -510,6 +519,7 @@ impl MusicVideoPage {
         if let Some(shot) = self.project.shots.get_mut(index) {
           // A lip sync of the old clip stays, marked out of date.
           self.project.in_library.insert(path.clone());
+          shot.keep("Before a new clip");
           shot.set_clip(quality, path);
           shot.clip_error = None;
         }
@@ -525,6 +535,7 @@ impl MusicVideoPage {
       SongUpdate::Synced { index, path } => {
         if let Some(shot) = self.project.shots.get_mut(index) {
           self.project.in_library.insert(path.clone());
+          shot.keep("Before a new lip sync");
           shot.set_synced(quality, path);
           shot.clip_error = None;
         }
@@ -977,6 +988,21 @@ impl MusicVideoPage {
         let after = neighbour(self.project.shots.get(index + 1));
         let note = std::mem::take(&mut self.scene_note);
         self.start(backend, 0, &format!("Writing scene {} again\u{2026}", index + 1), SongRequest::PlanScene { brief, style, slot: shot.slot.clone(), before, after, lip_sync: self.project.lip_sync, note, writer: self.writer });
+      },
+      Action::KeepScene(index) => {
+        if let Some(shot) = self.project.shots.get_mut(index) {
+          shot.keep("Kept by hand");
+          self.save(backend);
+        }
+      },
+      Action::RestoreScene(index, version) => {
+        if let Some(shot) = self.project.shots.get_mut(index) {
+          shot.restore(version);
+          self.project.cut = None;
+          self.viewing_scene_version = None;
+          self.player = None;
+          self.save(backend);
+        }
       },
       Action::UsePlan(index) => {
         self.project.use_plan(index);
