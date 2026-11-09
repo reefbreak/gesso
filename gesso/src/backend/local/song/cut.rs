@@ -268,6 +268,17 @@ pub fn listening_copy(path: &Path) -> anyhow::Result<(Vec<u8>, &'static str)> {
   Ok((std::fs::read(&out)?, "audio/aac"))
 }
 
+/// A mono 16-bit WAV of the whole track, for separating the vocal from. A WAV keeps the stem on
+/// the track's own clock: a compressed copy adds an encoder delay at the start, which would put
+/// every lip sync that much early. It goes to fal's storage, so its size doesn't matter.
+pub fn separation_copy(path: &Path) -> anyhow::Result<Vec<u8>> {
+  anyhow::ensure!(video::ffmpeg_available(), "Reading the track needs FFmpeg: install it with `brew install ffmpeg`.");
+  let dir = tempfile::tempdir()?;
+  let out = dir.path().join("track.wav");
+  run(&["-y", "-v", "error", "-i", &path.to_string_lossy(), "-vn", "-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", &out.to_string_lossy()].map(str::to_owned))?;
+  Ok(std::fs::read(&out)?)
+}
+
 /// A clip's first `seconds`, silent, re-encoded so it's exactly that long. Lip sync is billed by
 /// the second and syncs the whole clip, so only the part the cut will use is sent.
 pub fn head_of_clip(clip: &Path, seconds: f64) -> anyhow::Result<Vec<u8>> {
@@ -290,7 +301,10 @@ pub fn slice_of_track(track: &Path, start: f64, end: f64) -> anyhow::Result<Vec<
   anyhow::ensure!(end > start, "The slice ends before it starts");
   let dir = tempfile::tempdir()?;
   let out = dir.path().join("slice.wav");
-  run(&["-y", "-v", "error", "-ss", &format!("{start:.3}"), "-i", &track.to_string_lossy(), "-t", &format!("{:.3}", end - start), "-vn", "-ac", "1", "-ar", "44100", &out.to_string_lossy()].map(str::to_owned))?;
+  // The seek comes after the input: seeking before it jumps by byte position, which on an MP3
+  // without a seek table (as a separated stem can be) can land seconds out, and the mouth then
+  // moves to the wrong moment. Decoding from the start to the slice is exact and costs nothing.
+  run(&["-y", "-v", "error", "-i", &track.to_string_lossy(), "-ss", &format!("{start:.3}"), "-t", &format!("{:.3}", end - start), "-vn", "-ac", "1", "-ar", "44100", &out.to_string_lossy()].map(str::to_owned))?;
   Ok(std::fs::read(&out)?)
 }
 
@@ -380,6 +394,15 @@ mod tests {
     std::fs::write(&slice, slice_of_track(&song, 1.7, 3.9).unwrap()).unwrap();
     assert!((duration(&slice).unwrap() - 2.2).abs() < 0.05);
     assert!(slice_of_track(&song, 3.0, 3.0).is_err());
+    // The slice is taken from exactly where it says: silence, then a tone from 5s, sliced 4s to
+    // 6s, is quiet for its first second and loud for its second.
+    let onset = dir.path().join("onset.mp3");
+    run(&["-y", "-v", "error", "-f", "lavfi", "-i", "aevalsrc=if(gte(t\\,5)\\,0.8*sin(2*PI*440*t)\\,0):s=44100:d=10", "-c:a", "libmp3lame", "-q:a", "4", "-write_xing", "0", &onset.to_string_lossy()].map(str::to_owned)).unwrap();
+    let wav = slice_of_track(&onset, 4.0, 6.0).unwrap();
+    let samples: Vec<i16> = wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    let loudness = |range: std::ops::Range<usize>| samples[range].iter().map(|s| f64::from(s.unsigned_abs())).sum::<f64>() / 44100.0;
+    assert!((samples.len() as f64 - 88200.0).abs() < 2000.0, "{}", samples.len());
+    assert!(loudness(0..44100) < 200.0 && loudness(44100..88200) > 10_000.0, "{} then {}", loudness(0..44100), loudness(44100..88200));
 
     // Faded: black at both ends, the picture in between, and a fade that began in the first
     // shot carried on through the cut into the second.

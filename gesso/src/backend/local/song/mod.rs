@@ -145,6 +145,9 @@ pub struct StillJob {
   /// The frame of this run (a scene and whether it is its ending) that this one is matched to
   /// and so waits for. An ending with no opening named waits for its own scene's opening.
   pub after: Option<(usize, bool)>,
+  /// The performer sings this scene to the camera: the mouth must be in clear view, with
+  /// nothing in front of it, or the lip sync fails.
+  pub sing: bool,
 }
 
 /// A clip to make from a still.
@@ -398,6 +401,9 @@ pub enum SongUpdate {
   Note(String),
   Done(Result<(), String>),
 }
+
+/// What a sung scene's frames must show for the lip sync to take: a clear, unobstructed mouth.
+const SUNG_FRAME: &str = "The performer sings this scene to the camera, so the mouth must be in clear view: face towards the lens, the mouth and chin fully visible, lit and in sharp focus, with nothing at all in front of or touching the lower face. No microphone anywhere near the mouth (no handheld mic, no mic stand in front of the face, no headset), no hands, hair, cup, bottle, cigarette, smoke, scarf, mask or prop in the way, and no one between the camera and the performer.";
 
 /// How many scenes one call to the writer is asked to give ending frames.
 const ENDINGS_PER_CALL: usize = 30;
@@ -805,7 +811,7 @@ impl SongRun<'_> {
     // An ending frame is drawn with its scene's opening frame beside it, after the draft guide.
     let opening = job.opening.as_deref().filter(|_| job.ending).map(|path| self.engine.load_path(path)).transpose()?;
     let kinds: Vec<ReferenceKind> = references.iter().map(|(kind, _)| *kind).collect();
-    let prompt = still_prompt(design, &job.image, &kinds, guide.is_some(), opening.is_some());
+    let prompt = still_prompt(design, &job.image, &kinds, guide.is_some(), opening.is_some(), job.sing);
     let images: Vec<RefImage> = guide.into_iter().chain(opening).chain(references.iter().map(|(_, image)| image.clone())).collect();
     let file = self.patiently(|| self.engine.vertex.generate_image(GeminiImageRequest { model, prompt: &prompt, images: &images, aspect_ratio: Some(aspect.ratio()), image_size: Some(size) })).await?;
     self.charge(google_account(&file), self.engine.prices.gemini_call(model, file.usage, Some(size)).unwrap_or(0.0), model);
@@ -835,9 +841,8 @@ impl SongRun<'_> {
   async fn separate_vocals(&self, fal: &FalClient, dir: &Path, track: &Path) -> anyhow::Result<PathBuf> {
     self.send(SongUpdate::Note("Separating the vocal from the track\u{2026}".to_owned()));
     let source = track.to_path_buf();
-    let (seconds, copy) = tokio::task::spawn_blocking(move || (cut::duration(&source), cut::listening_copy(&source))).await?;
-    let (bytes, mime) = copy?;
-    let vocals = fal.vocals(&bytes, mime).await?;
+    let (seconds, copy) = tokio::task::spawn_blocking(move || (cut::duration(&source), cut::separation_copy(&source))).await?;
+    let vocals = fal.vocals(&copy?, "audio/wav").await?;
     self.charge(Account::Fal, seconds.unwrap_or(0.0) * self.engine.prices.vocals_per_second(), VOCALS_MODEL);
     let path = save(dir, "vocals.mp3", &vocals)?;
     self.add_to_library(&path, &vocals, MediaClass::Audio);
@@ -851,7 +856,11 @@ impl SongRun<'_> {
     let (start, end) = (job.start, job.end);
     let (head, voice) = tokio::task::spawn_blocking(move || (cut::head_of_clip(&clip, seconds), cut::slice_of_track(&stem, start, end))).await?;
     let pro = quality == Quality::Final;
-    let synced = fal.lip_sync(&head?, &voice?, pro).await?;
+    let voice = voice?;
+    // The slice is kept beside the synced clip, so a sync that lands at the wrong moment can be
+    // checked against the sound it was given: if the slice is right, the model is to blame.
+    save(dir, &format!("clip_{:03}_{}_voice_v{}.wav", job.index + 1, quality.tag(), job.version), &voice)?;
+    let synced = fal.lip_sync(&head?, &voice, pro).await?;
     self.charge(Account::Fal, seconds * self.engine.prices.lip_sync_per_second(pro), if pro { "lipsync-2-pro" } else { "lipsync-2" });
     let path = save(dir, &format!("clip_{:03}_{}_synced_v{}.mp4", job.index + 1, quality.tag(), job.version), &synced)?;
     self.add_to_library(&path, &synced, MediaClass::Video);
@@ -1077,8 +1086,12 @@ fn change_prompt(change: &str) -> String {
 /// A still's prompt. The attached pictures are named one by one, in the order they are sent
 /// (`kinds`, after the draft frame when `guided`), because which of them exist varies: calling the
 /// location "the performer's reference sheet" when the sheet is missing draws the wrong person.
-fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: bool, ends_shot: bool) -> String {
+fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: bool, ends_shot: bool, sing: bool) -> String {
   let mut parts = vec![format!("A single frame from a music video. {}", sentence(image))];
+  // The mouth is redrawn afterwards to the vocal, which fails when anything sits in front of it.
+  if sing {
+    parts.push(SUNG_FRAME.to_owned());
+  }
   let pictures: Vec<&str> = guided.then_some("the approved draft of this exact frame").into_iter().chain(ends_shot.then_some("the frame this same shot opens on")).chain(kinds.iter().map(|kind| match kind {
     ReferenceKind::Look => "the performer's reference sheet",
     ReferenceKind::Face => "the performer's face in close-up",
@@ -1121,7 +1134,7 @@ fn still_prompt(design: &Design, image: &str, kinds: &[ReferenceKind], guided: b
 
 fn clip_prompt(look: &str, motion: &str, sing: bool, ends: bool) -> String {
   // A sung scene's mouth is redrawn afterwards; that works when the face stays in view and the mouth is already moving.
-  let singing = if sing { " The performer sings to the camera throughout, mouth moving and clearly visible, face towards the lens and never covered, head fairly steady." } else { "" };
+  let singing = if sing { " The performer sings to the camera throughout, mouth moving and clearly visible, face towards the lens, head fairly steady. Nothing comes between the camera and the mouth at any moment: no microphone (the performer holds none, and no mic or stand is in front of the face), no hands, hair, cup, smoke, prop or passer-by, and the performer never turns away, looks down or covers the face. The lower face stays lit and in focus for the whole shot." } else { "" };
   let ending = if ends { " The shot moves in one continuous take from the first frame to the last frame given, and ends exactly on the last frame." } else { "" };
   format!("{}{singing}{ending} Keep the look of the opening frame: {}{} No text or captions appear.", sentence(motion), sentence(look), no_colour(look))
 }
@@ -1498,7 +1511,7 @@ mod tests {
       let (engine, dir) = engine(base_url);
       let project = dir.join("project");
       let portrait = save(&project, "portrait_v1.png", &tiny_png()).unwrap();
-      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None, ending: false, opening: None, after: None }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None, ending: false, opening: None, after: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "The performer under a strip light".into(), guide: None, ending: false, opening: None, after: None, sing: false }, StillJob { index: 1, version: 2, image: "A tunnel".into(), guide: None, ending: false, opening: None, after: None, sing: false }];
       let (tx, rx) = std::sync::mpsc::channel();
       engine.start_song(3, SongRequest::Stills { dir: project.clone(), design: Design { look: "black and white".into(), character: "a dancer".into(), venue: "a tunnel".into() }, references: vec![(ReferenceKind::Look, portrait)], aspect: Aspect::Tall, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
 
@@ -1543,7 +1556,7 @@ mod tests {
       let opening = save(&project.join("shots"), "shot_001_draft_v1.png", &tiny_png()).unwrap();
       let sheet = save(&project.join("references"), "look_01_v1.png", &tiny_png()).unwrap();
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 0, version: 2, image: "The performer's face fills the frame".into(), guide: None, ending: true, opening: Some(opening), after: None }];
+      let shots = vec![StillJob { index: 0, version: 2, image: "The performer's face fills the frame".into(), guide: None, ending: true, opening: Some(opening), after: None, sing: false }];
       engine.start_song(16, SongRequest::Stills { dir: project, design: Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() }, references: vec![(ReferenceKind::Look, sheet)], aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 16).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, path, ending: true }) if path.ends_with("shots/shot_001_draft_end_v2.png")), "{updates:?}");
@@ -1563,8 +1576,8 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply()]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      let ending = StillJob { index: 0, version: 2, image: "A face fills the frame".into(), guide: None, ending: true, opening: None, after: None };
-      let shots = vec![ending.clone(), StillJob { index: 0, version: 1, image: "A dock, far off".into(), guide: None, ending: false, opening: None, after: None }, StillJob { index: 5, ..ending }];
+      let ending = StillJob { index: 0, version: 2, image: "A face fills the frame".into(), guide: None, ending: true, opening: None, after: None, sing: false };
+      let shots = vec![ending.clone(), StillJob { index: 0, version: 1, image: "A dock, far off".into(), guide: None, ending: false, opening: None, after: None, sing: false }, StillJob { index: 5, ..ending }];
       engine.start_song(21, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 21).await;
       let stills: Vec<(usize, bool)> = updates.iter().filter_map(|u| if let SongUpdate::Still { index, ending, .. } = u { Some((*index, *ending)) } else { None }).collect();
@@ -1583,7 +1596,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply(), image_reply(), image_reply()]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      let frame = |index, image: &str, ending, after| StillJob { index, version: if ending { 2 } else { 1 }, image: image.into(), guide: None, ending, opening: None, after };
+      let frame = |index, image: &str, ending, after| StillJob { index, version: if ending { 2 } else { 1 }, image: image.into(), guide: None, ending, opening: None, after, sing: false };
       // Scene 2 has no opening of its own: its ending follows scene 1's ending.
       let shots = vec![frame(1, "The quay, from the water", true, Some((0, true))), frame(0, "The deck at the rail", true, None), frame(0, "A dock, far off", false, None)];
       engine.start_song(22, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
@@ -1603,7 +1616,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(vec![image_reply()]);
       let (engine, dir) = engine(base_url);
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 4, version: 2, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None }];
+      let shots = vec![StillJob { index: 4, version: 2, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None, sing: false }];
       engine.start_song(12, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: true, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 12).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 4, path, ending: false }) if path.ends_with("shots/shot_005_draft_v2.png")), "{updates:?}");
@@ -1624,7 +1637,7 @@ mod tests {
       let config = LocalConfig { gcp_api_key: Some("test-key".into()), vertex_base_url: Some(vertex_url), gemini_api_key: Some("gm-key".into()), gemini_base_url: Some(gemini_url), bedrock_enabled: Some(false), ..Default::default() };
       let engine = Arc::new(LocalEngine::new(&dir, config, reqwest::Client::builder().no_proxy().build().unwrap()));
       let (tx, rx) = std::sync::mpsc::channel();
-      let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "A wide shot".into(), guide: None, ending: false, opening: None, after: None, sing: false }];
       engine.start_song(11, SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }, tx, egui::Context::default());
       let updates = finished(&rx, 11).await;
       assert!(matches!(updates.first(), Some(SongUpdate::Still { index: 0, .. })), "{updates:?}");
@@ -1719,7 +1732,7 @@ mod tests {
       let (base_url, requests) = fake_vertex(Vec::new());
       let (engine, dir) = engine(base_url);
       let run = SongRun { engine: &engine, run_id: 9, tx: &std::sync::mpsc::channel().0, ctx: &egui::Context::default(), cancel: Arc::new(AtomicBool::new(true)), batch: "b".into(), pace: Pace::new(Duration::ZERO), project: None, part: COST_PARTS[0] };
-      let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None, ending: false, opening: None, after: None }];
+      let shots = vec![StillJob { index: 0, version: 1, image: "x".into(), guide: None, ending: false, opening: None, after: None, sing: false }];
       run.stage(SongRequest::Stills { dir: dir.join("p"), design: Design::default(), references: Vec::new(), aspect: Aspect::Wide, quality: Quality::Draft, better: false, shots }).await.unwrap();
       assert!(requests.lock().unwrap().is_empty());
       let _ = std::fs::remove_dir_all(dir);
@@ -1767,20 +1780,25 @@ mod tests {
     #[test]
     fn stills_say_what_the_attached_pictures_are() {
       let design = Design { look: "grainy black and white".into(), character: "a dancer in a lanyard".into(), venue: String::new() };
-      let sheet_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Look], false, false);
+      let sheet_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Look], false, false, false);
       assert!(sheet_only.contains("The attached picture is the performer's reference sheet.") && sheet_only.contains("they are the person on the reference sheet"));
       assert!(!sheet_only.contains("Keep the location"));
-      let all = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location, ReferenceKind::Prop], false, false);
+      let all = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location, ReferenceKind::Prop], false, false, false);
       assert!(all.contains("The attached pictures, in order: 1, the performer's reference sheet; 2, the location; 3, a prop.") && all.contains("Keep the location and the props as their pictures show them."));
-      let alone = still_prompt(&design, "A tunnel", &[], false, false);
+      let alone = still_prompt(&design, "A tunnel", &[], false, false, false);
       assert_eq!(alone, "A single frame from a music video. A tunnel. The performer: a dancer in a lanyard. The video's look, which this frame must match: grainy black and white. Strictly black and white: no colour anywhere in the frame. No text, captions, subtitles, borders or logos.");
       assert_eq!(clip_prompt("grainy", "She runs", false, false), "She runs. Keep the look of the opening frame: grainy. No text or captions appear.");
+      // A sung scene's frames and clip keep the mouth clear: no microphone or anything in front of it.
+      let sung = still_prompt(&design, "A tunnel", &[], false, false, true);
+      assert!(sung.contains("No microphone anywhere near the mouth") && sung.contains("nothing at all in front of or touching the lower face"), "{sung}");
+      assert!(!still_prompt(&design, "A tunnel", &[], false, false, false).contains("microphone"));
+      assert!(clip_prompt("grainy", "She turns", true, false).contains("no microphone (the performer holds none"));
     }
 
     #[test]
     fn a_black_and_white_look_is_said_outright_and_enforced() {
       let design = Design { look: "Raw 16mm Black-and-White film".into(), character: "a dancer".into(), venue: String::new() };
-      assert!(still_prompt(&design, "A tunnel", &[], false, false).contains("film. Strictly black and white: no colour anywhere in the frame. No text"));
+      assert!(still_prompt(&design, "A tunnel", &[], false, false, false).contains("film. Strictly black and white: no colour anywhere in the frame. No text"));
       assert!(clip_prompt(&design.look, "She runs", false, false).contains("Strictly black and white"));
       assert!(reference_prompt(ReferenceKind::Prop, "Lanyard", "A badge", "monochrome, grainy").contains("Strictly black and white"));
       assert!(!is_monochrome("neon colour, wet streets"));
@@ -1803,10 +1821,10 @@ mod tests {
     #[test]
     fn the_close_up_is_named_and_the_face_is_taken_from_it() {
       let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
-      let both = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Face, ReferenceKind::Location], false, false);
+      let both = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Face, ReferenceKind::Location], false, false, false);
       assert!(both.contains("in order: 1, the performer's reference sheet; 2, the performer's face in close-up; 3, the location."), "{both}");
       assert!(both.contains("Take the face from the close-up, which shows it in full detail"));
-      let face_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Face], false, false);
+      let face_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Face], false, false, false);
       assert!(face_only.contains("they are the person in the close-up") && !face_only.contains("Keep the location"), "{face_only}");
       assert!(face_from_sheet_prompt("grainy black and white").contains("this exact person") && face_from_sheet_prompt("grainy black and white").contains("Strictly black and white"));
     }
@@ -1828,16 +1846,16 @@ mod tests {
       assert!(!clip_prompt("grainy", "The camera pushes in", false, false).contains("last frame"));
       let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
       // In the final pass the draft ending goes first, then the opening frame, then the references.
-      let final_ending = still_prompt(&design, "A face", &[ReferenceKind::Look, ReferenceKind::Face], true, true);
+      let final_ending = still_prompt(&design, "A face", &[ReferenceKind::Look, ReferenceKind::Face], true, true, false);
       assert!(final_ending.contains("in order: 1, the approved draft of this exact frame; 2, the frame this same shot opens on; 3, the performer's reference sheet; 4, the performer's face in close-up."), "{final_ending}");
-      assert!(!still_prompt(&design, "A face", &[ReferenceKind::Look], false, false).contains("opens on"));
+      assert!(!still_prompt(&design, "A face", &[ReferenceKind::Look], false, false, false).contains("opens on"));
     }
 
     /// With the sheet missing, the location's picture must not be taken for the performer.
     #[test]
     fn a_missing_sheet_isnt_mistaken_for_the_location() {
       let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
-      let prompt = still_prompt(&design, "A tunnel", &[ReferenceKind::Location], false, false);
+      let prompt = still_prompt(&design, "A tunnel", &[ReferenceKind::Location], false, false, false);
       assert!(prompt.contains("The attached picture is the location.") && prompt.contains("The performer: a dancer."));
       assert!(!prompt.contains("reference sheet"));
     }
@@ -1845,11 +1863,11 @@ mod tests {
     #[test]
     fn the_final_pass_recreates_the_approved_frame() {
       let design = Design { look: "grainy".into(), character: "a dancer".into(), venue: String::new() };
-      let guided = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], true, false);
+      let guided = still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], true, false, false);
       assert!(guided.contains("in order: 1, the approved draft of this exact frame; 2, the performer's reference sheet; 3, the location."));
       assert!(guided.contains("Recreate the approved draft faithfully"));
       assert!(guided.contains("whatever this scene's wording or the draft suggests"), "the sheet outranks a draft that drifted");
-      assert!(!still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], false, false).contains("approved draft"));
+      assert!(!still_prompt(&design, "A tunnel", &[ReferenceKind::Look, ReferenceKind::Location], false, false, false).contains("approved draft"));
     }
 
     #[test]

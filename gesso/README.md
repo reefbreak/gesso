@@ -221,6 +221,16 @@ runs, and leaves everything it made editable before the next stage uses it.
   encoded at half its own rate, so the copy is always well under the size of the cut. It keeps the cut's shape,
   so choose Reel, Feed or Square under Format first for a tall or square one. A newer cut marks
   the copy out of date.
+- **Sung scenes keep the mouth clear.** The lip sync fails on anything in front of the mouth, so
+  for a sung scene the planner, the still prompts (opening and ending) and the clip prompt all
+  say: face to the lens, mouth and chin fully visible, no microphone of any kind, no hands, hair,
+  drink, smoke or props in the way, nothing crossing in front. Microphones belong in unsung
+  scenes.
+- **Lip sync timing.** The vocal stem is separated from a WAV copy of the track, and each
+  scene's slice is cut by decoding from the start, so both stay on the track's own clock. The
+  slice sent to fal is kept beside the synced clip as `clip_NNN_draft_voice_vN.wav`: if a sync
+  lands at the wrong moment, play that file against the clip to tell whether the sound given to
+  fal was right (then the model is at fault) or not (then Gesso is).
 - **Flowing scenes.** The transition into a scene is a cut or a flow. A flowing scene carries on
   from the one before as one continuous take: it has no opening frame of its own and opens on
   that scene's ending frame, so its clip starts on the exact picture the last one ended on, and

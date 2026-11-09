@@ -148,7 +148,7 @@ const ENDING_RULES: &str = "the last frame of the scene in one or two sentences:
 Same place, same light and the same performer as the opening frame, changed only by what the movement does in the scene's few seconds: \
 where the camera has arrived (name the framing: wide, medium, close-up, detail), where the performer now is and their pose. \
 It must be reachable from the opening frame in one continuous shot, with no cut and no change of location. \
-When the performer sings the scene, their face stays towards the camera with the mouth in view. Never describe the performer's face, hair, build or clothes.";
+When the performer sings the scene, their face stays towards the camera with the mouth in clear view and nothing in front of it: no microphone, hands, hair or props. Never describe the performer's face, hair, build or clothes.";
 
 pub const DIRECTOR: &str = "You are a music video director. You invent original performers and settings: \
 no real people, no existing characters, no brand names. You write for image and video models, so you describe what the camera sees, \
@@ -263,7 +263,7 @@ pub fn brief_prompt(idea: &str, draft: &Draft, read: &Read, style: &Style) -> St
 /// What the writer is told about singing when clips can't be lip-synced.
 const NO_SINGING: &str = "The clips are silent and can't lip-sync, so avoid close-ups of the performer singing; prefer movement, gesture, glances at the lens and cutaways.";
 /// What it's told when they can: which scenes to sing, and how to frame them so the sync holds.
-const SINGING: &str = "Some scenes are lip-synced to the vocal afterwards. Mark a scene \"sing\": true when the performer should sing its line to the camera: about a third to a half of the scenes that have something sung over them, favouring choruses and the lines that matter most, and never a scene with nothing sung. Frame a sung scene as a close-up or medium close-up with the performer's face towards the lens, the mouth clearly visible, well lit and not covered by hands, hair or props, and keep the head fairly steady: the sync breaks when the face turns away or moves fast. Every other scene is \"sing\": false and shows movement, gesture and cutaways, with no one mouthing words.";
+const SINGING: &str = "Some scenes are lip-synced to the vocal afterwards. Mark a scene \"sing\": true when the performer should sing its line to the camera: about a third to a half of the scenes that have something sung over them, favouring choruses and the lines that matter most, and never a scene with nothing sung. Frame a sung scene as a close-up or medium close-up with the performer's face towards the lens, the mouth clearly visible, well lit and never covered, and keep the head fairly steady: the sync breaks when the face turns away or moves fast. In a sung scene's \"image\", \"motion\" and \"ending\", nothing is in front of the mouth or passes in front of it: no microphone of any kind (the performer holds none and no mic or stand is before the face), no hands, hair, drink, smoke or prop, and no one crossing between the camera and the performer. Put microphones and props in unsung scenes, or out of frame. Every other scene is \"sing\": false and shows movement, gesture and cutaways, with no one mouthing words.";
 
 /// Asks for a picture and a movement for each slot. With `lip_sync`, the writer also marks the
 /// scenes the performer sings to the camera.

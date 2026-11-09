@@ -984,7 +984,7 @@ impl MusicVideoPage {
           let draft = if frame.ending { &shot.draft.end_still } else { &shot.draft.still };
           let guide = if quality == Quality::Final { draft.clone() } else { None };
           let image = if frame.ending { shot.ending.clone() } else { shot.image.clone() };
-          shots.push(StillJob { index: frame.index, version: shot.still_version, image, guide, ending: frame.ending, opening: on_file.filter(|_| frame.ending), after: frame.after });
+          shots.push(StillJob { index: frame.index, version: shot.still_version, image, guide, ending: frame.ending, opening: on_file.filter(|_| frame.ending), after: frame.after, sing: shot.sing });
         }
         if !shots.is_empty() {
           let note = if quality == Quality::Final { "Redrawing stills in final quality\u{2026}" } else { "Drawing stills\u{2026}" };
