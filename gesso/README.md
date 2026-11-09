@@ -287,6 +287,10 @@ runs, and leaves everything it made editable before the next stage uses it.
   the title, music direction and lyrics as they were; "Keep this version" does it by hand. The
   Lyrics stage lists them newest first: click one to read it, and "Go back to this version" swaps
   it in, keeping the present words as a version too. The newest 40 are kept.
+- **The performer's references are studio pictures.** The sheet and the head shot are drawn on
+  a plain, empty white background whatever the visual style says: the look applies only to the
+  performer's styling and the colour treatment, never to the background, so lasers, smoke or
+  scenery in the style don't end up behind the face and leak into every still drawn from it.
 - **Directions in the lyrics aren't sung.** Notes written among the words
   (`[Intro: guitar loop, drums kick in]`, `Outro [repeat to fade]`, `(Short Intro: ...)`) are taken
   out before the song is made and sent to Lyria as arrangement notes; the lyrics go as plain

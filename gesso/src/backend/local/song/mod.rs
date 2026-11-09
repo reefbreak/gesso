@@ -1045,7 +1045,20 @@ fn reference_prompt(kind: ReferenceKind, name: &str, description: &str, look: &s
     ReferenceKind::Location => format!("An establishing shot of a music video's location with nobody in it. The place, {}: {}", name.trim(), sentence(description)),
     ReferenceKind::Prop => format!("A reference photograph of a single prop from a music video, alone on a plain white background. The prop, {}: {}", name.trim(), sentence(description)),
   };
-  format!("{subject} The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look))
+  // The performer's pictures are studio references, not frames from the film: the look is
+  // applied to the person, never to the background, or lasers and smoke end up in every still
+  // drawn from them.
+  match kind {
+    ReferenceKind::Look | ReferenceKind::Face => format!("{subject} {}", studio_look(look)),
+    _ => format!("{subject} The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look)),
+  }
+}
+
+/// How the video's look applies to a studio reference of the performer: to their styling and the
+/// colour treatment only. The background stays a plain, empty white, whatever the look says.
+fn studio_look(look: &str) -> String {
+  let colour = if is_monochrome(look) { " The picture is strictly black and white." } else { "" };
+  format!("This is a studio reference picture, not a frame from the video. The background is a plain, flat, evenly lit white with nothing on it at all: no scenery, set, props, lighting effects, lasers, beams, smoke, haze, colour washes, shadows or patterns. The video's look, \"{}\", applies only to the performer's styling (hair, clothes, make-up, era) and to the colour treatment of the picture; everything it says about places, lighting or atmosphere is ignored here.{colour} No text, captions or logos.", look.trim().trim_end_matches('.'))
 }
 
 /// Whether the video's look is black and white.
@@ -1082,7 +1095,7 @@ fn in_keeping(file: GeneratedFile, look: &str) -> GeneratedFile {
 
 /// The performer's head shot, drawn from their sheet so it is the same person.
 fn face_from_sheet_prompt(look: &str) -> String {
-  format!("The attached picture is a performer's reference sheet for a music video. Draw a head-and-shoulders portrait of this exact person: the same face, hair, skin, age and clothes as on the sheet, changing nothing about them. They face the camera with a neutral expression, the face filling most of the frame, evenly lit and sharp, on a plain white background. One picture of one person; don't copy the sheet's layout. The video's look, which this picture must match: {}{} No text, captions or logos.", sentence(look), no_colour(look))
+  format!("The attached picture is a performer's reference sheet for a music video. Draw a head-and-shoulders portrait of this exact person: the same face, hair, skin, age and clothes as on the sheet, changing nothing about them. They face the camera with a neutral expression, the face filling most of the frame, evenly lit and sharp. One picture of one person; don't copy the sheet's layout. {}", studio_look(look))
 }
 
 /// The performer's sheet, drawn from their head shot so it is the same person. The head shot
@@ -1092,11 +1105,10 @@ fn sheet_from_face_prompt(name: &str, description: &str, look: &str) -> String {
     "The attached picture is a head shot of a music video's performer. Draw a character reference sheet of this exact person, on a plain white background: the same face, hair, skin and age as in the head shot, changing nothing about them. \
      On the left, a large head-and-shoulders portrait facing the camera, the face evenly lit and sharp. On the right, the same person shown full-length three times side by side, from the front, the side and the back, the whole figure in frame from head to shoes each time. \
      It is one person throughout, with the same face, hair and clothes in every view. For what the head shot doesn't show, their build, clothes and shoes, follow this description of the performer, {}, and ignore anything in it about the face or hair that differs from the head shot: {} \
-     The video's look, which this picture must match: {}{} No text, captions or logos.",
+     {}",
     name.trim(),
     sentence(description),
-    sentence(look),
-    no_colour(look)
+    studio_look(look)
   )
 }
 
@@ -1447,7 +1459,7 @@ mod tests {
       assert_eq!(engine.library().list("image", false, 0, 40).0.len(), 2);
       let requests = requests.lock().unwrap();
       let prompts: Vec<String> = requests.iter().map(|(_, body)| serde_json::from_str::<Value>(body).unwrap()["contents"][0]["parts"][0]["text"].as_str().unwrap().to_owned()).collect();
-      assert!(prompts.iter().any(|p| p.contains("from the front, the side and the back") && p.contains("Wiry, cable hair.") && p.contains("Raw 16mm black-and-white film.")));
+      assert!(prompts.iter().any(|p| p.contains("from the front, the side and the back") && p.contains("Wiry, cable hair.") && p.contains("\"Raw 16mm black-and-white film\"")));
       assert!(prompts.iter().any(|p| p.contains("with nobody in it") && p.contains("Rail Vault")));
       let _ = std::fs::remove_dir_all(dir);
     }
@@ -1848,7 +1860,13 @@ mod tests {
       assert!(both.contains("Take the face from the close-up, which shows it in full detail"));
       let face_only = still_prompt(&design, "A tunnel", &[ReferenceKind::Face], false, false, false);
       assert!(face_only.contains("they are the person in the close-up") && !face_only.contains("Keep the location"), "{face_only}");
-      assert!(face_from_sheet_prompt("grainy black and white").contains("this exact person") && face_from_sheet_prompt("grainy black and white").contains("Strictly black and white"));
+      assert!(face_from_sheet_prompt("grainy black and white").contains("this exact person") && face_from_sheet_prompt("grainy black and white").contains("strictly black and white"));
+      // The performer's references are studio pictures: the look dresses the person, never the background.
+      for prompt in [reference_prompt(ReferenceKind::Face, "Ash", "Tall", "neon lasers, smoke, grainy black and white"), reference_prompt(ReferenceKind::Look, "Ash", "Tall", "neon lasers, smoke"), face_from_sheet_prompt("neon lasers"), sheet_from_face_prompt("Ash", "Tall", "neon lasers")] {
+        assert!(prompt.contains("plain, flat, evenly lit white with nothing on it at all: no scenery, set, props, lighting effects, lasers") && prompt.contains("applies only to the performer's styling"), "{prompt}");
+        assert!(!prompt.contains("which this picture must match"), "{prompt}");
+      }
+      assert!(reference_prompt(ReferenceKind::Location, "Dock", "Wet", "neon lasers").contains("which this picture must match"));
     }
 
     #[test]
