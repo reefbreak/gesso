@@ -167,9 +167,11 @@ fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &
     let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
     ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
     let first_line = version.lyrics.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('[')).unwrap_or_default();
-    let name: String = format!("{} \u{b7} {}", if version.title.trim().is_empty() { "Untitled" } else { version.title.trim() }, first_line).chars().take(70).collect();
-    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, name, FontId::new(13.5, theme::medium()), theme::INK);
-    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {}", when(&version.at), version.why), FontId::new(11.5, theme::mono()), theme::MUTED);
+    let name = format!("{} \u{b7} {}", if version.title.trim().is_empty() { "Untitled" } else { version.title.trim() }, first_line);
+    let width = row.width() - 28.0;
+    let (title_font, meta_font) = (FontId::new(13.5, theme::medium()), FontId::new(11.5, theme::mono()));
+    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, fit_text(ui, &name, &title_font, width), title_font, theme::INK);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, fit_text(ui, &format!("{} \u{b7} {}", when(&version.at), version.why), &meta_font, width), meta_font, theme::MUTED);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
       page.viewing_lyrics = if open { None } else { Some(index) };
     }
@@ -194,15 +196,12 @@ fn earlier_lyrics(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &
 /// before a change. Click one to read it, then go back to it or leave it.
 fn scene_versions(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, index: usize, busy: bool, actions: &mut Vec<Action>) {
   let shot = &page.project.shots[index];
-  ui.horizontal(|ui| {
-    widgets::hud(ui, "Earlier versions of this scene", theme::FAINT);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-      if secondary(ui, Icon::Plus, "Keep this version", !shot.image.trim().is_empty()) {
-        actions.push(Action::KeepScene(index));
-      }
-    });
-  });
-  ui.add_space(6.0);
+  widgets::hud(ui, "Earlier versions of this scene", theme::FAINT);
+  ui.add_space(4.0);
+  if secondary(ui, Icon::Plus, "Keep this version", !shot.image.trim().is_empty()) {
+    actions.push(Action::KeepScene(index));
+  }
+  ui.add_space(8.0);
   if shot.versions.is_empty() {
     ui.label(small("Every redraw, new clip, lip sync or rewrite keeps the scene as it was, words and pictures together, and it's listed here to go back to."));
     return;
@@ -214,10 +213,12 @@ fn scene_versions(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache
     let picture = Rect::from_min_size(pos2(row.left() + 8.0, row.top() + 8.0), vec2(85.0, 48.0));
     thumbnail(ui, picture, cache, version.draft.still.as_deref().or(version.finished.still.as_deref()), Icon::Image);
     let text_left = picture.right() + 12.0;
-    let words: String = version.image.chars().take(60).collect();
-    ui.painter().text(pos2(text_left, row.top() + 18.0), Align2::LEFT_CENTER, words, FontId::new(13.0, theme::medium()), theme::INK);
+    let width = row.right() - 10.0 - text_left;
+    let (title_font, meta_font) = (FontId::new(13.0, theme::medium()), FontId::new(11.0, theme::mono()));
+    ui.painter().text(pos2(text_left, row.top() + 18.0), Align2::LEFT_CENTER, fit_text(ui, &version.image, &title_font, width), title_font, theme::INK);
     let has = [version.draft.still.is_some().then_some("still"), version.draft.end_still.is_some().then_some("ending"), version.draft.clip.is_some().then_some("clip"), version.draft.synced.is_some().then_some("lip sync"), version.finished.still.is_some().then_some("final")].into_iter().flatten().collect::<Vec<_>>().join(", ");
-    ui.painter().text(pos2(text_left, row.bottom() - 16.0), Align2::LEFT_CENTER, format!("{} \u{b7} {}{}", when(&version.at), version.why, if has.is_empty() { String::new() } else { format!(" \u{b7} {has}") }), FontId::new(11.0, theme::mono()), theme::MUTED);
+    let meta = format!("{} \u{b7} {}{}", when(&version.at), version.why, if has.is_empty() { String::new() } else { format!(" \u{b7} {has}") });
+    ui.painter().text(pos2(text_left, row.bottom() - 16.0), Align2::LEFT_CENTER, fit_text(ui, &meta, &meta_font, width), meta_font, theme::MUTED);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
       page.viewing_scene_version = if open { None } else { Some(n) };
     }
@@ -254,8 +255,10 @@ fn earlier_plans(page: &mut MusicVideoPage, ui: &mut Ui, busy: bool, actions: &m
     ui.painter().rect(row, theme::RADIUS, if open { theme::WASH_SELECTED } else if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
     let stills = plan.shots.iter().filter(|shot| shot.draft.still.is_some()).count();
     let clips = plan.shots.iter().filter(|shot| shot.draft.clip.is_some()).count();
+    let width = row.width() - 28.0;
+    let meta_font = FontId::new(11.5, theme::mono());
     ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, format!("{} scenes", plan.shots.len()), FontId::new(13.5, theme::medium()), theme::INK);
-    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {stills} still{}, {clips} clip{}{}", when(&plan.at), plural(stills), plural(clips), if plan.cut.is_some() { ", and the film" } else { "" }), FontId::new(11.5, theme::mono()), theme::MUTED);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, fit_text(ui, &format!("{} \u{b7} {stills} still{}, {clips} clip{}{}", when(&plan.at), plural(stills), plural(clips), if plan.cut.is_some() { ", and the film" } else { "" }), &meta_font, width), meta_font, theme::MUTED);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
       page.viewing_plan = if open { None } else { Some(index) };
     }
@@ -296,8 +299,11 @@ fn earlier_takes(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, busy
       (n, false) => format!("{n} scene{} kept", plural(n)),
       (n, true) => format!("{n} scene{} and the film kept", plural(n)),
     };
-    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, if take.track.model.is_empty() { name.clone() } else { format!("{name} \u{b7} {}", take.track.model) }, FontId::new(13.5, theme::medium()), theme::INK);
-    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, format!("{} \u{b7} {kept}", when(&take.at)), FontId::new(11.5, theme::mono()), theme::MUTED);
+    let width = row.width() - 28.0;
+    let (title_font, meta_font) = (FontId::new(13.5, theme::medium()), FontId::new(11.5, theme::mono()));
+    let title = if take.track.model.is_empty() { name.clone() } else { format!("{name} \u{b7} {}", take.track.model) };
+    ui.painter().text(pos2(row.left() + 14.0, row.top() + 16.0), Align2::LEFT_CENTER, fit_text(ui, &title, &title_font, width), title_font, theme::INK);
+    ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 14.0), Align2::LEFT_CENTER, fit_text(ui, &format!("{} \u{b7} {kept}", when(&take.at)), &meta_font, width), meta_font, theme::MUTED);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
       page.viewing_take = if open { None } else { Some(index) };
     }
@@ -1647,6 +1653,24 @@ fn picture_model(ui: &mut Ui, pro: bool) {
 
 /// A stage's main button with what it costs beside it, and the run's progress line while it's
 /// working. Returns `true` when clicked.
+/// `text` cut to fit `width` in `font`, with an ellipsis when it had to be cut.
+fn fit_text(ui: &Ui, text: &str, font: &FontId, width: f32) -> String {
+  let measure = |s: &str| ui.fonts_mut(|f| f.layout_no_wrap(s.to_owned(), font.clone(), theme::INK).size().x);
+  if measure(text) <= width {
+    return text.to_owned();
+  }
+  let chars: Vec<char> = text.chars().collect();
+  let mut keep = chars.len();
+  while keep > 0 {
+    keep -= 1;
+    let cut: String = chars[..keep].iter().collect::<String>().trim_end().to_owned() + "\u{2026}";
+    if measure(&cut) <= width {
+      return cut;
+    }
+  }
+  "\u{2026}".to_owned()
+}
+
 fn run_button(ui: &mut Ui, icon: Icon, text: &str, cost: Option<String>, enabled: bool, progress: Option<&str>) -> bool {
   ui.add_space(12.0);
   let mut clicked = false;
@@ -1659,7 +1683,8 @@ fn run_button(ui: &mut Ui, icon: Icon, text: &str, cost: Option<String>, enabled
       icons::paint_spinner(ui, spinner, theme::MUTED);
     } else if let Some(cost) = cost {
       ui.add_space(6.0);
-      ui.label(egui::RichText::new(cost).size(12.5).family(theme::mono()).color(theme::MUTED)).on_hover_text("Estimated at list prices; billed to your own account");
+      // The price moves to the next line whole, never split at its space.
+      ui.add(egui::Label::new(egui::RichText::new(cost).size(12.5).family(theme::mono()).color(theme::MUTED)).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text("Estimated at list prices; billed to your own account");
     }
   });
   if let Some(line) = progress {
