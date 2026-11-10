@@ -577,11 +577,14 @@ impl MusicVideoPage {
     if !plan_frames(&project.shots, &all, quality, Frames::Due).is_empty() {
       return Some(("Drawing the stills", Stage::Scenes, Action::Stills(all, false, Frames::Due)));
     }
-    if project.shots.iter().any(|shot| shot.clip_due(quality)) {
-      return Some(("Making the clips", Stage::Shots, Action::Clips(all)));
+    // Only what is missing or out of date: the clip and sync actions make whatever they are given.
+    let clips_due: Vec<usize> = project.shots.iter().enumerate().filter(|(_, shot)| shot.clip_due(quality)).map(|(i, _)| i).collect();
+    if !clips_due.is_empty() {
+      return Some(("Making the clips", Stage::Shots, Action::Clips(clips_due)));
     }
-    if backend.fal_connected() && project.shots.iter().any(|shot| shot.sync_due(quality)) {
-      return Some(("Lip-syncing", Stage::Shots, Action::LipSync(all)));
+    let syncs_due: Vec<usize> = project.shots.iter().enumerate().filter(|(_, shot)| shot.sync_due(quality)).map(|(i, _)| i).collect();
+    if backend.fal_connected() && !syncs_due.is_empty() {
+      return Some(("Lip-syncing", Stage::Shots, Action::LipSync(syncs_due)));
     }
     if project.cut_shots(quality).is_some() && !project.cut_is_current(quality).unwrap_or(false) {
       return Some(("Cutting the film", Stage::Final, Action::Cut));
