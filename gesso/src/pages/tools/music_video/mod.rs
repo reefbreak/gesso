@@ -380,7 +380,7 @@ impl MusicVideoPage {
     // One shot: as each stage finishes, the next starts.
     if self.auto.is_some() && !self.busy() {
       match self.auto_step(env.backend) {
-        Some((step, action)) => {
+        Some((step, stage, action)) => {
           let auto = self.auto.as_mut().unwrap();
           if auto.last == Some(step) {
             self.error = Some(format!("One shot stopped: \"{step}\" was needed again straight after it ran, so something in it isn't getting made. See the stage for what failed, fix it, and carry on by hand."));
@@ -388,6 +388,10 @@ impl MusicVideoPage {
           } else {
             auto.last = Some(step);
             auto.step = step;
+            // The page follows the work, so what is being made is on screen.
+            if self.project.reachable(stage) {
+              self.go(stage);
+            }
             actions.push(action);
           }
         },
@@ -424,46 +428,46 @@ impl MusicVideoPage {
 
   /// The next stage a one shot has to take, by what the video still lacks, with its name for the
   /// rail. `None` when the film is cut.
-  fn auto_step(&self, backend: &Backend) -> Option<(&'static str, Action)> {
+  fn auto_step(&self, backend: &Backend) -> Option<(&'static str, Stage, Action)> {
     let project = &self.project;
     let quality = self.quality();
     let all: Vec<usize> = (0..project.shots.len()).collect();
     if project.idea.trim().is_empty() {
-      return Some(("Finding a trend", Action::Trend));
+      return Some(("Finding a trend", Stage::Idea, Action::Trend));
     }
     if project.lyrics.trim().is_empty() {
-      return Some(("Writing the song", Action::Write { rewrite: false }));
+      return Some(("Writing the song", Stage::Lyrics, Action::Write { rewrite: false }));
     }
     if project.track.is_none() {
-      return Some(("Making the song", Action::Compose));
+      return Some(("Making the song", Stage::Song, Action::Compose));
     }
     if project.grid.is_none() {
-      return Some(("Analysing the music", Action::Analyse));
+      return Some(("Analysing the music", Stage::Analysis, Action::Analyse));
     }
     if project.visual.is_none() {
-      return Some(("Designing the look", Action::Style));
+      return Some(("Designing the look", Stage::Style, Action::Style));
     }
     if project.brief.is_none() {
-      return Some(("Writing the brief", Action::Brief));
+      return Some(("Writing the brief", Stage::Brief, Action::Brief));
     }
     let missing: Vec<usize> = project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
     if !missing.is_empty() {
-      return Some(("Drawing reference images", Action::References(missing)));
+      return Some(("Drawing reference images", Stage::References, Action::References(missing)));
     }
     if project.shots.is_empty() {
-      return Some(("Planning the scenes", Action::Plan));
+      return Some(("Planning the scenes", Stage::Scenes, Action::Plan));
     }
     if !plan_frames(&project.shots, &all, quality, Frames::Due).is_empty() {
-      return Some(("Drawing the stills", Action::Stills(all, false, Frames::Due)));
+      return Some(("Drawing the stills", Stage::Scenes, Action::Stills(all, false, Frames::Due)));
     }
     if project.shots.iter().any(|shot| shot.clip_due(quality)) {
-      return Some(("Making the clips", Action::Clips(all)));
+      return Some(("Making the clips", Stage::Shots, Action::Clips(all)));
     }
     if backend.fal_connected() && project.shots.iter().any(|shot| shot.sync_due(quality)) {
-      return Some(("Lip-syncing", Action::LipSync(all)));
+      return Some(("Lip-syncing", Stage::Shots, Action::LipSync(all)));
     }
     if project.cut_shots(quality).is_some() && !project.cut_is_current(quality).unwrap_or(false) {
-      return Some(("Cutting the film", Action::Cut));
+      return Some(("Cutting the film", Stage::Final, Action::Cut));
     }
     None
   }
