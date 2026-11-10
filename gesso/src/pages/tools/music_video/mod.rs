@@ -1462,7 +1462,10 @@ impl MusicVideoPage {
       }
       return;
     }
-    if self.busy() {
+    // The main slot waits for a lip sync in the second slot (the cut and the clips depend on
+    // it), but not for a one shot's look work there, which the song and its analysis don't.
+    let look_beside = self.auto.as_ref().is_some_and(|auto| auto.side.is_some());
+    if self.run.is_some() || (self.sync.is_some() && !look_beside) {
       return;
     }
     self.launch(backend, false, BTreeSet::new(), total, note, request);
