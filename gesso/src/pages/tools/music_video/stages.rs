@@ -75,9 +75,22 @@ pub(super) fn home(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
     ui.add_space(4.0);
     ui.label(egui::RichText::new("From an idea to a finished film: lyrics, a song, a storyboard, clips and the cut, each saved as you go. Open one to carry on, or start a new one.").size(13.5).color(theme::MUTED));
     ui.add_space(16.0);
-    if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Accent, 160.0, 34.0).clicked() {
-      actions.push(Action::New);
-    }
+    ui.horizontal(|ui| {
+      if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Accent, 160.0, 34.0).clicked() {
+        actions.push(Action::New);
+      }
+      ui.add_space(8.0);
+      if widgets::button(ui, Some(Icon::Sparkles), "One shot", widgets::Kind::Secondary, 150.0, 34.0).clicked() {
+        actions.push(Action::OneShot);
+      }
+    });
+    ui.add_space(8.0);
+    card(ui, "One shot".to_owned(), |ui| {
+      ui.label(small("Searches the web for something trending this week, writes a song about it, makes the song, the look, the storyboard, the stills, the clips, the lip sync and the cut, pressing every button for you at draft quality. It stops at the first thing that fails and leaves the video where it got to; the rail shows where it is and lets you stop it. Reckon on a few dollars and twenty minutes or so for a two-minute song."));
+      ui.add_space(6.0);
+      ui.label(label("What it should be about (optional)"));
+      prompt_field(ui, "mv-auto-about", &mut page.auto_about, "Anything, or an area: tech, sport, a meme, the gorge\u{2026}");
+    });
     ui.add_space(18.0);
     if videos.is_empty() {
       empty(ui, Icon::Film, "No videos yet", "Start one with New video. It is saved as you go and listed here.");

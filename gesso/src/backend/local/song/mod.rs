@@ -239,6 +239,11 @@ pub enum SongRequest {
     lip_sync: bool,
     writer: Writer,
   },
+  /// Finds something happening now to write a song about, by searching the web.
+  Trend {
+    /// What to look for, if the user said ("something in tech", "a sports story"), else anything.
+    about: String,
+  },
   /// Writes one scene again, in the company of its neighbours (each an opening and ending frame).
   PlanScene {
     brief: Brief,
@@ -381,6 +386,11 @@ pub enum SongUpdate {
     of: PathBuf,
     kbps: u32,
     bytes: u64,
+  },
+  /// A current trend turned into an idea for a song: the idea, and what it is about.
+  Trend {
+    idea: String,
+    about: String,
   },
   /// One scene written again, by its place in the storyboard.
   Replanned(usize, PlannedShot),
@@ -566,6 +576,17 @@ impl SongRun<'_> {
         // Every scene ends somewhere: one the writer gave no ending frame gets its movement's.
         let scenes = slots.iter().map(|slot| written.iter().find(|scene| scene.index == slot.index).cloned().unwrap_or_else(|| writer::fallback_scene(slot))).map(|scene| if scene.ending.is_empty() { PlannedShot { ending: writer::fallback_ending(&scene.image, &scene.motion), ..scene } } else { scene }).collect();
         self.send(SongUpdate::Planned(scenes));
+      },
+      SongRequest::Trend { about } => {
+        // Only Gemini can search, so this step ignores the writer setting.
+        let config = &self.engine.config;
+        let models: Vec<&str> = config.song_text_model.as_deref().map_or_else(|| TEXT_MODELS.to_vec(), |model| vec![model]);
+        let reply = self.engine.vertex.generate_text(TextRequest { models: &models, system: writer::TREND_SCOUT, prompt: &writer::trend_prompt(&about, &chrono::Local::now().format("%-d %B %Y").to_string()), audio: None, json: false, temperature: WRITING_TEMPERATURE, search: true }).await?;
+        let usage = reply.usage.unwrap_or_default();
+        self.charge(Account::Vertex, self.engine.prices.text_call(&reply.model, usage.prompt_tokens, usage.candidates_tokens + usage.thoughts_tokens), &reply.model);
+        let (idea, about) = writer::parse_trend(&reply.text).ok_or_else(|| anyhow::anyhow!("The scout didn't come back with an idea"))?;
+        info!("Trend found: {about}");
+        self.send(SongUpdate::Trend { idea, about });
       },
       SongRequest::PlanScene { brief, style, slot, before, after, lip_sync, note, writer } => {
         fn as_refs(pair: &Option<(String, String)>) -> Option<(&str, &str)> {
@@ -907,7 +928,7 @@ impl SongRun<'_> {
       },
       Writer::Gemini => {
         let models: Vec<&str> = config.song_text_model.as_deref().map_or_else(|| TEXT_MODELS.to_vec(), |model| vec![model]);
-        let reply = self.engine.vertex.generate_text(TextRequest { models: &models, system, prompt, audio, json: true, temperature }).await?;
+        let reply = self.engine.vertex.generate_text(TextRequest { models: &models, system, prompt, audio, json: true, temperature, search: false }).await?;
         let usage = reply.usage.unwrap_or_default();
         self.charge(Account::Vertex, self.engine.prices.text_call(&reply.model, usage.prompt_tokens, usage.candidates_tokens + usage.thoughts_tokens), &reply.model);
         Ok(reply.text)
@@ -1020,7 +1041,7 @@ pub fn explain(err: &anyhow::Error) -> String {
   } else {
     return message;
   };
-  let money = ["402", "payment required", "insufficient", "balance", "billing", "exceeded your current quota", "out of credit", "credits", "no funds", "unpaid", "payment"].iter().any(|sign| lower.contains(sign));
+  let money = ["402", "payment required", "insufficient", "balance", "billing", "exceeded your current quota", "out of credit", "credits", "no funds", "unpaid", "payment", "user is locked", "exhausted balance", "top up"].iter().any(|sign| lower.contains(sign));
   let rate = ["429", "resource_exhausted", "rate limit", "too many requests", "quota exceeded", "throttl", "high load", "out of capacity"].iter().any(|sign| lower.contains(sign));
   let lead = match (money, rate) {
     (true, _) => format!("{account}: out of credit or over its spending limit. Top up or raise the limit on that account, then try again."),
@@ -1835,6 +1856,7 @@ mod tests {
       assert!(explain(&anyhow::anyhow!("Gemini API key error 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details")).starts_with("Gemini API key: out of credit or over its spending limit."));
       assert!(explain(&anyhow::anyhow!("Vertex AI error 429 Too Many Requests: Resource exhausted")).starts_with("Google Cloud project: rate limit, not money."));
       assert!(explain(&anyhow::anyhow!("fal error 402 Payment Required: insufficient balance")).starts_with("fal: out of credit"));
+      assert!(explain(&anyhow::anyhow!("fal error 403 Forbidden: User is locked. Reason: Exhausted balance. Top up your balance at fal.ai/dashboard/billing")).starts_with("fal: out of credit"));
       assert!(explain(&anyhow::anyhow!("Bedrock error: ThrottlingException")).starts_with("AWS Bedrock: rate limit"));
       assert_eq!(explain(&anyhow::anyhow!("Vertex AI error 400 Bad Request: Input blocked")), "Vertex AI error 400 Bad Request: Input blocked", "other errors are left as they are");
       assert!(music_prompt(&draft, SongLength::Minute, false, Wording::Sorted).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false, Wording::Sorted).contains("about three minutes long"));

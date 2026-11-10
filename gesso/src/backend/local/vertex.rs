@@ -73,6 +73,8 @@ pub struct TextRequest<'a> {
   /// Ask for a JSON reply.
   pub json: bool,
   pub temperature: f32,
+  /// Let the model search the web (Google Search grounding), for what is happening now.
+  pub search: bool,
 }
 
 /// A text model's reply, the model that wrote it, and the tokens it reported.
@@ -580,14 +582,19 @@ fn text_body(request: &TextRequest<'_>) -> Value {
   let mut generation = serde_json::Map::new();
   generation.insert("temperature".into(), json!(request.temperature));
   generation.insert("maxOutputTokens".into(), json!(TEXT_MAX_OUTPUT_TOKENS));
-  if request.json {
+  // JSON mode and search can't be asked for together, so a searching call gets plain text.
+  if request.json && !request.search {
     generation.insert("responseMimeType".into(), json!("application/json"));
   }
-  json!({
+  let mut body = json!({
     "systemInstruction": { "parts": [{ "text": request.system }] },
     "contents": [{ "role": "user", "parts": parts }],
     "generationConfig": generation,
-  })
+  });
+  if request.search {
+    body["tools"] = json!([{ "googleSearch": {} }]);
+  }
+  body
 }
 
 /// The text of a `generateContent` reply, without the model's thoughts.
@@ -861,12 +868,12 @@ mod tests {
 
     #[test]
     fn text_requests_put_the_track_before_the_prompt() {
-      let body = text_body(&TextRequest { models: &TEXT_MODELS, system: "You mark up songs.", prompt: "Where are the sections?", audio: Some(("audio/aac", &[1, 2, 3])), json: true, temperature: 0.2 });
+      let body = text_body(&TextRequest { models: &TEXT_MODELS, system: "You mark up songs.", prompt: "Where are the sections?", audio: Some(("audio/aac", &[1, 2, 3])), json: true, temperature: 0.2, search: false });
       assert_eq!(body["systemInstruction"]["parts"][0]["text"], "You mark up songs.");
       assert_eq!(body["contents"][0]["parts"][0]["inlineData"], json!({ "mimeType": "audio/aac", "data": "AQID" }));
       assert_eq!(body["contents"][0]["parts"][1]["text"], "Where are the sections?");
       assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
-      let plain = text_body(&TextRequest { models: &TEXT_MODELS, system: "s", prompt: "p", audio: None, json: false, temperature: 1.0 });
+      let plain = text_body(&TextRequest { models: &TEXT_MODELS, system: "s", prompt: "p", audio: None, json: false, temperature: 1.0, search: false });
       assert!(plain["generationConfig"].get("responseMimeType").is_none());
       assert_eq!(plain["contents"][0]["parts"].as_array().unwrap().len(), 1);
     }

@@ -300,6 +300,14 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **A refused song is asked for again.** Google's filter sometimes refuses a prompt it accepts a
   moment later ("Input blocked"). Gesso resubmits once, then without the directions found in the
   lyrics, then with the lyrics as typed, before reporting the error. Refusals aren't billed.
+- **One shot.** "One shot" on the front page starts a new video and takes it all the way without
+  a button pressed: a scout searches the web (Gemini with Google Search) for something trending
+  this week and turns it into a song idea, then the song is written and made, the music analysed,
+  the look designed, the brief written, the references drawn, the scenes planned, the stills and
+  clips made, the sung scenes lip-synced (when fal is connected) and the film cut, all at draft
+  quality with the current settings. An optional line says what it should be about. The rail
+  shows the step in hand with a Stop; it stops by itself at the first failure, or when a step
+  would have to run twice in a row, and leaves the video where it got to for you to carry on.
 - **The page opens on your videos.** Music Video starts with the list of every saved video, with
   its stage, date, scene count and cost; click one to open it, or start a new one. "All videos"
   at the top of the rail goes back to the list, saving the open video as it stands.

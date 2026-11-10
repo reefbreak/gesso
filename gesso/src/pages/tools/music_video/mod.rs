@@ -89,6 +89,12 @@ pub(super) enum Action {
   PlanScene(usize),
   /// Back to the list of videos.
   Home,
+  /// Start a new video and take it all the way to a cut film, from a current trend.
+  OneShot,
+  /// Stop a one shot after the stage in hand.
+  StopAuto,
+  /// Find a current trend to write about.
+  Trend,
   /// Keep a scene as it stands among its earlier versions.
   KeepScene(usize),
   /// Go back to an earlier version of a scene (the scene, then the version's place in its list).
@@ -163,6 +169,17 @@ pub fn video_costs(backend: &Backend) -> Vec<(String, f64)> {
       (summary.title, cost)
     })
     .collect()
+}
+
+/// A one-shot run: the stages taken one after another with no one pressing the buttons.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Auto {
+  /// The step in hand, for the rail.
+  pub step: &'static str,
+  /// The step before it; the same step twice in a row means the work isn't getting anywhere.
+  last: Option<&'static str>,
+  /// What was found to write about.
+  pub about: String,
 }
 
 /// A picture a still run is to draw.
@@ -307,6 +324,10 @@ pub struct MusicVideoPage {
   endings_asked: bool,
   /// The page's front: the list of videos, shown until one is opened or started.
   pub(super) home: bool,
+  /// One shot: the whole pipeline run without stopping, while this is set.
+  pub(super) auto: Option<Auto>,
+  /// What the one shot should be about, as typed on the front page.
+  pub(super) auto_about: String,
   /// What the director asks of the scene being written again.
   pub(super) scene_note: String,
   /// The earlier version of the selected scene that is open, by its place in the scene's list.
@@ -323,7 +344,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -354,6 +375,26 @@ impl MusicVideoPage {
       self.dirty_since.get_or_insert(ui.input(|i| i.time));
     }
     let mut actions = Vec::new();
+    // One shot: as each stage finishes, the next starts.
+    if self.auto.is_some() && !self.busy() {
+      match self.auto_step(env.backend) {
+        Some((step, action)) => {
+          let auto = self.auto.as_mut().unwrap();
+          if auto.last == Some(step) {
+            self.error = Some(format!("One shot stopped: \"{step}\" was needed again straight after it ran, so something in it isn't getting made. See the stage for what failed, fix it, and carry on by hand."));
+            self.auto = None;
+          } else {
+            auto.last = Some(step);
+            auto.step = step;
+            actions.push(action);
+          }
+        },
+        None => {
+          self.auto = None;
+          self.go(Stage::Final);
+        },
+      }
+    }
     // Every scene has an ending frame: ones planned before that was so are given theirs when
     // the storyboard is next opened.
     if self.stage == Stage::Scenes && !self.endings_asked && !self.busy() && self.project.brief.is_some() && !self.project.scenes_without_ending().is_empty() {
@@ -377,6 +418,52 @@ impl MusicVideoPage {
       self.apply(env, action);
     }
     self.autosave(ui, env.backend);
+  }
+
+  /// The next stage a one shot has to take, by what the video still lacks, with its name for the
+  /// rail. `None` when the film is cut.
+  fn auto_step(&self, backend: &Backend) -> Option<(&'static str, Action)> {
+    let project = &self.project;
+    let quality = self.quality();
+    let all: Vec<usize> = (0..project.shots.len()).collect();
+    if project.idea.trim().is_empty() {
+      return Some(("Finding a trend", Action::Trend));
+    }
+    if project.lyrics.trim().is_empty() {
+      return Some(("Writing the song", Action::Write { rewrite: false }));
+    }
+    if project.track.is_none() {
+      return Some(("Making the song", Action::Compose));
+    }
+    if project.grid.is_none() {
+      return Some(("Analysing the music", Action::Analyse));
+    }
+    if project.visual.is_none() {
+      return Some(("Designing the look", Action::Style));
+    }
+    if project.brief.is_none() {
+      return Some(("Writing the brief", Action::Brief));
+    }
+    let missing: Vec<usize> = project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
+    if !missing.is_empty() {
+      return Some(("Drawing reference images", Action::References(missing)));
+    }
+    if project.shots.is_empty() {
+      return Some(("Planning the scenes", Action::Plan));
+    }
+    if !plan_frames(&project.shots, &all, quality, Frames::Due).is_empty() {
+      return Some(("Drawing the stills", Action::Stills(all, false, Frames::Due)));
+    }
+    if project.shots.iter().any(|shot| shot.clip_due(quality)) {
+      return Some(("Making the clips", Action::Clips(all)));
+    }
+    if backend.fal_connected() && project.shots.iter().any(|shot| shot.sync_due(quality)) {
+      return Some(("Lip-syncing", Action::LipSync(all)));
+    }
+    if project.cut_shots(quality).is_some() && !project.cut_is_current(quality).unwrap_or(false) {
+      return Some(("Cutting the film", Action::Cut));
+    }
+    None
   }
 
   /// Keeps the cost figures fresh: the ledger is read again every couple of seconds, and a video
@@ -498,6 +585,13 @@ impl MusicVideoPage {
         }
         self.progress(sync);
       },
+      SongUpdate::Trend { idea, about } => {
+        self.project.idea = format!("Trend: {about}\n\n{idea}");
+        if let Some(auto) = self.auto.as_mut() {
+          auto.about = about.clone();
+        }
+        notice = Some(Notice { error: false, message: format!("Found something to write about: {about}"), library_changed: false });
+      },
       SongUpdate::Endings(endings) => self.project.set_endings(&endings),
       SongUpdate::Replanned(index, scene) => {
         self.project.set_scene(index, &scene);
@@ -611,7 +705,12 @@ impl MusicVideoPage {
             }
           },
           Err(message) => {
-            self.error = Some(message.clone());
+            // A one shot stops at the first failure and leaves the video where it got to.
+            if let Some(auto) = self.auto.take() {
+              self.error = Some(format!("One shot stopped at \"{}\": {message}", auto.step));
+            } else {
+              self.error = Some(message.clone());
+            }
             notice = Some(Notice { error: true, message, library_changed: false });
           },
         }
@@ -778,6 +877,17 @@ impl MusicVideoPage {
       if widgets::ghost(ui, Icon::ChevronLeft, Some("All videos"), "Back to the list of your videos", false).clicked() {
         actions.push(Action::Home);
       }
+      if let Some(auto) = &self.auto {
+        ui.add_space(6.0);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::hover());
+        ui.painter().rect(row, theme::RADIUS, theme::fade(theme::ACCENT, 0.12), egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+        ui.painter().text(pos2(row.left() + 10.0, row.top() + 16.0), Align2::LEFT_CENTER, "ONE SHOT", FontId::new(10.0, theme::mono()), theme::ACCENT);
+        ui.painter().text(pos2(row.left() + 10.0, row.bottom() - 16.0), Align2::LEFT_CENTER, auto.step, FontId::new(12.5, theme::medium()), theme::INK);
+        if widgets::button(ui, Some(Icon::X), "Stop after this stage", widgets::Kind::Secondary, ui.available_width(), 26.0).clicked() {
+          actions.push(Action::StopAuto);
+        }
+        ui.add_space(4.0);
+      }
       ui.add_space(6.0);
       ui.label(widgets::heading(&self.project.display_title(), 18.0));
       ui.add_space(10.0);
@@ -855,6 +965,16 @@ impl MusicVideoPage {
     let dir = self.project.dir(&library_dir);
     match action {
       Action::Go(stage) => self.go(stage),
+      Action::OneShot => {
+        let about = std::mem::take(&mut self.auto_about);
+        self.apply(env, Action::New);
+        self.auto_about = about.clone();
+        self.auto = Some(Auto { step: "Starting", last: None, about });
+      },
+      Action::StopAuto => {
+        self.auto = None;
+      },
+      Action::Trend => self.start(backend, 0, "Searching the web for something to write about\u{2026}", SongRequest::Trend { about: self.auto_about.clone() }),
       Action::Home => {
         self.save(backend);
         self.home = true;
