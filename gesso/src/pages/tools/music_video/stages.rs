@@ -10,7 +10,7 @@ use super::{Action, Frames, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{self, Aspect, Format, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace, SongLength};
-use crate::backend::local::song::project::{Quality, ReferenceKind, Stage};
+use crate::backend::local::song::project::{Quality, ReferenceKind, Stage, Summary};
 use crate::backend::local::song::writer::{Subject, Swatch};
 use crate::backend::local::song::{SongEstimate, Writer, thumb_path};
 use crate::backend::media_cache::{Lookup, MediaCache};
@@ -58,6 +58,46 @@ pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
     Stage::Shots => shots(page, ui, env, stage, panel_rect, actions),
     Stage::Final => final_video(page, ui, env, stage, panel_rect, actions),
   }
+}
+
+// --- Home ------------------------------------------------------------------------------------
+
+/// The front of the page: every saved video with its stage, date and cost, to open, and a new
+/// one to start.
+pub(super) fn home(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, actions: &mut Vec<Action>) {
+  ui.painter().rect(stage, theme::RADIUS, theme::fade(theme::INK, 0.012), theme::hairline(), egui::StrokeKind::Inside);
+  let busy = page.busy();
+  let videos: Vec<Summary> = page.recent.iter().flatten().cloned().collect();
+  column(ui, stage, "home", |ui| {
+    widgets::hud(ui, "Music video", theme::FAINT);
+    ui.add_space(6.0);
+    ui.label(widgets::heading("Your videos", 30.0));
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("From an idea to a finished film: lyrics, a song, a storyboard, clips and the cut, each saved as you go. Open one to carry on, or start a new one.").size(13.5).color(theme::MUTED));
+    ui.add_space(16.0);
+    if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Accent, 160.0, 34.0).clicked() {
+      actions.push(Action::New);
+    }
+    ui.add_space(18.0);
+    if videos.is_empty() {
+      empty(ui, Icon::Film, "No videos yet", "Start one with New video. It is saved as you go and listed here.");
+      return;
+    }
+    for summary in &videos {
+      let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), if busy { Sense::hover() } else { Sense::click() });
+      ui.painter().rect(row, theme::RADIUS, if resp.hovered() && !busy { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+      let width = row.width() - 28.0;
+      let (title_font, meta_font) = (FontId::new(15.0, theme::medium()), FontId::new(11.5, theme::mono()));
+      ui.painter().text(pos2(row.left() + 14.0, row.top() + 19.0), Align2::LEFT_CENTER, fit_text(ui, &summary.title, &title_font, width - 90.0), title_font, theme::INK);
+      let scenes = if summary.shots == 0 { String::new() } else { format!(" \u{b7} {} scene{}", summary.shots, plural(summary.shots)) };
+      ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 15.0), Align2::LEFT_CENTER, fit_text(ui, &format!("{} \u{b7} {}{scenes}", summary.stage.label(), day(&summary.updated_at)), &meta_font, width - 90.0), meta_font, theme::MUTED);
+      ui.painter().text(pos2(row.right() - 14.0, row.center().y), Align2::RIGHT_CENTER, usd(page.cost_of_saved(env.backend, summary)), FontId::new(13.0, theme::mono()), theme::MUTED);
+      if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !busy {
+        actions.push(Action::Open(summary.id.clone()));
+      }
+      ui.add_space(6.0);
+    }
+  });
 }
 
 // --- Idea ------------------------------------------------------------------------------------

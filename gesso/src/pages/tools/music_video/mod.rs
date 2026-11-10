@@ -87,6 +87,8 @@ pub(super) enum Action {
   SheetFromFace(usize),
   /// Have the writer describe one scene again, keeping the rest.
   PlanScene(usize),
+  /// Back to the list of videos.
+  Home,
   /// Keep a scene as it stands among its earlier versions.
   KeepScene(usize),
   /// Go back to an earlier version of a scene (the scene, then the version's place in its list).
@@ -303,6 +305,8 @@ pub struct MusicVideoPage {
   /// Whether the writer has been asked for the ending frames this video's scenes lack, so a
   /// failed attempt isn't repeated on every frame.
   endings_asked: bool,
+  /// The page's front: the list of videos, shown until one is opened or started.
+  pub(super) home: bool,
   /// What the director asks of the scene being written again.
   pub(super) scene_note: String,
   /// The earlier version of the selected scene that is open, by its place in the scene's list.
@@ -319,7 +323,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -327,7 +331,8 @@ impl MusicVideoPage {
   /// The page as the app starts: `ARTCRAFT_MUSIC_VIDEO=<project id>` opens that saved project
   /// (with `ARTCRAFT_PAGE=music-video`, for screenshots).
   pub fn from_env() -> Self {
-    Self { open_on_start: std::env::var(OPEN_ENV).ok().filter(|id| !id.is_empty()), ..Self::default() }
+    let open_on_start = std::env::var(OPEN_ENV).ok().filter(|id| !id.is_empty());
+    Self { home: open_on_start.is_none(), open_on_start, ..Self::default() }
   }
 
   pub fn ui(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
@@ -354,6 +359,16 @@ impl MusicVideoPage {
     if self.stage == Stage::Scenes && !self.endings_asked && !self.busy() && self.project.brief.is_some() && !self.project.scenes_without_ending().is_empty() {
       self.endings_asked = true;
       actions.push(Action::Endings);
+    }
+    if self.home {
+      // The front of the page: every video, to open, and a new one to start.
+      let whole = Rect::from_min_max(pos2(rail.right() + GAP, area.top()), area.max);
+      stages::home(self, ui, env, whole, &mut actions);
+      self.rail(ui, rail, &mut actions);
+      for action in actions {
+        self.apply(env, action);
+      }
+      return;
     }
     self.rail(ui, rail, &mut actions);
     stages::show(self, ui, env, stage, panel, &mut actions);
@@ -749,6 +764,21 @@ impl MusicVideoPage {
     egui::ScrollArea::vertical().id_salt("mv-rail").auto_shrink([false, false]).show(ui, |ui| {
       widgets::hud(ui, "Music video", theme::FAINT);
       ui.add_space(4.0);
+      if self.home {
+        ui.label(widgets::heading("Your videos", 18.0));
+        ui.add_space(10.0);
+        ui.add_enabled_ui(!self.busy(), |ui| {
+          if widgets::button(ui, Some(Icon::Plus), "New video", widgets::Kind::Accent, ui.available_width(), 30.0).clicked() {
+            actions.push(Action::New);
+          }
+        });
+        return;
+      }
+      // Back to the list; the video is saved as it stands.
+      if widgets::ghost(ui, Icon::ChevronLeft, Some("All videos"), "Back to the list of your videos", false).clicked() {
+        actions.push(Action::Home);
+      }
+      ui.add_space(6.0);
       ui.label(widgets::heading(&self.project.display_title(), 18.0));
       ui.add_space(10.0);
       let furthest = self.project.furthest();
@@ -825,11 +855,18 @@ impl MusicVideoPage {
     let dir = self.project.dir(&library_dir);
     match action {
       Action::Go(stage) => self.go(stage),
+      Action::Home => {
+        self.save(backend);
+        self.home = true;
+        self.recent = None;
+        self.player = None;
+      },
       Action::New => {
         self.save(backend);
-        *self = Self { writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
+        *self = Self { writer: self.writer, tier: self.tier, resolution: self.resolution, home: false, ..Self::default() };
       },
       Action::Open(id) => {
+        self.home = false;
         self.save(backend);
         if let Some(project) = SongProject::load(&library_dir, &id) {
           let stage = if project.reachable(project.stage) { project.stage } else { project.furthest() };
