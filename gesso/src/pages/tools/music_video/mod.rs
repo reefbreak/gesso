@@ -450,9 +450,14 @@ impl MusicVideoPage {
     if project.brief.is_none() {
       return Some(("Writing the brief", Stage::Brief, Action::Brief));
     }
+    // The head shot is drawn from the performer's sheet, so it waits for a run of its own.
     let missing: Vec<usize> = project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
-    if !missing.is_empty() {
-      return Some(("Drawing reference images", Stage::References, Action::References(missing)));
+    let (faces, others): (Vec<usize>, Vec<usize>) = missing.iter().partition(|i| project.references[**i].kind == ReferenceKind::Face);
+    if !others.is_empty() {
+      return Some(("Drawing reference images", Stage::References, Action::References(others)));
+    }
+    if !faces.is_empty() {
+      return Some(("Drawing the head shot", Stage::References, Action::References(faces)));
     }
     if project.shots.is_empty() {
       return Some(("Planning the scenes", Stage::Scenes, Action::Plan));
