@@ -16,6 +16,7 @@ use log::{info, warn};
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
+use super::spend::Account;
 use super::GeneratedFile;
 use super::RefImage;
 use super::config::LocalConfig;
@@ -245,13 +246,13 @@ impl VertexClient {
   pub async fn check_gemini_key(&self, model: &str) -> anyhow::Result<()> {
     let key = self.config.gemini_api_key.as_deref().ok_or_else(|| anyhow::anyhow!("No Gemini API key set"))?;
     let url = format!("{}v1beta/models/{model}", self.gemini_host());
-    read_json(self.http.get(url).header("x-goog-api-key", key).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+    read_json_from(Account::GeminiApi, self.http.get(url).header("x-goog-api-key", key).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
   }
 
   /// `generateContent` through the Gemini API with a Gemini API key.
   async fn generate_content_with_key(&self, key: &str, model: &str, body: &Value, timeout: Duration) -> anyhow::Result<Value> {
     let url = format!("{}v1beta/models/{model}:generateContent", self.gemini_host());
-    read_json(self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
+    read_json_from(Account::GeminiApi, self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
   }
 
   /// A song through the Gemini API, which answers in one request (nothing is stored there).
@@ -261,7 +262,7 @@ impl VertexClient {
     for model in models {
       let mut body = song_body(model, prompt, false);
       body["store"] = json!(false);
-      match read_json(self.http.post(&url).header("x-goog-api-key", key).json(&body).timeout(SONG_TIMEOUT).send().await?).await {
+      match read_json_from(Account::GeminiApi, self.http.post(&url).header("x-goog-api-key", key).json(&body).timeout(SONG_TIMEOUT).send().await?).await {
         Ok(finished) => return song_from(&finished, model, Route::GeminiApi),
         Err(err) if is_not_found(&err) => {
           info!("Music model {model} not found on the Gemini API; trying the next id");
@@ -292,7 +293,7 @@ impl VertexClient {
       },
       (None, Some(key)) => {
         let url = format!("{}v1beta1/publishers/google/models/{model}:countTokens", self.host("global"));
-        read_json(self.http.post(url).header("x-goog-api-key", key).json(&body).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
+        read_json_from(Account::GeminiApi, self.http.post(url).header("x-goog-api-key", key).json(&body).timeout(PROBE_TIMEOUT).send().await?).await.map(|_| ())
       },
       (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
     }
@@ -342,7 +343,7 @@ impl VertexClient {
       },
       (None, Some(key)) => {
         let url = format!("{}v1beta1/publishers/google/models/{model}:generateContent", self.host("global"));
-        read_json(self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
+        read_json_from(Account::GeminiApi, self.http.post(url).header("x-goog-api-key", key).json(body).timeout(timeout).send().await?).await
       },
       (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
     }
@@ -836,11 +837,17 @@ fn extension_for(mime: &str) -> &'static str {
 
 /// The JSON body of a reply, or Google's error message.
 async fn read_json(response: reqwest::Response) -> anyhow::Result<Value> {
+  read_json_from(Account::Vertex, response).await
+}
+
+/// As [`read_json`], naming the account the call was made on, so an error says whose limit or
+/// balance it is: the Google Cloud project's, or the Gemini API key's.
+async fn read_json_from(account: Account, response: reqwest::Response) -> anyhow::Result<Value> {
   let status = response.status();
   let text = response.text().await?;
   if !status.is_success() {
     let message = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| text.chars().take(300).collect());
-    anyhow::bail!("Vertex AI error {status}: {message}");
+    anyhow::bail!("{} error {status}: {message}", if account == Account::GeminiApi { "Gemini API key" } else { "Vertex AI" });
   }
   Ok(serde_json::from_str(&text)?)
 }

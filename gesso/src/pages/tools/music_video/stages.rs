@@ -1383,6 +1383,12 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
           ui.painter().rect_stroke(inset, theme::RADIUS, egui::Stroke::new(1.0, if stale || take.end_still.is_none() { theme::BADGE_BETA } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
           ui.painter().text(inset.left_top() + vec2(4.0, 3.0), Align2::LEFT_TOP, "END", FontId::new(9.0, theme::mono()), Color32::WHITE);
         }
+        // Where the ending frame's inset is, for the pointer: it has its own hover text and
+        // double click.
+        let inset_at = |at: egui::Pos2| {
+          let size = vec2(image.width() * 0.34, image.height() * 0.34);
+          shot.wants_ending() && Rect::from_min_size(image.right_bottom() - size - vec2(6.0, 6.0), size).contains(at)
+        };
         let selected = page.selected == Some(index) || (!clips && page.picked.contains(&index));
         if selected || resp.hovered() {
           ui.painter().rect_stroke(image, theme::RADIUS, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { theme::ACCENT } else { theme::LINE_STRONG }), egui::StrokeKind::Inside);
@@ -1424,11 +1430,21 @@ fn scene_grid(page: &mut MusicVideoPage, ui: &mut Ui, cache: &mut MediaCache, re
         let line = if shot.beat.is_empty() { &shot.image } else { &shot.beat };
         let galley = ui.painter().layout(line.clone(), FontId::new(12.5, egui::FontFamily::Proportional), theme::INK, text.width());
         ui.painter().with_clip_rect(text).galley(text.left_top() + vec2(0.0, 16.0), galley, theme::INK);
-        let hover = if shot.slot.lyric.trim().is_empty() { shot.image.clone() } else { format!("{}\n\nSung: {}", shot.image, shot.slot.lyric.trim()) };
+        let hover = if resp.hover_pos().is_some_and(inset_at) {
+          format!("Ending frame: {}\n\nDouble-click to see it full size.", shot.ending.trim())
+        } else if shot.slot.lyric.trim().is_empty() {
+          shot.image.clone()
+        } else {
+          format!("{}\n\nSung: {}", shot.image, shot.slot.lyric.trim())
+        };
         let resp = resp.on_hover_text(hover).on_hover_cursor(egui::CursorIcon::PointingHand);
-        // A double click shows the still at full size.
-        if let Some(still) = shot.still_for(quality).filter(|_| resp.double_clicked()) {
-          requests.push(AppRequest::Preview(file_url(still)));
+        // A double click shows the still at full size; on the ending frame's inset, the ending.
+        if resp.double_clicked() {
+          let on_inset = resp.interact_pointer_pos().is_some_and(inset_at);
+          let ending = take.end_still.as_deref().or(shot.draft.end_still.as_deref());
+          if let Some(picture) = if on_inset { ending } else { shot.still_for(quality).map(PathBuf::as_path) } {
+            requests.push(AppRequest::Preview(file_url(picture)));
+          }
         }
         if resp.clicked() {
           picked = Some(index);

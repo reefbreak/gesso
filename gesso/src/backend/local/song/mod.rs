@@ -470,7 +470,7 @@ impl LocalEngine {
       let run = SongRun { engine: &engine, run_id, tx: &tx, ctx: &ctx, cancel, batch: LocalLibrary::new_batch_token(), pace: Pace::new(QUOTA_WAIT), project, part };
       let result = run.stage(request).await.map_err(|err| {
         warn!("Music video run {run_id} failed: {err:#}");
-        format!("{err:#}")
+        explain(&err)
       });
       run.send(SongUpdate::Done(result));
       if let Ok(mut runs) = engine.song_runs.lock() {
@@ -551,7 +551,7 @@ impl SongRun<'_> {
           let index = job.index;
           match self.reference(dir, look, aspect, pro, job).await {
             Ok(path) => self.send(SongUpdate::Reference { index, path }),
-            Err(err) => self.send(SongUpdate::ReferenceFailed { index, message: format!("{err:#}") }),
+            Err(err) => self.send(SongUpdate::ReferenceFailed { index, message: explain(&err) }),
           }
         });
         stream::iter(jobs).buffer_unordered(STILLS_AT_ONCE).collect::<Vec<()>>().await;
@@ -612,7 +612,7 @@ impl SongRun<'_> {
               Some(((index, ending), path))
             },
             Err(err) => {
-              self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") });
+              self.send(SongUpdate::ShotFailed { index, message: explain(&err) });
               None
             },
           }
@@ -640,7 +640,7 @@ impl SongRun<'_> {
           let index = job.index;
           match self.clip(dir, look, aspect, tier, resolution, quality, job).await {
             Ok(path) => self.send(SongUpdate::Clip { index, path }),
-            Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
+            Err(err) => self.send(SongUpdate::ShotFailed { index, message: explain(&err) }),
           }
         });
         stream::iter(jobs).buffer_unordered(CLIPS_AT_ONCE).collect::<Vec<()>>().await;
@@ -681,7 +681,7 @@ impl SongRun<'_> {
           let index = job.index;
           match self.sync(fal, dir, vocals, quality, job).await {
             Ok(path) => self.send(SongUpdate::Synced { index, path }),
-            Err(err) => self.send(SongUpdate::ShotFailed { index, message: format!("{err:#}") }),
+            Err(err) => self.send(SongUpdate::ShotFailed { index, message: explain(&err) }),
           }
         });
         stream::iter(jobs).buffer_unordered(SYNCS_AT_ONCE).collect::<Vec<()>>().await;
@@ -1002,6 +1002,32 @@ impl Wording {
 /// key's prepaid balance when Vertex had no capacity and the key was used.
 fn google_account(file: &GeneratedFile) -> Account {
   if file.via_key { Account::GeminiApi } else { Account::Vertex }
+}
+
+/// An error as the page shows it: when a provider ran out of money or quota, it opens by naming
+/// the account to look at and whether it is credit or a rate limit, so the right one is topped up.
+pub fn explain(err: &anyhow::Error) -> String {
+  let message = format!("{err:#}");
+  let lower = message.to_lowercase();
+  let account = if lower.contains("gemini api key") {
+    "Gemini API key"
+  } else if lower.contains("vertex ai") || lower.contains("veo") {
+    "Google Cloud project"
+  } else if lower.contains("fal error") || lower.contains("fal.run") || lower.contains("fal.ai") {
+    "fal"
+  } else if lower.contains("bedrock") {
+    "AWS Bedrock"
+  } else {
+    return message;
+  };
+  let money = ["402", "payment required", "insufficient", "balance", "billing", "exceeded your current quota", "out of credit", "credits", "no funds", "unpaid", "payment"].iter().any(|sign| lower.contains(sign));
+  let rate = ["429", "resource_exhausted", "rate limit", "too many requests", "quota exceeded", "throttl", "high load", "out of capacity"].iter().any(|sign| lower.contains(sign));
+  let lead = match (money, rate) {
+    (true, _) => format!("{account}: out of credit or over its spending limit. Top up or raise the limit on that account, then try again."),
+    (false, true) => format!("{account}: rate limit, not money. Gesso waits and retries these on its own; nothing needs topping up."),
+    (false, false) => return message,
+  };
+  format!("{lead}\n{message}")
 }
 
 /// Whether a provider refused the prompt itself (nothing was made or billed).
@@ -1805,6 +1831,12 @@ mod tests {
       assert!(!plain.contains("Arrangement notes") && !plain.contains("guitar loop") && plain.ends_with("[Outro]"), "{plain}");
       assert!(music_prompt(&noted, SongLength::Minute, false, Wording::AsTyped).ends_with("following their section tags:\n\n[Intro: guitar loop, drums kick in]\nVerse 1\nla\nOutro [repeat to fade]"));
       assert!(is_blocked(&anyhow::anyhow!("Vertex AI error 400 Bad Request: Input blocked: The prompt could not be submitted. The prompt contains sensitive words")) && !is_blocked(&anyhow::anyhow!("429 Too Many Requests")));
+      // A money or rate error opens by naming the account it is about.
+      assert!(explain(&anyhow::anyhow!("Gemini API key error 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details")).starts_with("Gemini API key: out of credit or over its spending limit."));
+      assert!(explain(&anyhow::anyhow!("Vertex AI error 429 Too Many Requests: Resource exhausted")).starts_with("Google Cloud project: rate limit, not money."));
+      assert!(explain(&anyhow::anyhow!("fal error 402 Payment Required: insufficient balance")).starts_with("fal: out of credit"));
+      assert!(explain(&anyhow::anyhow!("Bedrock error: ThrottlingException")).starts_with("AWS Bedrock: rate limit"));
+      assert_eq!(explain(&anyhow::anyhow!("Vertex AI error 400 Bad Request: Input blocked")), "Vertex AI error 400 Bad Request: Input blocked", "other errors are left as they are");
       assert!(music_prompt(&draft, SongLength::Minute, false, Wording::Sorted).contains("about one minute long") && music_prompt(&draft, SongLength::ThreeMinutes, false, Wording::Sorted).contains("about three minutes long"));
       let instrumental = music_prompt(&draft, SongLength::Clip, true, Wording::Sorted);
       assert!(instrumental.contains("A 30-second piece.") && instrumental.ends_with("Instrumental only, no vocals."));
