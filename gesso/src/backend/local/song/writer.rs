@@ -155,16 +155,17 @@ pub fn trend_prompt(about: &str, today: &str) -> String {
      Pick the one with the most feeling and the best pictures in it: something a song could be about, with a point of view, not a list of facts. Avoid tragedies and anything that would need a real person's name or face in the video.\n\n\
      Reply with a JSON object and nothing else:\n\
      - \"about\": the trend in one line, as a headline, so the person knows what was found.\n\
+     - \"why_now\": two or three sentences on what is actually happening and where it is being talked about (which sites, shows or communities), so the person can see where the idea came from.\n\
      - \"idea\": the song idea in three to five sentences, as a brief to a songwriter: what it is about, the feeling, the point of view, the kind of music it wants, and one or two concrete images from the trend to build on. Mention no real person by name."
   )
 }
 
 /// The idea and the headline from the scout's reply.
-pub fn parse_trend(reply: &str) -> Option<(String, String)> {
+pub fn parse_trend(reply: &str) -> Option<(String, String, String)> {
   let json = find_json(reply)?;
   let idea = text(&json["idea"]);
   let about = text(&json["about"]);
-  (!idea.is_empty()).then(|| (idea, if about.is_empty() { "A current trend".to_owned() } else { about }))
+  (!idea.is_empty()).then(|| (idea, if about.is_empty() { "A current trend".to_owned() } else { about }, text(&json["why_now"])))
 }
 
 /// What an ending frame is, for the writer: the scenes prompt and the endings prompt share it.
@@ -652,7 +653,7 @@ mod tests {
       let slot = Slot { index: 3, section: "Verse 1".into(), ..Default::default() };
       assert!(scenes_prompt(&Brief::default(), &Style::default(), &[slot.clone()], false).contains("- \"ending\": the last frame of the scene"));
       assert!(trend_prompt("", "9 November 2026").contains("Today is 9 November 2026") && trend_prompt("sport", "x").contains("this area: sport"));
-      assert_eq!(parse_trend(r#"Here: {"about":"Everyone is X","idea":"A song about X."}"#), Some(("A song about X.".to_owned(), "Everyone is X".to_owned())));
+      assert_eq!(parse_trend(r#"Here: {"about":"Everyone is X","idea":"A song about X.","why_now":"X is all over Y."}"#), Some(("A song about X.".to_owned(), "Everyone is X".to_owned(), "X is all over Y.".to_owned())));
       assert_eq!(parse_trend("nothing"), None);
       let one = scene_prompt(&Brief::default(), &Style::default(), &slot, Some(("A dock.", "The deck.")), None, false, "make it rain");
       assert!(one.contains("The scene before it opens on: A dock. It ends on: The deck.") && !one.contains("The scene after") && one.ends_with("The director asks for this scene: make it rain."), "{one}");

@@ -50,7 +50,7 @@ use crate::backend::Event;
 use beats::BeatGrid;
 use cut::{Aspect, CutShot, Fades, Format, Grade};
 use plan::{Section, Slot, SongLength};
-use project::{Quality, ReferenceKind};
+use project::{Inspiration, Quality, ReferenceKind};
 use writer::{Brief, Design, Draft, PlannedShot, Read, Revision, Style, TimedLine, Turn};
 
 /// Stills made at once (each is one Gemini call).
@@ -387,10 +387,10 @@ pub enum SongUpdate {
     kbps: u32,
     bytes: u64,
   },
-  /// A current trend turned into an idea for a song: the idea, and what it is about.
+  /// A current trend turned into an idea for a song: the idea, and where it came from.
   Trend {
     idea: String,
-    about: String,
+    inspiration: Inspiration,
   },
   /// One scene written again, by its place in the storyboard.
   Replanned(usize, PlannedShot),
@@ -584,9 +584,9 @@ impl SongRun<'_> {
         let reply = self.engine.vertex.generate_text(TextRequest { models: &models, system: writer::TREND_SCOUT, prompt: &writer::trend_prompt(&about, &chrono::Local::now().format("%-d %B %Y").to_string()), audio: None, json: false, temperature: WRITING_TEMPERATURE, search: true }).await?;
         let usage = reply.usage.unwrap_or_default();
         self.charge(Account::Vertex, self.engine.prices.text_call(&reply.model, usage.prompt_tokens, usage.candidates_tokens + usage.thoughts_tokens), &reply.model);
-        let (idea, about) = writer::parse_trend(&reply.text).ok_or_else(|| anyhow::anyhow!("The scout didn't come back with an idea"))?;
-        info!("Trend found: {about}");
-        self.send(SongUpdate::Trend { idea, about });
+        let (idea, found, why_now) = writer::parse_trend(&reply.text).ok_or_else(|| anyhow::anyhow!("The scout didn't come back with an idea"))?;
+        info!("Trend found: {found}");
+        self.send(SongUpdate::Trend { idea, inspiration: Inspiration { asked: about, found, why_now } });
       },
       SongRequest::PlanScene { brief, style, slot, before, after, lip_sync, note, writer } => {
         fn as_refs(pair: &Option<(String, String)>) -> Option<(&str, &str)> {

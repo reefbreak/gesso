@@ -699,12 +699,13 @@ impl MusicVideoPage {
         }
         self.progress(sync);
       },
-      SongUpdate::Trend { idea, about } => {
-        self.project.idea = format!("Trend: {about}\n\n{idea}");
+      SongUpdate::Trend { idea, inspiration } => {
+        self.project.idea = idea;
         if let Some(auto) = self.auto.as_mut() {
-          auto.about = about.clone();
+          auto.about = inspiration.found.clone();
         }
-        notice = Some(Notice { error: false, message: format!("Found something to write about: {about}"), library_changed: false });
+        notice = Some(Notice { error: false, message: format!("Found something to write about: {}", inspiration.found), library_changed: false });
+        self.project.inspiration = Some(inspiration);
       },
       SongUpdate::Endings(endings) => self.project.set_endings(&endings),
       SongUpdate::Replanned(index, scene) => {

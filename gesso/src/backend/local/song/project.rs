@@ -479,6 +479,9 @@ pub struct SongProject {
   /// The video's files that are in the library already, so opening it adds only the rest.
   #[serde(default)]
   pub in_library: BTreeSet<PathBuf>,
+  /// Where a one shot's idea came from: what was asked for and what the scout found.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub inspiration: Option<Inspiration>,
   /// Earlier plans of the scenes, oldest first: each is the storyboard as it stood, stills and
   /// clips included, before planning again replaced it. The newest [`PLANS_KEPT`] stay.
   #[serde(default)]
@@ -508,6 +511,18 @@ pub struct SceneVersion {
   pub skip_ending: bool,
   pub draft: Take,
   pub finished: Take,
+}
+
+/// What a one shot was asked for and what its web search found to write about.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Inspiration {
+  /// What the user asked it to be about, if anything.
+  pub asked: String,
+  /// The trend found, as a headline.
+  pub found: String,
+  /// What is happening and where it is being talked about.
+  pub why_now: String,
 }
 
 /// The storyboard as it stood before a plan replaced it.

@@ -84,7 +84,21 @@ pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
       };
       let font = FontId::new(13.0, theme::medium());
       ui.painter().text(pos2(band.left() + 42.0, text_y), Align2::LEFT_CENTER, fit_text(ui, &line, &font, band.width() - 60.0), font, theme::INK);
-      let below = pos2(whole.left(), band.bottom() + 8.0);
+      // Under the band, where the idea came from: what was asked for and what was found.
+      let mut below = pos2(whole.left(), band.bottom() + 8.0);
+      if let Some(inspiration) = page.project.inspiration.clone() {
+        let text_font = FontId::new(12.5, egui::FontFamily::Proportional);
+        let asked = if inspiration.asked.trim().is_empty() { "anything current".to_owned() } else { inspiration.asked.trim().to_owned() };
+        let body = format!("Found: {}{}", inspiration.found.trim(), if inspiration.why_now.trim().is_empty() { String::new() } else { format!("\n{}", inspiration.why_now.trim()) });
+        let galley = ui.painter().layout(body, text_font, theme::INK, whole.width() - 32.0 - 150.0);
+        let height = galley.size().y.max(18.0) + 20.0;
+        let card = Rect::from_min_size(pos2(whole.left(), below.y), vec2(whole.width(), height));
+        ui.painter().rect(card, theme::RADIUS, theme::WASH, theme::hairline(), egui::StrokeKind::Inside);
+        ui.painter().text(pos2(card.left() + 16.0, card.top() + 10.0), Align2::LEFT_TOP, "INSPIRATION", FontId::new(10.0, theme::mono()), theme::FAINT);
+        ui.painter().text(pos2(card.left() + 16.0, card.top() + 26.0), Align2::LEFT_TOP, format!("Asked for: {asked}"), FontId::new(12.0, theme::mono()), theme::MUTED);
+        ui.painter().galley(pos2(card.left() + 16.0 + 150.0, card.top() + 10.0), galley, theme::INK);
+        below.y = card.bottom() + 8.0;
+      }
       (Rect::from_min_max(below, stage.max), Rect::from_min_max(pos2(panel_rect.left(), below.y), panel_rect.max), snag.is_none())
     },
     None => (stage, panel_rect, false),
@@ -203,6 +217,17 @@ fn idea(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, 
   column(ui, stage, "idea", |ui| {
     heading(ui, Stage::Idea, "What's the song?", "Describe the song you want: what it's about, how it should feel, the kind of music. The writer turns it into lyrics and a music direction you can edit.");
     changed |= text_box(ui, "mv-idea", &mut page.project.idea, "A snarling big-beat anthem about the people who write prompts and wrangle agents all day\u{2026}", 6);
+    if let Some(inspiration) = page.project.inspiration.clone() {
+      ui.add_space(12.0);
+      card(ui, "Inspiration".to_owned(), |ui| {
+        ui.label(small(&format!("Asked for: {}", if inspiration.asked.trim().is_empty() { "anything current" } else { inspiration.asked.trim() })));
+        ui.label(body(&format!("Found: {}", inspiration.found.trim())));
+        if !inspiration.why_now.trim().is_empty() {
+          ui.label(body(&inspiration.why_now));
+        }
+        ui.label(small("Found by searching the web when the one shot started. The idea above was written from it; edit it as you like."));
+      });
+    }
     ui.add_space(18.0);
     let others: Vec<_> = page.recent.iter().flatten().filter(|s| s.id != page.project.id).cloned().collect();
     widgets::hud(ui, "Your videos", theme::FAINT);

@@ -312,6 +312,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   clicks. At a snag (a failed stage, or one needed twice in a row) the band turns red with "Needs
   your input", the stages come back to put it right, and "Continue one shot" carries on;
   "Continue one shot" in the rail also takes any video the rest of the way.
+  Under the band, and on the Idea stage afterwards, an Inspiration card says what the one shot
+  was asked for, what the scout found (as a headline) and what is happening and where it is being
+  talked about, so the idea's origin is in view while the work goes on.
   Work on different services runs side by side: while Lyria makes the song and the beat is
   found, the look, the brief and the reference pictures are made in the second slot (they need
   the words, not the track), and the lip sync runs on fal while Veo makes the remaining clips.
