@@ -894,7 +894,7 @@ impl MusicVideoPage {
         // one shot, or a video made by hand so far.
         ui.add_space(6.0);
         ui.add_enabled_ui(!self.busy(), |ui| {
-          if widgets::button(ui, Some(Icon::Sparkles), "One shot from here", widgets::Kind::Secondary, ui.available_width(), 26.0).on_hover_text("Takes every remaining stage in turn, at the current quality, until the film is cut. Stops at the first failure.").clicked() {
+          if widgets::button(ui, Some(Icon::Sparkles), "Continue one shot", widgets::Kind::Secondary, ui.available_width(), 26.0).on_hover_text("Takes every remaining stage in turn, at the current quality, until the film is cut. Stops at the first failure.").clicked() {
             actions.push(Action::ResumeAuto);
           }
         });
