@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use egui::{Align2, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::Backend;
-use crate::backend::local::song::plan::{self, Slot};
+use crate::backend::local::song::plan::{self, Slot, Pace, SongLength};
 use crate::backend::local::song::project::{CutOf, Made, Quality, Share, Shot, flows_from, ReferenceKind, SongProject, Stage, Summary, Track};
 use crate::backend::local::song::{COST_PARTS, ClipJob, ReferenceJob, SongEstimate, SongRequest, SongUpdate, StillJob, SyncJob, Writer};
 use crate::backend::local::song::writer::Turn;
-use crate::backend::local::song::cut::ShotMedia;
+use crate::backend::local::song::cut::{Aspect, Format, ShotMedia};
 use crate::backend::local::tools::{Film, FilmScene, VeoTier};
 use crate::backend::video::VideoPlayer;
 use crate::pages::common::{AppRequest, Env};
@@ -173,6 +173,36 @@ pub fn video_costs(backend: &Backend) -> Vec<(String, f64)> {
     .collect()
 }
 
+/// The choices a one shot makes for its video up front, since no one is there to make them
+/// stage by stage.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AutoSettings {
+  pub lip_sync: bool,
+  pub song_length: SongLength,
+  pub pace: Pace,
+  pub aspect: Aspect,
+  pub format: Format,
+  pub quality: Quality,
+}
+
+impl Default for AutoSettings {
+  fn default() -> Self {
+    Self { lip_sync: true, song_length: SongLength::default(), pace: Pace::Steady, aspect: Aspect::Wide, format: Format::AsFilmed, quality: Quality::Draft }
+  }
+}
+
+impl AutoSettings {
+  /// Sets a fresh video up as chosen.
+  pub fn apply_to(&self, project: &mut SongProject) {
+    project.lip_sync = self.lip_sync;
+    project.song_length = self.song_length;
+    project.pace = self.pace;
+    project.aspect = self.aspect;
+    project.format = self.format;
+    project.quality = self.quality;
+  }
+}
+
 /// A one-shot run: the stages taken one after another with no one pressing the buttons.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Auto {
@@ -182,7 +212,12 @@ pub(super) struct Auto {
   last: Option<&'static str>,
   /// What was found to write about.
   pub about: String,
+  /// Why the run is waiting for the user: a stage failed, or kept being needed.
+  pub snag: Option<String>,
 }
+
+/// The steps a one shot takes, in order, for the progress bar.
+pub(super) const ONE_SHOT_STEPS: [&str; 13] = ["Finding a trend", "Writing the song", "Making the song", "Analysing the music", "Designing the look", "Writing the brief", "Drawing reference images", "Drawing the head shot", "Planning the scenes", "Drawing the stills", "Making the clips", "Lip-syncing", "Cutting the film"];
 
 /// A picture a still run is to draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,6 +365,8 @@ pub struct MusicVideoPage {
   pub(super) auto: Option<Auto>,
   /// What the one shot should be about, as typed on the front page.
   pub(super) auto_about: String,
+  /// How a one shot's video is set up before it starts.
+  pub(super) auto_settings: AutoSettings,
   /// What the director asks of the scene being written again.
   pub(super) scene_note: String,
   /// The earlier version of the selected scene that is open, by its place in the scene's list.
@@ -346,7 +383,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), auto_settings: AutoSettings::default(), scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -369,6 +406,12 @@ impl MusicVideoPage {
     if let Some(id) = std::mem::take(&mut self.open_on_start) {
       self.apply(env, Action::Open(id));
       // For screenshots: a scene to open in the editor.
+      if let Ok(demo) = std::env::var("ARTCRAFT_ONE_SHOT_DEMO") {
+        self.auto = Some(Auto { step: "Drawing the stills", last: Some("Drawing the stills"), about: String::new(), snag: (demo == "snag").then(|| "Drawing the stills: Vertex AI error 429".to_owned()) });
+        if demo != "snag" {
+          self.run = Some(Run { id: 0, stage: self.stage, note: "Drawing stills\u{2026}".into(), started_as: String::new(), done: 9, total: 44, then_analyse: false, quality: self.project.quality, scenes: BTreeSet::new(), clips: false });
+        }
+      }
       self.selected = std::env::var("ARTCRAFT_MUSIC_VIDEO_SCENE").ok().and_then(|n| n.parse::<usize>().ok()).and_then(|n| n.checked_sub(1)).filter(|n| *n < self.project.shots.len());
     }
     self.count_costs(ui, env.backend);
@@ -378,13 +421,12 @@ impl MusicVideoPage {
     }
     let mut actions = Vec::new();
     // One shot: as each stage finishes, the next starts.
-    if self.auto.is_some() && !self.busy() {
+    if self.auto.as_ref().is_some_and(|auto| auto.snag.is_none()) && !self.busy() {
       match self.auto_step(env.backend) {
         Some((step, stage, action)) => {
           let auto = self.auto.as_mut().unwrap();
           if auto.last == Some(step) {
-            self.error = Some(format!("One shot stopped: \"{step}\" was needed again straight after it ran, so something in it isn't getting made. See the stage for what failed, fix it, and carry on by hand."));
-            self.auto = None;
+            auto.snag = Some(format!("\"{step}\" was needed again straight after it ran, so something in it isn't getting made. See the stage for what failed and put it right, then continue."));
           } else {
             auto.last = Some(step);
             auto.step = step;
@@ -716,11 +758,10 @@ impl MusicVideoPage {
             }
           },
           Err(message) => {
-            // A one shot stops at the first failure and leaves the video where it got to.
-            if let Some(auto) = self.auto.take() {
-              self.error = Some(format!("One shot stopped at \"{}\": {message}", auto.step));
-            } else {
-              self.error = Some(message.clone());
+            // A one shot waits at the first failure for the user to put it right.
+            self.error = Some(message.clone());
+            if let Some(auto) = self.auto.as_mut() {
+              auto.snag = Some(message.clone());
             }
             notice = Some(Notice { error: true, message, library_changed: false });
           },
@@ -891,10 +932,17 @@ impl MusicVideoPage {
       if let Some(auto) = &self.auto {
         ui.add_space(6.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 54.0), Sense::hover());
-        ui.painter().rect(row, theme::RADIUS, theme::fade(theme::ACCENT, 0.12), egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
-        ui.painter().text(pos2(row.left() + 10.0, row.top() + 16.0), Align2::LEFT_CENTER, "ONE SHOT", FontId::new(10.0, theme::mono()), theme::ACCENT);
+        let snagged = auto.snag.is_some();
+        ui.painter().rect(row, theme::RADIUS, theme::fade(if snagged { theme::BAD } else { theme::ACCENT }, 0.12), egui::Stroke::new(1.0, if snagged { theme::BAD } else { theme::ACCENT }), egui::StrokeKind::Inside);
+        ui.painter().text(pos2(row.left() + 10.0, row.top() + 16.0), Align2::LEFT_CENTER, if snagged { "ONE SHOT \u{b7} NEEDS YOUR INPUT" } else { "ONE SHOT" }, FontId::new(10.0, theme::mono()), if snagged { theme::BAD } else { theme::ACCENT });
         ui.painter().text(pos2(row.left() + 10.0, row.bottom() - 16.0), Align2::LEFT_CENTER, auto.step, FontId::new(12.5, theme::medium()), theme::INK);
-        if widgets::button(ui, Some(Icon::X), "Stop after this stage", widgets::Kind::Secondary, ui.available_width(), 26.0).clicked() {
+        if snagged {
+          if widgets::button(ui, Some(Icon::Sparkles), "Continue one shot", widgets::Kind::Accent, ui.available_width(), 26.0).clicked() {
+            actions.push(Action::ResumeAuto);
+          }
+          ui.add_space(4.0);
+        }
+        if widgets::button(ui, Some(Icon::X), if snagged { "Stop the one shot" } else { "Stop after stage" }, widgets::Kind::Secondary, ui.available_width(), 26.0).clicked() {
           actions.push(Action::StopAuto);
         }
         ui.add_space(4.0);
@@ -988,16 +1036,20 @@ impl MusicVideoPage {
       Action::Go(stage) => self.go(stage),
       Action::OneShot => {
         let about = std::mem::take(&mut self.auto_about);
+        let settings = self.auto_settings.clone();
         self.apply(env, Action::New);
+        settings.apply_to(&mut self.project);
+        self.auto_settings = settings;
         self.auto_about = about.clone();
-        self.auto = Some(Auto { step: "Starting", last: None, about });
+        self.auto = Some(Auto { step: "Starting", last: None, about, snag: None });
       },
       Action::StopAuto => {
         self.auto = None;
       },
       Action::ResumeAuto => {
         self.error = None;
-        self.auto = Some(Auto { step: "Carrying on", last: None, about: self.auto_about.clone() });
+        let about = self.auto.as_ref().map_or_else(|| self.auto_about.clone(), |auto| auto.about.clone());
+        self.auto = Some(Auto { step: "Carrying on", last: None, about, snag: None });
       },
       Action::Trend => self.start(backend, 0, "Searching the web for something to write about\u{2026}", SongRequest::Trend { about: self.auto_about.clone() }),
       Action::Home => {

@@ -303,12 +303,15 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **One shot.** "One shot" on the front page starts a new video and takes it all the way without
   a button pressed: a scout searches the web (Gemini with Google Search) for something trending
   this week and turns it into a song idea, then the song is written and made, the music analysed,
-  the look designed, the brief written, the references drawn, the scenes planned, the stills and
-  clips made, the sung scenes lip-synced (when fal is connected) and the film cut, all at draft
-  quality with the current settings. An optional line says what it should be about. The rail
-  shows the step in hand with a Stop; it stops by itself at the first failure, or when a step
-  would have to run twice in a row, and leaves the video where it got to; "Continue one shot" in the rail takes any open video the rest
-  of the way, so a stopped run carries on once the cause is fixed.
+  the look designed, the brief written, the references and head shot drawn, the scenes planned,
+  the stills and clips made, the sung scenes lip-synced (when fal is connected) and the film cut.
+  The front page's One shot card settles what no one will be there to choose: what it should be
+  about, lip sync, song length, pace, picture shape, the cut's format and the quality. While it
+  works, a band across the top shows a bar of its thirteen steps, the step in hand and its
+  progress, the page follows the stage being worked on, and the stages are dimmed and take no
+  clicks. At a snag (a failed stage, or one needed twice in a row) the band turns red with "Needs
+  your input", the stages come back to put it right, and "Continue one shot" carries on;
+  "Continue one shot" in the rail also takes any video the rest of the way.
 - **The page opens on your videos.** Music Video starts with the list of every saved video, with
   its stage, date, scene count and cost; click one to open it, or start a new one. "All videos"
   at the top of the rail goes back to the list, saving the open video as it stands.

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align2, Color32, FontId, Rect, Sense, Ui, pos2, vec2};
 
 use super::workshop::Target;
-use super::{Action, Frames, MusicVideoPage, RESOLUTIONS, TIERS, kind_title};
+use super::{Action, Frames, MusicVideoPage, ONE_SHOT_STEPS, RESOLUTIONS, TIERS, kind_title};
 use crate::backend::local::library::file_url;
 use crate::backend::local::song::cut::{self, Aspect, Format, Grade};
 use crate::backend::local::song::plan::{self, Energy, Pace, SongLength};
@@ -44,8 +44,59 @@ const A_CENT: &str = "\u{2248} 1\u{a2}";
 /// Lyrics and briefs read best in a column, not the full width of a wide window.
 const TEXT_COLUMN: f32 = 760.0;
 
+/// The height of the band across the stage that says what a one shot is doing.
+const ONE_SHOT_BAND: f32 = 48.0;
+
 pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   ui.painter().rect(stage, theme::RADIUS, theme::fade(theme::INK, 0.012), theme::hairline(), egui::StrokeKind::Inside);
+  // A one shot works without anyone pressing the buttons, so it says so across the top of the
+  // stage: a spinner, what it is doing and how far it has got.
+  let whole = Rect::from_min_max(stage.min, panel_rect.max);
+  let (stage, panel_rect, working) = match &page.auto {
+    Some(auto) => {
+      let band = Rect::from_min_size(whole.min, vec2(whole.width(), ONE_SHOT_BAND));
+      let snag = auto.snag.clone();
+      let colour = if snag.is_some() { theme::BAD } else { theme::ACCENT };
+      ui.painter().rect_filled(band, theme::RADIUS, theme::fade(colour, 0.14));
+      // The macro bar: the steps of a one shot, those done filled in.
+      let at = ONE_SHOT_STEPS.iter().position(|step| *step == auto.step).unwrap_or(0);
+      let bar = Rect::from_min_max(pos2(band.left() + 16.0, band.top() + 10.0), pos2(band.right() - 16.0, band.top() + 16.0));
+      let gap = 3.0;
+      let width = (bar.width() - gap * (ONE_SHOT_STEPS.len() as f32 - 1.0)) / ONE_SHOT_STEPS.len() as f32;
+      for (n, step) in ONE_SHOT_STEPS.iter().enumerate() {
+        let piece = Rect::from_min_size(pos2(bar.left() + n as f32 * (width + gap), bar.top()), vec2(width, bar.height()));
+        let fill = if n < at { colour } else if n == at { theme::fade(colour, 0.55) } else { theme::fade(theme::INK, 0.12) };
+        ui.painter().rect_filled(piece, 2.0, fill);
+        ui.interact(piece, ui.id().with(("one-shot-step", n)), Sense::hover()).on_hover_text(*step);
+      }
+      let busy = page.busy();
+      let text_y = band.bottom() - 16.0;
+      if busy && snag.is_none() {
+        icons::paint_spinner(ui, Rect::from_center_size(pos2(band.left() + 24.0, text_y), vec2(16.0, 16.0)), colour);
+        ui.ctx().request_repaint();
+      }
+      let line = match &snag {
+        Some(why) => format!("Needs your input \u{b7} {}", why.lines().next().unwrap_or_default()),
+        None => format!("One shot \u{b7} step {} of {} \u{b7} {}", at + 1, ONE_SHOT_STEPS.len(), page.progress_line().or_else(|| page.sync_line()).unwrap_or_else(|| format!("{}\u{2026}", auto.step))),
+      };
+      let font = FontId::new(13.0, theme::medium());
+      ui.painter().text(pos2(band.left() + 42.0, text_y), Align2::LEFT_CENTER, fit_text(ui, &line, &font, band.width() - 60.0), font, theme::INK);
+      let below = pos2(whole.left(), band.bottom() + 8.0);
+      (Rect::from_min_max(below, stage.max), Rect::from_min_max(pos2(panel_rect.left(), below.y), panel_rect.max), snag.is_none())
+    },
+    None => (stage, panel_rect, false),
+  };
+  // While the one shot works the stages are only to watch: nothing in them takes a click, and
+  // they are dimmed to say so. When it needs input they come back.
+  ui.add_enabled_ui(!working, |ui| {
+    show_stage(page, ui, env, stage, panel_rect, actions);
+  });
+  if working {
+    ui.painter().rect_filled(Rect::from_min_max(stage.min, panel_rect.max), theme::RADIUS, theme::fade(theme::BG, 0.45));
+  }
+}
+
+fn show_stage(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, stage: Rect, panel_rect: Rect, actions: &mut Vec<Action>) {
   match page.stage {
     Stage::Idea => idea(page, ui, env, stage, panel_rect, actions),
     Stage::Lyrics => lyrics(page, ui, stage, panel_rect, actions),
@@ -90,6 +141,34 @@ pub(super) fn home(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
       ui.add_space(6.0);
       ui.label(label("What it should be about (optional)"));
       prompt_field(ui, "mv-auto-about", &mut page.auto_about, "Anything, or an area: tech, sport, a meme, the gorge\u{2026}");
+      // What a one shot decides up front, since no one is there to decide it stage by stage.
+      let settings = &mut page.auto_settings;
+      ui.add_space(8.0);
+      ui.checkbox(&mut settings.lip_sync, "The performer sings on camera (lip sync, needs fal)");
+      ui.add_space(6.0);
+      ui.label(label("Song length"));
+      length_choice(ui, &mut settings.song_length);
+      ui.add_space(6.0);
+      ui.label(label("Pace"));
+      if let Some(i) = segmented(ui, &Pace::ALL.map(Pace::label), Pace::ALL.iter().position(|p| *p == settings.pace).unwrap_or(1)) {
+        settings.pace = Pace::ALL[i];
+      }
+      ui.add_space(6.0);
+      ui.label(label("Picture"));
+      if let Some(i) = segmented(ui, &["16:9 wide", "9:16 tall"], usize::from(settings.aspect == Aspect::Tall)) {
+        settings.aspect = if i == 1 { Aspect::Tall } else { Aspect::Wide };
+      }
+      ui.add_space(6.0);
+      ui.label(label("Cut to"));
+      if let Some(i) = segmented(ui, &Format::ALL.map(Format::label), Format::ALL.iter().position(|f| *f == settings.format).unwrap_or(0)) {
+        settings.format = Format::ALL[i];
+      }
+      ui.add_space(6.0);
+      ui.label(label("Quality"));
+      if let Some(i) = segmented(ui, &Quality::ALL.map(Quality::label), Quality::ALL.iter().position(|q| *q == settings.quality).unwrap_or(0)) {
+        settings.quality = Quality::ALL[i];
+      }
+      ui.label(small("Final draws every still with the best models and films every clip on Veo 3.1 at once, with no draft to check first: several times the cost."));
     });
     ui.add_space(18.0);
     if videos.is_empty() {
