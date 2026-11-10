@@ -89,6 +89,10 @@ pub(super) enum Action {
   PlanScene(usize),
   /// Back to the list of videos.
   Home,
+  /// Back to the open video (the one a run is going on) from the list.
+  Watch,
+  /// Put a saved video away under Archived, or bring it back.
+  Archive(String, bool),
   /// Start a new video and take it all the way to a cut film, from a current trend.
   OneShot,
   /// Stop a one shot after the stage in hand.
@@ -371,6 +375,8 @@ pub struct MusicVideoPage {
   endings_asked: bool,
   /// The page's front: the list of videos, shown until one is opened or started.
   pub(super) home: bool,
+  /// Whether the front page's Archived list is open.
+  pub(super) show_archived: bool,
   /// One shot: the whole pipeline run without stopping, while this is set.
   pub(super) auto: Option<Auto>,
   /// What the one shot should be about, as typed on the front page.
@@ -395,7 +401,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), auto_settings: AutoSettings::default(), side_next: false, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, show_archived: false, auto: None, auto_about: String::new(), auto_settings: AutoSettings::default(), side_next: false, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -418,7 +424,10 @@ impl MusicVideoPage {
     if let Some(id) = std::mem::take(&mut self.open_on_start) {
       self.apply(env, Action::Open(id));
       // For screenshots: a scene to open in the editor.
-      if let Ok(demo) = std::env::var("ARTCRAFT_ONE_SHOT_DEMO") {
+      if std::env::var("ARTCRAFT_ONE_SHOT_DEMO").is_ok_and(|demo| demo.ends_with("-home")) {
+        self.home = true;
+      }
+      if let Ok(demo) = std::env::var("ARTCRAFT_ONE_SHOT_DEMO").map(|demo| demo.trim_end_matches("-home").to_owned()) {
         self.auto = Some(Auto { step: "Drawing the stills", last: Some("Drawing the stills"), about: String::new(), snag: (demo == "snag").then(|| "Drawing the stills: Vertex AI error 429".to_owned()), side: None, side_last: None });
         if demo != "snag" {
           self.run = Some(Run { id: 0, stage: self.stage, note: "Drawing stills\u{2026}".into(), started_as: String::new(), done: 9, total: 44, then_analyse: false, quality: self.project.quality, scenes: BTreeSet::new(), clips: false });
@@ -1119,6 +1128,18 @@ impl MusicVideoPage {
         self.auto = Some(Auto { step: "Carrying on", last: None, about, snag: None, side: None, side_last: None });
       },
       Action::Trend => self.start(backend, 0, "Searching the web for something to write about\u{2026}", SongRequest::Trend { about: self.auto_about.clone() }),
+      Action::Watch => {
+        self.home = false;
+      },
+      Action::Archive(id, archived) => {
+        if id == self.project.id {
+          self.project.archived = archived;
+          self.save(backend);
+        } else if let Err(err) = SongProject::set_archived(&library_dir, &id, archived) {
+          self.error = Some(format!("{err:#}"));
+        }
+        self.recent = None;
+      },
       Action::Home => {
         self.save(backend);
         self.home = true;

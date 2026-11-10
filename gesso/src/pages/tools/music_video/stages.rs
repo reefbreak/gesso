@@ -152,7 +152,77 @@ pub(super) fn home(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
         actions.push(Action::OneShot);
       }
     });
-    ui.add_space(8.0);
+    ui.add_space(18.0);
+    let archived: Vec<Summary> = videos.iter().filter(|v| v.archived).cloned().collect();
+    let videos: Vec<Summary> = videos.into_iter().filter(|v| !v.archived).collect();
+    if videos.is_empty() {
+      empty(ui, Icon::Film, "No videos yet", "Start one with New video. It is saved as you go and listed here.");
+    }
+    for summary in &videos {
+      // The video a run is going on can be opened to watch it; others wait for it to finish,
+      // since the run writes into the open video.
+      let running = summary.id == page.project.id && busy;
+      let openable = running || !busy;
+      let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), if openable { Sense::click() } else { Sense::hover() });
+      ui.painter().rect(row, theme::RADIUS, if resp.hovered() && openable { theme::WASH_HOVER } else { theme::WASH }, if running { egui::Stroke::new(1.0, theme::ACCENT) } else { theme::hairline() }, egui::StrokeKind::Inside);
+      let width = row.width() - 28.0;
+      let (title_font, meta_font) = (FontId::new(15.0, theme::medium()), FontId::new(11.5, theme::mono()));
+      ui.painter().text(pos2(row.left() + 14.0, row.top() + 19.0), Align2::LEFT_CENTER, fit_text(ui, &summary.title, &title_font, width - 90.0), title_font, theme::INK);
+      let scenes = if summary.shots == 0 { String::new() } else { format!(" \u{b7} {} scene{}", summary.shots, plural(summary.shots)) };
+      let state = match (running, page.auto.as_ref()) {
+        (true, Some(auto)) if auto.snag.is_some() => format!("One shot \u{b7} needs your input at {}", auto.step),
+        (true, Some(auto)) => format!("One shot running \u{b7} {}", page.progress_line().unwrap_or_else(|| auto.step.to_owned())),
+        (true, None) => page.progress_line().or_else(|| page.sync_line()).unwrap_or_else(|| "Working".to_owned()),
+        (false, _) => format!("{} \u{b7} {}{scenes}", summary.stage.label(), day(&summary.updated_at)),
+      };
+      if running {
+        icons::paint_spinner(ui, Rect::from_center_size(pos2(row.left() + 20.0, row.bottom() - 15.0), vec2(12.0, 12.0)), theme::ACCENT);
+        ui.ctx().request_repaint();
+      }
+      ui.painter().text(pos2(row.left() + if running { 32.0 } else { 14.0 }, row.bottom() - 15.0), Align2::LEFT_CENTER, fit_text(ui, &state, &meta_font, width - 110.0), meta_font, if running { theme::ACCENT } else { theme::MUTED });
+      ui.painter().text(pos2(row.right() - 50.0, row.center().y), Align2::RIGHT_CENTER, usd(page.cost_of_saved(env.backend, summary)), FontId::new(13.0, theme::mono()), theme::MUTED);
+      // Put away, out of the list; nothing is deleted.
+      let put_away = Rect::from_center_size(pos2(row.right() - 24.0, row.center().y), vec2(28.0, 28.0));
+      let archive = ui.put(put_away, |ui: &mut Ui| widgets::ghost(ui, Icon::Box, None, "Archive: put this video away under Archived. Nothing is deleted.", false));
+      if archive.clicked() && !running {
+        actions.push(Action::Archive(summary.id.clone(), true));
+      }
+      let resp = if openable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("A run is going on another video; it can be opened once that finishes.") };
+      if resp.clicked() && openable && !archive.hovered() {
+        actions.push(if running { Action::Watch } else { Action::Open(summary.id.clone()) });
+      }
+      ui.add_space(6.0);
+    }
+    if !archived.is_empty() {
+      ui.add_space(10.0);
+      ui.horizontal(|ui| {
+        widgets::hud(ui, &format!("Archived \u{b7} {}", archived.len()), theme::FAINT);
+        if widgets::ghost(ui, if page.show_archived { Icon::ChevronUp } else { Icon::ChevronDown }, Some(if page.show_archived { "Hide" } else { "Show" }), "Videos put away. They are kept whole and can be brought back.", false).clicked() {
+          page.show_archived = !page.show_archived;
+        }
+      });
+      if page.show_archived {
+        ui.add_space(6.0);
+        for summary in &archived {
+          let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), if busy { Sense::hover() } else { Sense::click() });
+          ui.painter().rect(row, theme::RADIUS, if resp.hovered() && !busy { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+          let font = FontId::new(14.0, theme::medium());
+          ui.painter().text(pos2(row.left() + 14.0, row.center().y), Align2::LEFT_CENTER, fit_text(ui, &summary.title, &font, row.width() - 200.0), font, theme::MUTED);
+          ui.painter().text(pos2(row.right() - 110.0, row.center().y), Align2::RIGHT_CENTER, format!("{} \u{b7} {}", summary.stage.label(), day(&summary.updated_at)), FontId::new(11.5, theme::mono()), theme::FAINT);
+          let bring_back = Rect::from_center_size(pos2(row.right() - 50.0, row.center().y), vec2(90.0, 26.0));
+          if ui.put(bring_back, |ui: &mut Ui| widgets::button(ui, Some(Icon::RotateCw), "Restore", widgets::Kind::Secondary, 90.0, 26.0)).clicked() {
+            actions.push(Action::Archive(summary.id.clone(), false));
+          }
+          if resp.clicked() && !busy {
+            actions.push(Action::Open(summary.id.clone()));
+          }
+          ui.add_space(6.0);
+        }
+      }
+    }
+    ui.add_space(18.0);
+    widgets::hud(ui, "One shot settings", theme::FAINT);
+    ui.add_space(6.0);
     card(ui, "One shot".to_owned(), |ui| {
       ui.label(small("Searches the web for something trending this week, writes a song about it, makes the song, the look, the storyboard, the stills, the clips, the lip sync and the cut, pressing every button for you at draft quality. It stops at the first thing that fails and leaves the video where it got to; the rail shows where it is and lets you stop it. Reckon on a few dollars and twenty minutes or so for a two-minute song."));
       ui.add_space(6.0);
@@ -187,25 +257,6 @@ pub(super) fn home(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
       }
       ui.label(small("Final draws every still with the best models and films every clip on Veo 3.1 at once, with no draft to check first: several times the cost."));
     });
-    ui.add_space(18.0);
-    if videos.is_empty() {
-      empty(ui, Icon::Film, "No videos yet", "Start one with New video. It is saved as you go and listed here.");
-      return;
-    }
-    for summary in &videos {
-      let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), if busy { Sense::hover() } else { Sense::click() });
-      ui.painter().rect(row, theme::RADIUS, if resp.hovered() && !busy { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
-      let width = row.width() - 28.0;
-      let (title_font, meta_font) = (FontId::new(15.0, theme::medium()), FontId::new(11.5, theme::mono()));
-      ui.painter().text(pos2(row.left() + 14.0, row.top() + 19.0), Align2::LEFT_CENTER, fit_text(ui, &summary.title, &title_font, width - 90.0), title_font, theme::INK);
-      let scenes = if summary.shots == 0 { String::new() } else { format!(" \u{b7} {} scene{}", summary.shots, plural(summary.shots)) };
-      ui.painter().text(pos2(row.left() + 14.0, row.bottom() - 15.0), Align2::LEFT_CENTER, fit_text(ui, &format!("{} \u{b7} {}{scenes}", summary.stage.label(), day(&summary.updated_at)), &meta_font, width - 90.0), meta_font, theme::MUTED);
-      ui.painter().text(pos2(row.right() - 14.0, row.center().y), Align2::RIGHT_CENTER, usd(page.cost_of_saved(env.backend, summary)), FontId::new(13.0, theme::mono()), theme::MUTED);
-      if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !busy {
-        actions.push(Action::Open(summary.id.clone()));
-      }
-      ui.add_space(6.0);
-    }
   });
 }
 

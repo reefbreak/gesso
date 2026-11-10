@@ -319,8 +319,12 @@ runs, and leaves everything it made editable before the next stage uses it.
   found, the look, the brief and the reference pictures are made in the second slot (they need
   the words, not the track), and the lip sync runs on fal while Veo makes the remaining clips.
 - **The page opens on your videos.** Music Video starts with the list of every saved video, with
-  its stage, date, scene count and cost; click one to open it, or start a new one. "All videos"
-  at the top of the rail goes back to the list, saving the open video as it stands.
+  its stage, date, scene count and cost; click one to open it, or start a new one. A video with
+  a run going on it is marked with a spinner and what it is doing (a one shot's step, or the
+  run's progress) and can be opened to watch; the others wait until the run finishes, since the
+  run writes into the open video. The box button on a row puts the video away under Archived,
+  kept whole, where it can be opened or restored. "All videos" at the top of the rail goes back
+  to the list, saving the open video as it stands. The one-shot settings sit under the list.
 - **Cost per video.** The left rail shows what the open video has cost so far, split into
   writing and planning, the song, reference images, scene images, clips and lip sync; the list on
   the Idea stage shows each saved video's cost. The all-time total for all videos, with a row per

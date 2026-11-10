@@ -479,6 +479,9 @@ pub struct SongProject {
   /// The video's files that are in the library already, so opening it adds only the rest.
   #[serde(default)]
   pub in_library: BTreeSet<PathBuf>,
+  /// Put away: listed under Archived on the front page, out of the way but kept whole.
+  #[serde(default)]
+  pub archived: bool,
   /// Where a one shot's idea came from: what was asked for and what the scout found.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub inspiration: Option<Inspiration>,
@@ -655,6 +658,7 @@ pub struct Summary {
   pub updated_at: String,
   pub stage: Stage,
   pub shots: usize,
+  pub archived: bool,
   /// What the video cost before its calls were counted one by one, once that's been worked
   /// out; until then, `made` is what to work it out from.
   pub earlier_cost: Option<Vec<(String, f64)>>,
@@ -719,7 +723,7 @@ impl SongProject {
     let Ok(entries) = std::fs::read_dir(library_dir.join(DIRECTORY)) else {
       return Vec::new();
     };
-    let mut out: Vec<Summary> = entries.flatten().filter_map(|entry| Self::load(library_dir, &entry.file_name().to_string_lossy())).map(|p| Summary { title: p.display_title(), made: if p.earlier_cost.is_none() { p.made(&p.dir(library_dir)) } else { Made::default() }, earlier_cost: p.earlier_cost, id: p.id, updated_at: p.updated_at, stage: p.stage, shots: p.shots.len() }).collect();
+    let mut out: Vec<Summary> = entries.flatten().filter_map(|entry| Self::load(library_dir, &entry.file_name().to_string_lossy())).map(|p| Summary { title: p.display_title(), archived: p.archived, made: if p.earlier_cost.is_none() { p.made(&p.dir(library_dir)) } else { Made::default() }, earlier_cost: p.earlier_cost, id: p.id, updated_at: p.updated_at, stage: p.stage, shots: p.shots.len() }).collect();
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
   }
@@ -810,6 +814,13 @@ impl SongProject {
     self.track = Some(take.track);
     let timed = take.timed;
     (self.grid, self.sections, self.read, self.lines, self.shots, self.vocals, self.cut, self.cut_of, self.share) = (timed.grid, timed.sections, timed.read, timed.lines, timed.shots, timed.vocals, timed.cut, timed.cut_of, timed.share);
+  }
+
+  /// Puts a saved video away, or brings it back: only its flag changes, nothing is deleted.
+  pub fn set_archived(library_dir: &Path, id: &str, archived: bool) -> anyhow::Result<()> {
+    let mut project = Self::load(library_dir, id).ok_or_else(|| anyhow::anyhow!("No video {id}"))?;
+    project.archived = archived;
+    project.save(library_dir)
   }
 
   /// Lists the song files in `dir`, the project's folder, that no take accounts for: songs
