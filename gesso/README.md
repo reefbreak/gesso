@@ -322,6 +322,9 @@ runs, and leaves everything it made editable before the next stage uses it.
 - **Errors name the account.** When a provider refuses for money or quota, the error opens by
   naming the account ("Gemini API key: out of credit or over its spending limit", "Google Cloud
   project: rate limit, not money") so the right one is topped up, or left alone.
+- **A song falls back to Google Cloud.** Songs go through the Gemini API key when one is set;
+  if its prepaid credit is spent (402), the song is asked of Vertex AI on the Cloud project
+  instead, and charged there.
 - **The Gemini API key is an account of its own.** Songs made through the key, and pictures it
   makes when Vertex has no capacity, are charged to "Gemini API key" on System Health and in the
   top bar's spend list, apart from Google Cloud, so the key's prepaid balance can be watched.

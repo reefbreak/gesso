@@ -206,7 +206,11 @@ impl VertexClient {
   /// through the Gemini API when a Gemini API key is set, else through Vertex.
   pub async fn generate_song(&self, models: &[&str], prompt: &str) -> anyhow::Result<Song> {
     if let Some(key) = self.config.gemini_api_key.as_deref() {
-      return self.generate_song_with_key(key, models, prompt).await;
+      match self.generate_song_with_key(key, models, prompt).await {
+        // The key's prepaid balance is spent: the Cloud project can still make the song.
+        Err(err) if is_out_of_credit(&err) && self.config.gcp_project.is_some() => warn!("The Gemini API key is out of credit; asking Vertex for the song instead: {err:#}"),
+        result => return result,
+      }
     }
     let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Lyria needs a Google Cloud project in local_providers.json"))?;
     let base = format!("{}v1beta1/projects/{project}/locations/{OMNI_LOCATION}/interactions", self.host(OMNI_LOCATION));
@@ -749,6 +753,12 @@ fn refused_format_field(err: &anyhow::Error, body: &Value) -> Option<&'static st
 }
 
 /// Whether Vertex turned the request away for quota or shared capacity.
+/// Whether an account has no money left for the request (as against no room right now).
+fn is_out_of_credit(err: &anyhow::Error) -> bool {
+  let message = format!("{err:#}").to_lowercase();
+  message.contains(" 402 ") || ["credits are depleted", "payment required", "exhausted balance", "insufficient balance", "billing"].iter().any(|sign| message.contains(sign))
+}
+
 fn is_out_of_capacity(err: &anyhow::Error) -> bool {
   let text = err.to_string();
   text.contains("error 429") || text.contains("RESOURCE_EXHAUSTED")
@@ -899,6 +909,9 @@ mod tests {
       assert_eq!(song_body("lyria-3.5", "a song", true), json!({ "model": "lyria-3.5", "input": "a song", "background": true, "store": true }));
       assert_eq!(song_body("lyria-3.5", "a song", false), json!({ "model": "lyria-3.5", "input": "a song" }));
       assert!(refuses_background(&anyhow::anyhow!("Vertex AI error 400 Bad Request: background is not supported for this model")));
+      // No money is not the same as no room: the first goes to the other account, the second waits.
+      assert!(is_out_of_credit(&anyhow::anyhow!("Gemini API key error 402 Payment Required: Your prepayment credits are depleted.")));
+      assert!(!is_out_of_credit(&anyhow::anyhow!("Vertex AI error 429 Too Many Requests: Resource exhausted")));
       assert!(!refuses_background(&anyhow::anyhow!("Vertex AI error 403 Forbidden: permission denied")));
     }
 
