@@ -870,7 +870,7 @@ impl MusicVideoPage {
         self.save(backend);
         if let Some(project) = SongProject::load(&library_dir, &id) {
           let stage = if project.reachable(project.stage) { project.stage } else { project.furthest() };
-          *self = Self { project, stage, writer: self.writer, tier: self.tier, resolution: self.resolution, ..Self::default() };
+          *self = Self { project, stage, writer: self.writer, tier: self.tier, resolution: self.resolution, home: false, ..Self::default() };
           // Songs made before earlier takes were kept are still in the folder: list them.
           let dir = self.project.dir(&library_dir);
           self.project.adopt_song_files(&dir);
