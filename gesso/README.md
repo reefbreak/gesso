@@ -223,7 +223,8 @@ runs, and leaves everything it made editable before the next stage uses it.
   place, light and outfit), and the clip is filmed from one frame to the other. It is part of
   the lineage: it waits for its opening still, a redrawn opening puts it out of date, the clip
   waits for both and goes out of date when either changes, and the final pass redraws it from
-  the draft. Drawing it is on for every scene; "Draw the ending frame and film to it" turns it
+  the draft. On the storyboard the ending shows as an inset in the card's corner: double-click the inset
+  to see it full size, the rest of the card for the opening. Drawing it is on for every scene; "Draw the ending frame and film to it" turns it
   off for one scene, which keeps its description and is filmed from the opening frame alone.
   An ending frame is a second still per scene, so the stills cost about twice as much. One run
   draws both: the openings first, then each ending matched to its new opening. The draw button
@@ -307,6 +308,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   files in its folder, every version included, and that part is marked as an estimate: it leaves
   out the writer's calls and anything that failed or was deleted, and prices clips at the default
   model for their pass.
+- **Errors name the account.** When a provider refuses for money or quota, the error opens by
+  naming the account ("Gemini API key: out of credit or over its spending limit", "Google Cloud
+  project: rate limit, not money") so the right one is topped up, or left alone.
 - **The Gemini API key is an account of its own.** Songs made through the key, and pictures it
   makes when Vertex has no capacity, are charged to "Gemini API key" on System Health and in the
   top bar's spend list, apart from Google Cloud, so the key's prepaid balance can be watched.
