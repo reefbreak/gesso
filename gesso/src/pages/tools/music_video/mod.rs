@@ -214,7 +214,17 @@ pub(super) struct Auto {
   pub about: String,
   /// Why the run is waiting for the user: a stage failed, or kept being needed.
   pub snag: Option<String>,
+  /// The look step running beside the song (in the second slot), if one is.
+  pub side: Option<&'static str>,
+  /// The last look step started beside the song, so one that makes nothing isn't restarted.
+  side_last: Option<&'static str>,
 }
+
+/// The steps that need the idea and the words but not the track, so they can run while Lyria
+/// makes the song and the beat is found: the look, the brief and the reference pictures.
+const LOOK_STEPS: [&str; 4] = ["Designing the look", "Writing the brief", "Drawing reference images", "Drawing the head shot"];
+/// The steps that take the track from Lyria to the beat grid.
+const TRACK_STEPS: [&str; 2] = ["Making the song", "Analysing the music"];
 
 /// The steps a one shot takes, in order, for the progress bar.
 pub(super) const ONE_SHOT_STEPS: [&str; 13] = ["Finding a trend", "Writing the song", "Making the song", "Analysing the music", "Designing the look", "Writing the brief", "Drawing reference images", "Drawing the head shot", "Planning the scenes", "Drawing the stills", "Making the clips", "Lip-syncing", "Cutting the film"];
@@ -367,6 +377,8 @@ pub struct MusicVideoPage {
   pub(super) auto_about: String,
   /// How a one shot's video is set up before it starts.
   pub(super) auto_settings: AutoSettings,
+  /// While set, a started run goes in the second slot (a one shot's look work beside the song).
+  side_next: bool,
   /// What the director asks of the scene being written again.
   pub(super) scene_note: String,
   /// The earlier version of the selected scene that is open, by its place in the scene's list.
@@ -383,7 +395,7 @@ pub struct MusicVideoPage {
 
 impl Default for MusicVideoPage {
   fn default() -> Self {
-    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), auto_settings: AutoSettings::default(), scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
+    Self { project: SongProject::new(), stage: Stage::Idea, run: None, sync: None, error: None, analysis_note: None, recent: None, writer: Writer::default(), notes: String::new(), instrumental: false, tier: DEFAULT_TIERS, resolution: DEFAULT_RESOLUTIONS, selected: None, better_redraw: false, picked: BTreeSet::new(), player: None, workshop: None, reference_changes: Vec::new(), pending_slots: Vec::new(), pending_cut: None, dirty_since: None, open_on_start: None, home: true, auto: None, auto_about: String::new(), auto_settings: AutoSettings::default(), side_next: false, scene_note: String::new(), viewing_scene_version: None, viewing_plan: None, viewing_take: None, viewing_lyrics: None, endings_asked: false, costs: None }
   }
 }
 
@@ -407,7 +419,7 @@ impl MusicVideoPage {
       self.apply(env, Action::Open(id));
       // For screenshots: a scene to open in the editor.
       if let Ok(demo) = std::env::var("ARTCRAFT_ONE_SHOT_DEMO") {
-        self.auto = Some(Auto { step: "Drawing the stills", last: Some("Drawing the stills"), about: String::new(), snag: (demo == "snag").then(|| "Drawing the stills: Vertex AI error 429".to_owned()) });
+        self.auto = Some(Auto { step: "Drawing the stills", last: Some("Drawing the stills"), about: String::new(), snag: (demo == "snag").then(|| "Drawing the stills: Vertex AI error 429".to_owned()), side: None, side_last: None });
         if demo != "snag" {
           self.run = Some(Run { id: 0, stage: self.stage, note: "Drawing stills\u{2026}".into(), started_as: String::new(), done: 9, total: 44, then_analyse: false, quality: self.project.quality, scenes: BTreeSet::new(), clips: false });
         }
@@ -421,8 +433,32 @@ impl MusicVideoPage {
     }
     let mut actions = Vec::new();
     // One shot: as each stage finishes, the next starts.
-    if self.auto.as_ref().is_some_and(|auto| auto.snag.is_none()) && !self.busy() {
+    // While Lyria makes the song and the beat is found, the look, brief and reference pictures
+    // are made beside them in the second slot: different services, so neither waits.
+    if self.auto.as_ref().is_some_and(|auto| auto.snag.is_none() && auto.side.is_none()) && self.sync.is_none() && self.run.is_some() && self.auto.as_ref().is_some_and(|auto| TRACK_STEPS.contains(&auto.step)) {
+      if let Some((step, _, action)) = self.look_step() {
+        let auto = self.auto.as_mut().unwrap();
+        if auto.side_last != Some(step) {
+          auto.side_last = Some(step);
+          auto.side = Some(step);
+          self.side_next = true;
+          self.apply(env, action);
+          self.side_next = false;
+          if self.sync.is_none() {
+            // Nothing was started: let the main run pick it up later.
+            if let Some(auto) = self.auto.as_mut() {
+              auto.side = None;
+            }
+          }
+        }
+      }
+    }
+    if self.auto.as_ref().is_some_and(|auto| auto.snag.is_none()) && self.run.is_none() {
       match self.auto_step(env.backend) {
+        // A look step in hand beside the song is left to finish there.
+        Some((step, _, _)) if self.auto.as_ref().is_some_and(|auto| auto.side.is_some()) && LOOK_STEPS.contains(&step) => {},
+        // A lip sync waits for the clips, which the main slot makes; it runs beside them.
+        Some((step, _, _)) if step == "Lip-syncing" && self.sync.is_some() => {},
         Some((step, stage, action)) => {
           let auto = self.auto.as_mut().unwrap();
           if auto.last == Some(step) {
@@ -437,10 +473,11 @@ impl MusicVideoPage {
             actions.push(action);
           }
         },
-        None => {
+        None if self.sync.is_none() => {
           self.auto = None;
           self.go(Stage::Final);
         },
+        None => {},
       }
     }
     // Every scene has an ending frame: ones planned before that was so are given theirs when
@@ -466,6 +503,30 @@ impl MusicVideoPage {
       self.apply(env, action);
     }
     self.autosave(ui, env.backend);
+  }
+
+  /// The look step a one shot can take beside the song: what the video lacks of the look, the
+  /// brief and the reference pictures, which need the words but not the track.
+  fn look_step(&self) -> Option<(&'static str, Stage, Action)> {
+    let project = &self.project;
+    if project.lyrics.trim().is_empty() {
+      return None;
+    }
+    if project.visual.is_none() {
+      return Some(("Designing the look", Stage::Style, Action::Style));
+    }
+    if project.brief.is_none() {
+      return Some(("Writing the brief", Stage::Brief, Action::Brief));
+    }
+    let missing: Vec<usize> = project.references.iter().enumerate().filter(|(_, r)| r.image.is_none()).map(|(i, _)| i).collect();
+    let (faces, others): (Vec<usize>, Vec<usize>) = missing.iter().partition(|i| project.references[**i].kind == ReferenceKind::Face);
+    if !others.is_empty() {
+      return Some(("Drawing reference images", Stage::References, Action::References(others)));
+    }
+    if !faces.is_empty() {
+      return Some(("Drawing the head shot", Stage::References, Action::References(faces)));
+    }
+    None
   }
 
   /// The next stage a one shot has to take, by what the video still lacks, with its name for the
@@ -746,6 +807,11 @@ impl MusicVideoPage {
       },
       SongUpdate::Done(result) => {
         let finished = self.slot(sync).take();
+        if sync {
+          if let Some(auto) = self.auto.as_mut() {
+            auto.side = None;
+          }
+        }
         if let Some(workshop) = self.workshop.as_mut().filter(|w| w.waiting) {
           workshop.waiting = false;
           workshop.error = result.as_ref().err().cloned();
@@ -1041,7 +1107,7 @@ impl MusicVideoPage {
         settings.apply_to(&mut self.project);
         self.auto_settings = settings;
         self.auto_about = about.clone();
-        self.auto = Some(Auto { step: "Starting", last: None, about, snag: None });
+        self.auto = Some(Auto { step: "Starting", last: None, about, snag: None, side: None, side_last: None });
       },
       Action::StopAuto => {
         self.auto = None;
@@ -1049,7 +1115,7 @@ impl MusicVideoPage {
       Action::ResumeAuto => {
         self.error = None;
         let about = self.auto.as_ref().map_or_else(|| self.auto_about.clone(), |auto| auto.about.clone());
-        self.auto = Some(Auto { step: "Carrying on", last: None, about, snag: None });
+        self.auto = Some(Auto { step: "Carrying on", last: None, about, snag: None, side: None, side_last: None });
       },
       Action::Trend => self.start(backend, 0, "Searching the web for something to write about\u{2026}", SongRequest::Trend { about: self.auto_about.clone() }),
       Action::Home => {
@@ -1389,6 +1455,13 @@ impl MusicVideoPage {
   }
 
   fn start(&mut self, backend: &Backend, total: usize, note: &str, request: SongRequest) {
+    // A one shot's look work goes in the second slot while the song is made in the first.
+    if self.side_next {
+      if self.sync.is_none() {
+        self.launch(backend, true, BTreeSet::new(), total, note, request);
+      }
+      return;
+    }
     if self.busy() {
       return;
     }

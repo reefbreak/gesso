@@ -312,6 +312,9 @@ runs, and leaves everything it made editable before the next stage uses it.
   clicks. At a snag (a failed stage, or one needed twice in a row) the band turns red with "Needs
   your input", the stages come back to put it right, and "Continue one shot" carries on;
   "Continue one shot" in the rail also takes any video the rest of the way.
+  Work on different services runs side by side: while Lyria makes the song and the beat is
+  found, the look, the brief and the reference pictures are made in the second slot (they need
+  the words, not the track), and the lip sync runs on fal while Veo makes the remaining clips.
 - **The page opens on your videos.** Music Video starts with the list of every saved video, with
   its stage, date, scene count and cost; click one to open it, or start a new one. "All videos"
   at the top of the rail goes back to the list, saving the open video as it stands.

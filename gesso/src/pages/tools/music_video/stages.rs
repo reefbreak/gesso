@@ -77,7 +77,10 @@ pub(super) fn show(page: &mut MusicVideoPage, ui: &mut Ui, env: &mut Env<'_>, st
       }
       let line = match &snag {
         Some(why) => format!("Needs your input \u{b7} {}", why.lines().next().unwrap_or_default()),
-        None => format!("One shot \u{b7} step {} of {} \u{b7} {}", at + 1, ONE_SHOT_STEPS.len(), page.progress_line().or_else(|| page.sync_line()).unwrap_or_else(|| format!("{}\u{2026}", auto.step))),
+        None => {
+          let beside = auto.side.map(|side| format!(" \u{b7} beside it: {}", page.sync_line().unwrap_or_else(|| side.to_owned()))).unwrap_or_default();
+          format!("One shot \u{b7} step {} of {} \u{b7} {}{beside}", at + 1, ONE_SHOT_STEPS.len(), page.progress_line().or_else(|| page.sync_line()).unwrap_or_else(|| format!("{}\u{2026}", auto.step)))
+        },
       };
       let font = FontId::new(13.0, theme::medium());
       ui.painter().text(pos2(band.left() + 42.0, text_y), Align2::LEFT_CENTER, fit_text(ui, &line, &font, band.width() - 60.0), font, theme::INK);
