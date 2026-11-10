@@ -307,7 +307,8 @@ runs, and leaves everything it made editable before the next stage uses it.
   clips made, the sung scenes lip-synced (when fal is connected) and the film cut, all at draft
   quality with the current settings. An optional line says what it should be about. The rail
   shows the step in hand with a Stop; it stops by itself at the first failure, or when a step
-  would have to run twice in a row, and leaves the video where it got to for you to carry on.
+  would have to run twice in a row, and leaves the video where it got to; "One shot from here" in the rail takes any open video the rest
+  of the way, so a stopped run carries on once the cause is fixed.
 - **The page opens on your videos.** Music Video starts with the list of every saved video, with
   its stage, date, scene count and cost; click one to open it, or start a new one. "All videos"
   at the top of the rail goes back to the list, saving the open video as it stands.

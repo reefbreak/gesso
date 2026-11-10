@@ -93,6 +93,8 @@ pub(super) enum Action {
   OneShot,
   /// Stop a one shot after the stage in hand.
   StopAuto,
+  /// Take the open video the rest of the way, from where it is.
+  ResumeAuto,
   /// Find a current trend to write about.
   Trend,
   /// Keep a scene as it stands among its earlier versions.
@@ -887,6 +889,16 @@ impl MusicVideoPage {
           actions.push(Action::StopAuto);
         }
         ui.add_space(4.0);
+      } else {
+        // The rest of the way without the buttons, from wherever the video is: after a stopped
+        // one shot, or a video made by hand so far.
+        ui.add_space(6.0);
+        ui.add_enabled_ui(!self.busy(), |ui| {
+          if widgets::button(ui, Some(Icon::Sparkles), "One shot from here", widgets::Kind::Secondary, ui.available_width(), 26.0).on_hover_text("Takes every remaining stage in turn, at the current quality, until the film is cut. Stops at the first failure.").clicked() {
+            actions.push(Action::ResumeAuto);
+          }
+        });
+        ui.add_space(4.0);
       }
       ui.add_space(6.0);
       ui.label(widgets::heading(&self.project.display_title(), 18.0));
@@ -973,6 +985,10 @@ impl MusicVideoPage {
       },
       Action::StopAuto => {
         self.auto = None;
+      },
+      Action::ResumeAuto => {
+        self.error = None;
+        self.auto = Some(Auto { step: "Carrying on", last: None, about: self.auto_about.clone() });
       },
       Action::Trend => self.start(backend, 0, "Searching the web for something to write about\u{2026}", SongRequest::Trend { about: self.auto_about.clone() }),
       Action::Home => {
